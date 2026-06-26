@@ -202,8 +202,14 @@ pub fn download_to_cache(
         url,
     ]);
 
-    let output = std::process::Command::new(&yt_dlp)
-        .args(&args)
+    let mut cmd = std::process::Command::new(&yt_dlp);
+    cmd.args(&args);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let output = cmd
         .output()
         .map_err(|e| format!("yt-dlp spawn error: {e}"))?;
 
@@ -251,7 +257,14 @@ pub fn spawn_prefetch(video_id: String, title: String, artist: String) {
         ]);
 
         eprintln!("[cache-prefetch] Starting background download: {video_id}");
-        match std::process::Command::new(&yt_dlp).args(&args).output() {
+        let mut cmd = std::process::Command::new(&yt_dlp);
+        cmd.args(&args);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        match cmd.output() {
             Ok(out) if out.status.success() => {
                 // Commit (brief lock)
                 if let Ok(mut cache) = AudioCache::global().lock() {

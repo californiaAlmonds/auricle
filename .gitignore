@@ -1,22 +1,15 @@
 # ── Rust / Cargo ──────────────────────────────────────────────
 /target/
 **/target/
-src-tauri/target/
-src-tauri/target-native/
-src-tauri/target-native-slint/
 **/*.rs.bk
 *.pdb
 
-# ── Tauri generated ───────────────────────────────────────────
-src-tauri/gen/
-
 # ── Downloaded optional add-ons (yt-dlp / ffmpeg) ─────────────
 # These third-party tools are never bundled or committed.
-src-tauri/bin/
+/bin/
 
 # ── Build / log artifacts ─────────────────────────────────────
 build_output.txt
-src-tauri/build_out.txt
 *.log
 
 # ── Environment / secrets ─────────────────────────────────────

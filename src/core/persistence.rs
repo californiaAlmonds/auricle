@@ -1,8 +1,8 @@
 /// Persistence layer for history, liked songs, and disliked songs.
-/// Data is stored as JSON files in `%LOCALAPPDATA%\ytm-native\`.
+/// Data is stored as JSON files in `%LOCALAPPDATA%\auricle\`.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -50,15 +50,34 @@ pub struct UserData {
 pub struct AppSettings {
     pub minimize_to_tray: bool,
     pub last_played: Option<StoredSong>,
+    #[serde(default)]
+    pub onboarding_seen: bool,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
-        Self { minimize_to_tray: true, last_played: None }
+        Self { minimize_to_tray: true, last_played: None, onboarding_seen: false }
     }
 }
 
 fn data_dir() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        let base = std::env::var("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."));
+        base.join("auricle")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
+        home.join(".auricle")
+    }
+}
+
+/// Legacy data directory used by older builds (`ytm-native`). Its contents are
+/// migrated into [`data_dir`] on startup, after which it is removed.
+fn legacy_data_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
         let base = std::env::var("LOCALAPPDATA")
@@ -71,6 +90,53 @@ fn data_dir() -> PathBuf {
         let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
         home.join(".ytm-native")
     }
+}
+
+/// Recursively move `src` into `dest`, merging directories. Files already present
+/// at `dest` are kept (the legacy copy is discarded). Empty source directories are
+/// removed as they are drained.
+fn merge_move(src: &Path, dest: &Path) {
+    if src.is_dir() {
+        let _ = std::fs::create_dir_all(dest);
+        if let Ok(entries) = std::fs::read_dir(src) {
+            for entry in entries.flatten() {
+                let from = entry.path();
+                let to = dest.join(entry.file_name());
+                merge_move(&from, &to);
+            }
+        }
+        let _ = std::fs::remove_dir(src);
+    } else if !dest.exists() {
+        if let Some(parent) = dest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Fast path: rename; fall back to copy+delete across volumes.
+        if std::fs::rename(src, dest).is_err() && std::fs::copy(src, dest).is_ok() {
+            let _ = std::fs::remove_file(src);
+        }
+    } else {
+        // Destination already has this file — drop the legacy duplicate.
+        let _ = std::fs::remove_file(src);
+    }
+}
+
+/// Unify storage: migrate everything from the legacy `ytm-native` directory into
+/// the canonical `auricle` directory, then delete the legacy directory. Existing
+/// files in the new location take precedence. Safe (and cheap) to call on every
+/// startup — a no-op once the legacy directory is gone.
+pub fn migrate_legacy_dir() {
+    let legacy = legacy_data_dir();
+    if !legacy.exists() {
+        return;
+    }
+    let new = data_dir();
+    if legacy == new {
+        return;
+    }
+    let _ = std::fs::create_dir_all(&new);
+    merge_move(&legacy, &new);
+    // Remove the legacy directory and anything left behind (e.g. duplicates).
+    let _ = std::fs::remove_dir_all(&legacy);
 }
 
 fn data_path() -> PathBuf {

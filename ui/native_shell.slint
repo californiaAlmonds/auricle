@@ -69,6 +69,38 @@ component IconBtn inherits Rectangle {
     ta := TouchArea { clicked => { root.clicked(); } }
 }
 
+// Slim progress bar for add-on installs. `value` in 0.0..=1.0 shows a determinate
+// fill; a negative `value` shows an indeterminate sliding segment.
+component AddonProgress inherits Rectangle {
+    in property <float> value: 0.0;
+    property <bool> indeterminate: root.value < 0.0;
+    property <bool> anim-toggle: false;
+    height: 6px; border-radius: 3px; background: #2a2a2a;
+    clip: true;
+
+    // Determinate fill
+    if !root.indeterminate: Rectangle {
+        x: 0; y: 0; height: parent.height; border-radius: 3px;
+        width: parent.width * max(0.0, min(1.0, root.value));
+        background: #e85d5d;
+        animate width { duration: 120ms; easing: ease-out; }
+    }
+
+    // Indeterminate sliding segment
+    if root.indeterminate: Rectangle {
+        y: 0; height: parent.height; border-radius: 3px;
+        width: parent.width * 0.35;
+        background: #e85d5d;
+        x: root.anim-toggle ? (parent.width - self.width) : 0px;
+        animate x { duration: 900ms; easing: ease-in-out; }
+    }
+    timer := Timer {
+        interval: 900ms;
+        running: root.indeterminate;
+        triggered => { root.anim-toggle = !root.anim-toggle; }
+    }
+}
+
 component NavBtn inherits Rectangle {
     in property <string> label; in property <image> nav-icon; in property <bool> active;
     callback clicked();
@@ -596,9 +628,15 @@ export component NativeShellWindow inherits Window {
     in-out property <bool> ffmpeg-installed: false;
     in-out property <bool> addon-busy: false;
     in-out property <string> addon-status: "";
+    in-out property <string> addon-installing: "";   // "ytdlp" | "ffmpeg" | ""
+    in-out property <float> addon-progress: 0.0;      // 0.0–1.0, negative = indeterminate
     callback install-ytdlp();
     callback install-ffmpeg();
     callback refresh-addons();
+
+    // First-run onboarding popup for add-on installation.
+    in-out property <bool> show-onboarding: false;
+    callback dismiss-onboarding();
 
     in-out property <string> window-title: "Auricle";
     title: window-title;
@@ -2284,32 +2322,72 @@ export component NativeShellWindow inherits Window {
                                             font-size: 12px; color: #6a6a6a; wrap: word-wrap;
                                         }
                                         // yt-dlp row
-                                        HorizontalLayout { spacing: 12px;
-                                            VerticalLayout { alignment: center; spacing: 2px; horizontal-stretch: 1;
-                                                Text { text: "yt-dlp"; font-size: 14px; color: #c0c0c0; }
-                                                Text { text: "Required for audio streaming and downloads."; font-size: 12px; color: #5a5a5a; }
+                                        VerticalLayout { spacing: 10px;
+                                            HorizontalLayout { spacing: 12px;
+                                                VerticalLayout { alignment: center; spacing: 2px; horizontal-stretch: 1;
+                                                    Text { text: "yt-dlp"; font-size: 14px; color: #c0c0c0; }
+                                                    Text { text: "Required for audio streaming and downloads."; font-size: 12px; color: #5a5a5a; }
+                                                }
+                                                if ytdlp-installed && addon-installing != "ytdlp": HorizontalLayout { spacing: 10px; alignment: end;
+                                                    Text { text: "✓ Installed"; font-size: 13px; color: #4a9d5a; vertical-alignment: center; }
+                                                    Rectangle {
+                                                        width: 104px; height: 32px; border-radius: 8px;
+                                                        background: addon-busy ? #181818 : (yt-rep-ta.has-hover ? #242424 : transparent);
+                                                        border-color: #333333; border-width: 1px;
+                                                        animate background { duration: 100ms; }
+                                                        Text { text: "Repair install"; font-size: 12px; color: addon-busy ? #5a5a5a : #c0c0c0; horizontal-alignment: center; vertical-alignment: center; }
+                                                        yt-rep-ta := TouchArea { clicked => { if !addon-busy { install-ytdlp(); } } }
+                                                    }
+                                                }
+                                                if !ytdlp-installed && addon-installing != "ytdlp": Rectangle {
+                                                    width: 92px; height: 32px; border-radius: 8px;
+                                                    background: addon-busy ? #181818 : (yt-ins-ta.has-hover ? #f06a6a : #e85d5d);
+                                                    animate background { duration: 100ms; }
+                                                    Text { text: "Install"; font-size: 13px; color: addon-busy ? #5a5a5a : #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+                                                    yt-ins-ta := TouchArea { clicked => { if !addon-busy { install-ytdlp(); } } }
+                                                }
                                             }
-                                            if ytdlp-installed: Text { text: "✓ Installed"; font-size: 13px; color: #4a9d5a; vertical-alignment: center; }
-                                            if !ytdlp-installed: Rectangle {
-                                                width: 92px; height: 32px; border-radius: 8px;
-                                                background: addon-busy ? #181818 : #2a2a2a;
-                                                Text { text: "Install"; font-size: 13px; color: addon-busy ? #5a5a5a : #ffffff; horizontal-alignment: center; vertical-alignment: center; }
-                                                TouchArea { clicked => { if !addon-busy { install-ytdlp(); } } }
+                                            if addon-installing == "ytdlp": HorizontalLayout { spacing: 10px; alignment: center;
+                                                AddonProgress { value: addon-progress; horizontal-stretch: 1; }
+                                                Text {
+                                                    text: addon-progress < 0 ? "…" : (Math.round(addon-progress * 100) + "%");
+                                                    width: 40px; font-size: 11px; color: #8a8a8a; vertical-alignment: center;
+                                                }
                                             }
                                         }
                                         Rectangle { height: 1px; background: #1a1a1a; }
                                         // ffmpeg row
-                                        HorizontalLayout { spacing: 12px;
-                                            VerticalLayout { alignment: center; spacing: 2px; horizontal-stretch: 1;
-                                                Text { text: "ffmpeg"; font-size: 14px; color: #c0c0c0; }
-                                                Text { text: "Optional. Improves format handling for downloads."; font-size: 12px; color: #5a5a5a; }
+                                        VerticalLayout { spacing: 10px;
+                                            HorizontalLayout { spacing: 12px;
+                                                VerticalLayout { alignment: center; spacing: 2px; horizontal-stretch: 1;
+                                                    Text { text: "ffmpeg"; font-size: 14px; color: #c0c0c0; }
+                                                    Text { text: "Optional. Improves format handling for downloads."; font-size: 12px; color: #5a5a5a; }
+                                                }
+                                                if ffmpeg-installed && addon-installing != "ffmpeg": HorizontalLayout { spacing: 10px; alignment: end;
+                                                    Text { text: "✓ Installed"; font-size: 13px; color: #4a9d5a; vertical-alignment: center; }
+                                                    Rectangle {
+                                                        width: 104px; height: 32px; border-radius: 8px;
+                                                        background: addon-busy ? #181818 : (ff-rep-ta.has-hover ? #242424 : transparent);
+                                                        border-color: #333333; border-width: 1px;
+                                                        animate background { duration: 100ms; }
+                                                        Text { text: "Repair install"; font-size: 12px; color: addon-busy ? #5a5a5a : #c0c0c0; horizontal-alignment: center; vertical-alignment: center; }
+                                                        ff-rep-ta := TouchArea { clicked => { if !addon-busy { install-ffmpeg(); } } }
+                                                    }
+                                                }
+                                                if !ffmpeg-installed && addon-installing != "ffmpeg": Rectangle {
+                                                    width: 92px; height: 32px; border-radius: 8px;
+                                                    background: addon-busy ? #181818 : (ff-ins-ta.has-hover ? #333333 : #2a2a2a);
+                                                    animate background { duration: 100ms; }
+                                                    Text { text: "Install"; font-size: 13px; color: addon-busy ? #5a5a5a : #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+                                                    ff-ins-ta := TouchArea { clicked => { if !addon-busy { install-ffmpeg(); } } }
+                                                }
                                             }
-                                            if ffmpeg-installed: Text { text: "✓ Installed"; font-size: 13px; color: #4a9d5a; vertical-alignment: center; }
-                                            if !ffmpeg-installed: Rectangle {
-                                                width: 92px; height: 32px; border-radius: 8px;
-                                                background: addon-busy ? #181818 : #2a2a2a;
-                                                Text { text: "Install"; font-size: 13px; color: addon-busy ? #5a5a5a : #ffffff; horizontal-alignment: center; vertical-alignment: center; }
-                                                TouchArea { clicked => { if !addon-busy { install-ffmpeg(); } } }
+                                            if addon-installing == "ffmpeg": HorizontalLayout { spacing: 10px; alignment: center;
+                                                AddonProgress { value: addon-progress; horizontal-stretch: 1; }
+                                                Text {
+                                                    text: addon-progress < 0 ? "…" : (Math.round(addon-progress * 100) + "%");
+                                                    width: 40px; font-size: 11px; color: #8a8a8a; vertical-alignment: center;
+                                                }
                                             }
                                         }
                                         if addon-status != "": Text { text: addon-status; font-size: 12px; color: #8a8a8a; wrap: word-wrap; }
@@ -2922,6 +3000,131 @@ export component NativeShellWindow inherits Window {
                                 ctx-queue-ta := TouchArea { clicked => { queue-song(item.video-id, item.title, item.artist); } }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── First-run onboarding popup (add-on installation) ──────────────────────
+    if show-onboarding: Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height;
+        // Scrim — captures clicks so the app behind stays inert (does not dismiss).
+        background: #000000a0;
+        TouchArea { }
+
+        ob-card := Rectangle {
+            width: min(480px, root.width - 48px);
+            height: ob-layout.preferred-height;
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            border-radius: 18px;
+            background: #141414;
+            border-color: #262626; border-width: 1px;
+            drop-shadow-blur: 40px; drop-shadow-color: #000000c0; drop-shadow-offset-y: 16px;
+
+            ob-layout := VerticalLayout {
+                padding: 28px; spacing: 18px;
+
+                // Header
+                HorizontalLayout {
+                    spacing: 14px; alignment: start;
+                    Rectangle {
+                        width: 46px; height: 46px; border-radius: 12px; background: #e85d5d1a;
+                        Text { text: "\u{25B6}"; color: #e85d5d; font-size: 22px; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    VerticalLayout {
+                        alignment: center; spacing: 3px; horizontal-stretch: 1;
+                        Text { text: "Welcome to Auricle"; font-size: 19px; font-weight: 700; color: #ffffff; }
+                        Text { text: "Set up the tools needed for audio playback."; font-size: 13px; color: #8a8a8a; }
+                    }
+                }
+
+                Text {
+                    text: "These optional third-party tools are not bundled with Auricle. Installing them is at your own discretion; Auricle is not affiliated with them. You may also install them manually onto your PATH.";
+                    font-size: 12px; color: #6a6a6a; wrap: word-wrap;
+                }
+
+                // yt-dlp row
+                Rectangle {
+                    border-radius: 12px; background: #0e0e0e; border-color: #1d1d1d; border-width: 1px;
+                    VerticalLayout {
+                        padding: 16px; spacing: 12px;
+                        HorizontalLayout {
+                            spacing: 12px;
+                            VerticalLayout {
+                                alignment: center; spacing: 2px; horizontal-stretch: 1;
+                                Text { text: "yt-dlp"; font-size: 14px; font-weight: 600; color: #e0e0e0; }
+                                Text { text: "Required for audio streaming and downloads."; font-size: 12px; color: #5a5a5a; }
+                            }
+                            if ytdlp-installed && addon-installing != "ytdlp": Text { text: "\u{2713} Installed"; font-size: 13px; color: #4a9d5a; vertical-alignment: center; }
+                            if !ytdlp-installed && addon-installing != "ytdlp": Rectangle {
+                                width: 100px; height: 34px; border-radius: 8px;
+                                background: addon-busy ? #181818 : (ob-yt-ta.has-hover ? #f06a6a : #e85d5d);
+                                animate background { duration: 100ms; }
+                                Text { text: "Install"; font-size: 13px; font-weight: 600; color: addon-busy ? #5a5a5a : #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+                                ob-yt-ta := TouchArea { clicked => { if !addon-busy { install-ytdlp(); } } }
+                            }
+                        }
+                        if addon-installing == "ytdlp": VerticalLayout {
+                            spacing: 6px;
+                            AddonProgress { value: addon-progress; }
+                            Text {
+                                text: addon-progress < 0 ? "Installing\u{2026}" : (Math.round(addon-progress * 100) + "%");
+                                font-size: 11px; color: #8a8a8a;
+                            }
+                        }
+                    }
+                }
+
+                // ffmpeg row
+                Rectangle {
+                    border-radius: 12px; background: #0e0e0e; border-color: #1d1d1d; border-width: 1px;
+                    VerticalLayout {
+                        padding: 16px; spacing: 12px;
+                        HorizontalLayout {
+                            spacing: 12px;
+                            VerticalLayout {
+                                alignment: center; spacing: 2px; horizontal-stretch: 1;
+                                Text { text: "ffmpeg"; font-size: 14px; font-weight: 600; color: #e0e0e0; }
+                                Text { text: "Optional \u{2022} improves format handling for downloads."; font-size: 12px; color: #5a5a5a; }
+                            }
+                            if ffmpeg-installed && addon-installing != "ffmpeg": Text { text: "\u{2713} Installed"; font-size: 13px; color: #4a9d5a; vertical-alignment: center; }
+                            if !ffmpeg-installed && addon-installing != "ffmpeg": Rectangle {
+                                width: 100px; height: 34px; border-radius: 8px;
+                                background: addon-busy ? #181818 : (ob-ff-ta.has-hover ? #333333 : #2a2a2a);
+                                animate background { duration: 100ms; }
+                                Text { text: "Install"; font-size: 13px; font-weight: 600; color: addon-busy ? #5a5a5a : #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+                                ob-ff-ta := TouchArea { clicked => { if !addon-busy { install-ffmpeg(); } } }
+                            }
+                        }
+                        if addon-installing == "ffmpeg": VerticalLayout {
+                            spacing: 6px;
+                            AddonProgress { value: addon-progress; }
+                            Text {
+                                text: addon-progress < 0 ? "Installing\u{2026}" : (Math.round(addon-progress * 100) + "%");
+                                font-size: 11px; color: #8a8a8a;
+                            }
+                        }
+                    }
+                }
+
+                if addon-status != "": Text { text: addon-status; font-size: 12px; color: #8a8a8a; wrap: word-wrap; horizontal-alignment: center; }
+
+                // Footer
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: ob-done-txt.preferred-width + 36px; height: 36px; border-radius: 8px;
+                        background: ob-done-ta.has-hover ? #ffffff14 : transparent;
+                        animate background { duration: 100ms; }
+                        ob-done-txt := Text {
+                            text: ytdlp-installed ? "Done" : "Maybe later";
+                            font-size: 13px; font-weight: 600;
+                            color: addon-busy ? #4a4a4a : #b0b0b0;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        ob-done-ta := TouchArea { clicked => { if !addon-busy { dismiss-onboarding(); } } }
                     }
                 }
             }

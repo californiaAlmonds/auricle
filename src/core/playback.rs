@@ -484,14 +484,14 @@ impl PlaybackCore {
                 queue: vec![NowPlaying {
                     video_id: "native-prototype".to_string(),
                     title: "Native Shell Prototype".to_string(),
-                    artist: "YouTube Music Desktop".to_string(),
+                    artist: "Auricle".to_string(),
                     duration_secs: 0,
                 }],
                 queue_index: 0,
                 now_playing: NowPlaying {
                     video_id: "native-prototype".to_string(),
                     title: "Native Shell Prototype".to_string(),
-                    artist: "YouTube Music Desktop".to_string(),
+                    artist: "Auricle".to_string(),
                     duration_secs: 0,
                 },
                 is_playing: false,

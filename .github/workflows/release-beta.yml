@@ -31,8 +31,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            src-tauri/target-native-slint
-          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Derive version from tag
@@ -47,7 +47,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp "src-tauri/target-native-slint/release/native_shell.exe" \
+          cp "target/release/native_shell.exe" \
              "dist/auricle-${{ steps.ver.outputs.version }}.exe"
 
       - name: Publish pre-release

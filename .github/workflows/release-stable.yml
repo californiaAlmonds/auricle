@@ -2,7 +2,7 @@ name: Stable release
 
 # Triggered when a pull request from a release/* branch is merged into main.
 # The version is taken from the release branch name (already validated against
-# Cargo.toml / tauri.conf.json by the non-bypassable "check-version" gate).
+# Cargo.toml by the non-bypassable "check-version" gate).
 
 on:
   pull_request:
@@ -32,8 +32,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            src-tauri/target-native-slint
-          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Derive version from release branch
@@ -50,7 +50,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp "src-tauri/target-native-slint/release/native_shell.exe" \
+          cp "target/release/native_shell.exe" \
              "dist/auricle-${{ steps.ver.outputs.version }}.exe"
 
       - name: Publish stable release
