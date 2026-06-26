@@ -3,8 +3,8 @@
   "private": true,
   "version": "0.1.0",
   "scripts": {
-    "build": "cargo build --bin native_shell --manifest-path src-tauri/Cargo.toml --target-dir src-tauri/target-native-slint",
-    "run": "cargo run --bin native_shell --manifest-path src-tauri/Cargo.toml --target-dir src-tauri/target-native-slint",
-    "release": "cargo build --bin native_shell --manifest-path src-tauri/Cargo.toml --target-dir src-tauri/target-native-slint --release"
+    "build": "cargo build --bin native_shell",
+    "run": "cargo run --bin native_shell",
+    "release": "cargo build --bin native_shell --release"
   }
 }

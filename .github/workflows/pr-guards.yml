@@ -2,7 +2,7 @@ name: PR guards
 
 # Non-bypassable code gates for pull requests.
 # - source-branch-guard: only release/* branches may target main.
-# - check-version: Cargo.toml and tauri.conf.json versions must match the
+# - check-version: the Cargo.toml version must match the
 #   release branch involved in the PR.
 #
 # These jobs always run and report (no job-level `if:` that would skip a
@@ -53,12 +53,11 @@ jobs:
             exit 0
           fi
 
-          CARGO=$(grep -m1 '^version' src-tauri/Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
-          TAURI=$(grep -m1 '"version"' src-tauri/tauri.conf.json | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"(.*)".*/\1/')
-          echo "expected=$EXPECTED cargo=$CARGO tauri=$TAURI"
+          CARGO=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          echo "expected=$EXPECTED cargo=$CARGO"
 
-          if [[ "$CARGO" != "$EXPECTED" || "$TAURI" != "$EXPECTED" ]]; then
-            echo "::error::Version mismatch (expected=$EXPECTED, Cargo.toml=$CARGO, tauri.conf.json=$TAURI)."
+          if [[ "$CARGO" != "$EXPECTED" ]]; then
+            echo "::error::Version mismatch (expected=$EXPECTED, Cargo.toml=$CARGO)."
             echo "::error::Feature branches must not change the version; it must equal the release branch (x.y.z)."
             exit 1
           fi
