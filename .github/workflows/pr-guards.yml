@@ -1,0 +1,65 @@
+name: PR guards
+
+# Non-bypassable code gates for pull requests.
+# - source-branch-guard: only release/* branches may target main.
+# - check-version: Cargo.toml and tauri.conf.json versions must match the
+#   release branch involved in the PR.
+#
+# These jobs always run and report (no job-level `if:` that would skip a
+# required check), so a required status check never gets stuck "pending".
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+      - 'release/**'
+
+permissions:
+  contents: read
+
+jobs:
+  source-branch-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Only release/* may target main
+        run: |
+          if [[ "${{ github.base_ref }}" == "main" && "${{ github.head_ref }}" != release/* ]]; then
+            echo "::error::PRs to main must come from a release/* branch (got '${{ github.head_ref }}')."
+            exit 1
+          fi
+          echo "Source branch check passed."
+
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Versions must match the release branch
+        shell: bash
+        run: |
+          BASE="${{ github.base_ref }}"
+          HEAD="${{ github.head_ref }}"
+
+          # The expected version comes from whichever side is the release branch:
+          #   feature/*      -> release/x.y.z   (target/base is the release branch)
+          #   release/x.y.z  -> main            (source/head is the release branch)
+          if [[ "$BASE" == release/* ]]; then
+            EXPECTED="${BASE#release/}"
+          elif [[ "$BASE" == "main" && "$HEAD" == release/* ]]; then
+            EXPECTED="${HEAD#release/}"
+          else
+            echo "Not a version-guarded PR (base=$BASE, head=$HEAD); nothing to check."
+            exit 0
+          fi
+
+          CARGO=$(grep -m1 '^version' src-tauri/Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          TAURI=$(grep -m1 '"version"' src-tauri/tauri.conf.json | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"(.*)".*/\1/')
+          echo "expected=$EXPECTED cargo=$CARGO tauri=$TAURI"
+
+          if [[ "$CARGO" != "$EXPECTED" || "$TAURI" != "$EXPECTED" ]]; then
+            echo "::error::Version mismatch (expected=$EXPECTED, Cargo.toml=$CARGO, tauri.conf.json=$TAURI)."
+            echo "::error::Feature branches must not change the version; it must equal the release branch (x.y.z)."
+            exit 1
+          fi
+          echo "Version check passed ($EXPECTED)."

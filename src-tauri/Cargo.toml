@@ -1,0 +1,48 @@
+[package]
+name = "auricle"
+version = "0.1.0"
+description = "Auricle — a native music player desktop shell built with Rust and Slint"
+authors = ["you"]
+license = "GPL-3.0-only"
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+default-run = "auricle"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "auricle_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5.6", features = [] }
+slint-build = "1.8.0"
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.10.3", features = ["tray-icon"] }
+tauri-plugin-log = "2"
+ytmapi-rs = "0.3.1"
+tokio = "1.52.1"
+tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = "2"
+url = "2.5.8"
+urlencoding = "2.1.3"
+once_cell = "1"
+reqwest = { version = "0.13.2", features = ["json", "multipart", "rustls", "form", "blocking"] }
+souvlaki = "0.8.3"
+tauri-plugin-shell = "2.2.1"
+rusqlite = { version = "0.31.0", features = ["bundled"] }
+rusty_ytdl = { version = "0.7.4", features = ["blocking"] }
+slint = "1.8.0"
+rodio = { version = "0.20.1", features = ["symphonia-all"] }
+symphonia = { version = "0.5.5", features = ["aac", "mp3", "isomp4", "opt-simd"] }
+tray-icon = "0.19"
+image = { version = "0.25", default-features = false, features = ["png"] }
+zip = "2.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

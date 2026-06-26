@@ -1,0 +1,63 @@
+name: Stable release
+
+# Triggered when a pull request from a release/* branch is merged into main.
+# The version is taken from the release branch name (already validated against
+# Cargo.toml / tauri.conf.json by the non-bypassable "check-version" gate).
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: >
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'release/')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target-native-slint
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Derive version from release branch
+        id: ver
+        shell: bash
+        run: |
+          BRANCH="${{ github.event.pull_request.head.ref }}"
+          echo "version=${BRANCH#release/}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release binary
+        run: npm run release
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "src-tauri/target-native-slint/release/native_shell.exe" \
+             "dist/auricle-${{ steps.ver.outputs.version }}.exe"
+
+      - name: Publish stable release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: Auricle ${{ steps.ver.outputs.version }}
+          prerelease: false
+          generate_release_notes: true
+          files: dist/auricle-${{ steps.ver.outputs.version }}.exe

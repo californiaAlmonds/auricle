@@ -1,0 +1,6 @@
+{
+  "name": "Auricle",
+  "description": "A native desktop music player built with Rust and Slint.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

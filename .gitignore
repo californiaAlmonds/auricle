@@ -1,0 +1,37 @@
+# ── Rust / Cargo ──────────────────────────────────────────────
+/target/
+**/target/
+src-tauri/target/
+src-tauri/target-native/
+src-tauri/target-native-slint/
+**/*.rs.bk
+*.pdb
+
+# ── Tauri generated ───────────────────────────────────────────
+src-tauri/gen/
+
+# ── Downloaded optional add-ons (yt-dlp / ffmpeg) ─────────────
+# These third-party tools are never bundled or committed.
+src-tauri/bin/
+
+# ── Build / log artifacts ─────────────────────────────────────
+build_output.txt
+src-tauri/build_out.txt
+*.log
+
+# ── Environment / secrets ─────────────────────────────────────
+.env
+.env.*
+
+# ── Internal planning docs (not shipped) ──────────────────────
+checklist.md
+native-checklist.md
+rearchitecture.md
+
+# ── Editor / local agent config (not shipped) ─────────────────
+.vscode/
+.github/agents/
+
+# ── OS / editor cruft ─────────────────────────────────────────
+.DS_Store
+Thumbs.db

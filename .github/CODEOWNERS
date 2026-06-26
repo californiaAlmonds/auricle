@@ -1,0 +1,4 @@
+# Code owners for Auricle.
+# The owner is requested for review on every pull request and, where
+# "Require review from Code Owners" is enabled, must approve before merge.
+* @californiaAlmonds
