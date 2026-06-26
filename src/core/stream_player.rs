@@ -1,4 +1,4 @@
-/// Streaming audio player for YouTube Music.
+/// Streaming audio player.
 ///
 /// Architecture:
 ///   1. `yt-dlp -g` extracts a signed CDN URL (~2s) — no download, no ffmpeg.
@@ -151,7 +151,7 @@ impl StreamingAudioSource {
     /// Open `url` and set up symphonia decoding.
     /// Returns immediately once format probing succeeds (~50 ms for AAC/MP4).
     pub fn from_url(url: &str) -> Result<Self, String> {
-        // YouTube innertube URLs often require &range=0- to avoid 403
+        // Signed CDN URLs often require &range=0- to avoid 403
         let url = if url.contains("googlevideo.com") && !url.contains("&range=") {
             format!("{}&range=0-", url)
         } else {
@@ -382,10 +382,10 @@ pub fn cookie_args() -> Vec<String> {
 }
 
 /// Fetches only the total byte size of a URL via a `Range: bytes=0-0` request.
-/// YouTube CDN always returns `Content-Range: bytes 0-0/TOTAL` for this,
+/// The streaming CDN always returns `Content-Range: bytes 0-0/TOTAL` for this,
 /// even when the full GET uses chunked encoding and has no Content-Length.
 pub fn fetch_content_length(url: &str) -> Option<u64> {
-    // YouTube innertube URLs need &range= parameter
+    // Signed CDN URLs need &range= parameter
     let url = if url.contains("googlevideo.com") && !url.contains("&range=") {
         format!("{}&range=0-", url)
     } else {

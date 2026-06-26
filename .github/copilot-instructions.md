@@ -2,25 +2,23 @@
 
 ## Big picture (read this first)
 - The active product is a **Windows-native shell**: Rust + Slint.
-- Entry point is `src-tauri/src/main.rs` (`run_native_shell()`), not the old React path.
-- `README.md` still describes legacy React/Express flows; prefer `package.json` scripts and `src-tauri` code as source of truth.
+- Entry point is `src/main.rs` (`run_native_shell()`), not the old React path.
+- `README.md` still describes legacy React/Express flows; prefer `package.json` scripts and the Rust code under `src/` as source of truth.
 - Core runtime flow:
-  1. Slint UI in `src-tauri/ui/native_shell.slint` defines callbacks and state properties.
-  2. `run_native_shell()` in `src-tauri/src/lib.rs` wires those callbacks.
-  3. Shared playback singleton comes from `src-tauri/src/core/bridge.rs` (`playback_core()`).
-  4. Playback logic lives in `src-tauri/src/core/playback.rs` (queue, history, likes, worker thread).
+  1. Slint UI in `ui/native_shell.slint` defines callbacks and state properties.
+  2. `run_native_shell()` in `src/lib.rs` wires those callbacks.
+  3. Shared playback singleton comes from `src/core/bridge.rs` (`playback_core()`).
+  4. Playback logic lives in `src/core/playback.rs` (queue, history, likes, worker thread).
 
 ## Service boundaries and data flow
 - Keep UI logic in Slint + callback handlers; keep playback/queue state inside `PlaybackCore`.
 - `refresh_native_shell_ui()` is the primary hydration path from backend state to Slint models.
-- Tauri command layer (`#[tauri::command]` in `src-tauri/src/lib.rs`) is still used for webview bridge/events and external integrations.
-- Native audio extraction paths are split intentionally:
-  - `core/streaming.rs`: async `rusty_ytdl` resolver for `get_stream_url` command.
-  - `core/stream_player.rs`: yt-dlp based streaming source + HTTP/range decode path used by playback worker. `yt-dlp` is a user-installed add-on, not bundled.
+- There is no webview or Tauri command layer; the app is a pure Slint shell wired up in `src/lib.rs` (`run_native_shell()`).
+- Native audio extraction uses `core/stream_player.rs`: a yt-dlp based streaming source + HTTP/range decode path used by the playback worker. `yt-dlp` is a user-installed add-on, not bundled.
 
 ## Build/run workflows
-- Build: `npm run build` (or directly: `cargo build --bin native_shell --manifest-path src-tauri/Cargo.toml --target-dir src-tauri/target-native-slint`)
-- Run: `npm run run` (or directly: `cargo run --bin native_shell --manifest-path src-tauri/Cargo.toml --target-dir src-tauri/target-native-slint`)
+- Build: `npm run build` (or directly: `cargo build --bin native_shell`)
+- Run: `npm run run` (or directly: `cargo run --bin native_shell`)
 - Release build: `npm run release` (adds `--release` flag)
 - There is no webview, React, Vite, or legacy frontend path. The only UI is the native Slint shell.
 - There are currently no established automated tests in this repo; rely on smoke checks for playback, queue, search, and tray behavior.
@@ -33,16 +31,16 @@
 - Cache behavior is LRU and persisted by `core/cache.rs` (`cache_index.json`, default 500 MB). Keep cache writes compatible with existing index structure.
 
 ## Integration points to be aware of
-- External crates/services: `ytmapi-rs` (search/library), `rusty_ytdl` + user-installed `yt-dlp` (stream extraction), `rodio`/`symphonia` (decode/playback), `souvlaki` (OS media controls), `rusqlite` (autoplay learning DB).
+- External crates/services: `ytmapi-rs` (search/library), user-installed `yt-dlp` (stream extraction), `rodio`/`symphonia` (decode/playback), `tray-icon`/`image` (OS tray icon).
 - `yt-dlp` and `ffmpeg` are optional third-party add-ons that are NOT bundled or redistributed. They are installed at the user's discretion (via the in-app "Install essential add-ons" step or manually) into a per-user app-data dir, and resolved from there or from `PATH` by stream/cache code.
-- Tray/minimize behavior is controlled in Rust (`minimize_window` + tray setup in `src-tauri/src/lib.rs`); keep frontend settings wiring compatible with that contract.
+- Tray/minimize behavior is controlled in Rust (tray setup in `src/lib.rs`); keep window minimize/restore behavior consistent.
 
 ## Agent coordination protocol
 - **Act as coordinator**: decompose every non-trivial task into subtasks A/B/C before writing code.
 - **One worker per subtask**: spawn a dedicated subagent for each subtask. Each worker must read this file first.
 - **Inter-worker communication**: all workers share context — each must declare what files/symbols it touches and what contracts (function signatures, struct fields, callback names) it depends on. If Worker B depends on a type Worker A is creating, Worker A's output is resolved first.
 - **Conflict prevention**: no two workers may edit the same function body simultaneously. Coordinate at function/callback granularity.
-- **Merge verification**: after all subtask workers complete, the coordinator verifies the combined result compiles (`cargo build --bin native_shell --manifest-path src-tauri/Cargo.toml --target-dir src-tauri/target-native-slint`) and performs a smoke-check summary.
+- **Merge verification**: after all subtask workers complete, the coordinator verifies the combined result compiles (`cargo build --bin native_shell`) and performs a smoke-check summary.
 
 ## When adding features
 - Implement one vertical slice end-to-end (Slint callback -> Rust handler -> `PlaybackCore`/module -> UI refresh).

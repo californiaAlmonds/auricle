@@ -1,37 +1,17 @@
 use serde::{Deserialize, Serialize};
-use rusqlite::{params, Connection};
-use tauri::{Manager, Emitter};
 use ytmapi_rs::YtMusic;
-use ytmapi_rs::auth::OAuthToken;
-use ytmapi_rs::query::{SearchQuery, search::SongsFilter, search::ArtistsFilter};
+use ytmapi_rs::query::{SearchQuery, search::SongsFilter};
 use ytmapi_rs::common::YoutubeID;
 
 pub mod core;
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, PlatformConfig};
 use slint::{Model, ModelRc, SharedString, VecModel};
 
 
 
 slint::include_modules!();
 
-struct MediaControlsState {
-    controls: Mutex<MediaControls>,
-}
-
-#[tauri::command]
-fn update_media_metadata(state: tauri::State<MediaControlsState>, title: String, artist: String, album: String, cover_url: String) {
-    let mut controls = state.controls.lock().unwrap();
-    let _ = controls.set_metadata(MediaMetadata {
-        title: Some(&title),
-        artist: Some(&artist),
-        album: Some(&album),
-        cover_url: Some(&cover_url),
-        duration: None,
-    });
-}
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Thumbnail {
     pub url: String,
@@ -62,107 +42,6 @@ pub struct Song {
     pub album: Option<AlbumRef>,
     pub duration: Option<u32>,
     pub thumbnails: Vec<Thumbnail>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Artist {
-    pub name: String,
-    #[serde(rename = "browseId")]
-    pub browse_id: String,
-    pub thumbnails: Vec<Thumbnail>,
-}
-
-enum ApiClient {
-    Authenticated(YtMusic<OAuthToken>),
-    Guest(YtMusic<ytmapi_rs::auth::noauth::NoAuthToken>),
-}
-
-impl ApiClient {
-    async fn search_songs(&self, query: String) -> Result<Vec<Song>, String> {
-        match self {
-            Self::Authenticated(api) => {
-                let results = api.query(SearchQuery::new(query).with_filter(SongsFilter)).await.map_err(|e| e.to_string())?;
-                Ok(map_search_results(results))
-            },
-            Self::Guest(api) => {
-                let results = api.query(SearchQuery::new(query).with_filter(SongsFilter)).await.map_err(|e| e.to_string())?;
-                Ok(map_search_results(results))
-            }
-        }
-    }
-
-    async fn search_artists(&self, query: String) -> Result<Vec<Artist>, String> {
-        match self {
-            Self::Authenticated(api) => {
-                let results = api.query(SearchQuery::new(query).with_filter(ArtistsFilter)).await.map_err(|e| e.to_string())?;
-                Ok(results.into_iter().map(|r| Artist {
-                    name: r.artist,
-                    browse_id: r.browse_id.get_raw().to_string(),
-                    thumbnails: Vec::new(),
-                }).collect())
-            },
-            Self::Guest(api) => {
-                let results = api.query(SearchQuery::new(query).with_filter(ArtistsFilter)).await.map_err(|e| e.to_string())?;
-                Ok(results.into_iter().map(|r| Artist {
-                    name: r.artist,
-                    browse_id: r.browse_id.get_raw().to_string(),
-                    thumbnails: Vec::new(),
-                }).collect())
-            }
-        }
-    }
-
-    async fn get_playlist_tracks(&self, id: ytmapi_rs::common::PlaylistID<'static>) -> Result<Vec<Song>, String> {
-        match self {
-            Self::Authenticated(api) => {
-                let results = api.get_playlist_tracks(id).await.map_err(|e| e.to_string())?;
-                Ok(map_playlist_items(results))
-            },
-            Self::Guest(api) => {
-                let results = api.get_playlist_tracks(id).await.map_err(|e| e.to_string())?;
-                Ok(map_playlist_items(results))
-            }
-        }
-    }
-
-    async fn get_artist_data(&self, id: ytmapi_rs::common::ArtistChannelID<'static>) -> Result<ytmapi_rs::parse::GetArtist, String> {
-        match self {
-            Self::Authenticated(api) => api.get_artist(id).await.map_err(|e| e.to_string()),
-            Self::Guest(api) => api.get_artist(id).await.map_err(|e| e.to_string()),
-        }
-    }
-
-    async fn get_album_data(&self, id: ytmapi_rs::common::AlbumID<'static>) -> Result<ytmapi_rs::parse::GetAlbum, String> {
-        match self {
-            Self::Authenticated(api) => api.get_album(id).await.map_err(|e| e.to_string()),
-            Self::Guest(api) => api.get_album(id).await.map_err(|e| e.to_string()),
-        }
-    }
-
-    async fn get_watch_playlist(&self, video_id: String) -> Result<Vec<Song>, String> {
-        let vid = ytmapi_rs::common::VideoID::from_raw(video_id);
-        let tracks = match self {
-            Self::Authenticated(api) => api.get_watch_playlist_from_video_id(vid).await.map_err(|e| e.to_string())?,
-            Self::Guest(api) => api.get_watch_playlist_from_video_id(vid).await.map_err(|e| e.to_string())?,
-        };
-        Ok(tracks.into_iter().map(|r| Song {
-            video_id: r.video_id.get_raw().to_string(),
-            name: r.title,
-            artist: ArtistRef { name: r.author, browse_id: String::new() },
-            album: None,
-            duration: None,
-            thumbnails: r.thumbnails.into_iter().map(|t| Thumbnail {
-                url: t.url, width: t.width as u64, height: t.height as u64,
-            }).collect(),
-        }).collect())
-    }
-
-    async fn get_library_playlists(&self) -> Result<Vec<ytmapi_rs::parse::LibraryPlaylist>, String> {
-        match self {
-            Self::Authenticated(api) => api.get_library_playlists().await.map_err(|e| e.to_string()),
-            Self::Guest(_) => Ok(vec![]),
-        }
-    }
 }
 
 fn map_search_results(results: Vec<ytmapi_rs::parse::SearchResultSong>) -> Vec<Song> {
@@ -225,717 +104,6 @@ fn parse_duration(d: &str) -> Option<u32> {
     } else {
         None
     }
-}
-
-async fn get_api(auth: Option<AuthTokens>) -> Result<ApiClient, String> {
-    if let Some(tokens) = auth {
-        let now = std::time::SystemTime::now();
-        let token_json = serde_json::json!({
-            "access_token": tokens.access_token,
-            "refresh_token": tokens.refresh_token,
-            "expires_at": now, 
-            "expires_in": 3600,
-            "token_type": "Bearer",
-            "request_time": now,
-            "client_id": GOOGLE_CLIENT_ID,
-            "client_secret": ""
-        });
-        let oauth_token: OAuthToken = serde_json::from_value(token_json).map_err(|e| e.to_string())?;
-        Ok(ApiClient::Authenticated(YtMusic::from_auth_token(oauth_token)))
-    } else {
-        let api = YtMusic::new_unauthenticated().await.map_err(|e| e.to_string())?;
-        Ok(ApiClient::Guest(api))
-    }
-}
-
-#[tauri::command]
-async fn search_music(query: String, auth: Option<AuthTokens>) -> Result<Vec<Song>, String> {
-    let api = get_api(auth).await?;
-    api.search_songs(query).await
-}
-
-#[tauri::command]
-async fn search_artists(query: String, auth: Option<AuthTokens>) -> Result<Vec<Artist>, String> {
-    let api = get_api(auth).await?;
-    api.search_artists(query).await
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub struct UserData {
-    pub favourites: FavouritesData,
-    pub history: Vec<Song>,
-    #[serde(rename = "userPlaylists")]
-    pub user_playlists: Vec<PlaylistData>,
-    #[serde(rename = "dislikedSongs")]
-    pub disliked_songs: Vec<String>,
-    pub auth: Option<AuthTokens>,
-    #[serde(default)]
-    pub onboarding: OnboardingData,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct AuthTokens {
-    pub access_token: String,
-    pub refresh_token: Option<String>,
-    pub expires_at: u64,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub struct OnboardingData {
-    #[serde(rename = "hasCompleted")]
-    pub has_completed: bool,
-    #[serde(rename = "startupMode")]
-    pub startup_mode: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub struct FavouritesData {
-    pub songs: Vec<Song>,
-    pub albums: Vec<AlbumRef>,
-    pub artists: Vec<ArtistRef>,
-    pub playlists: Vec<AlbumRef>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub struct PlaylistData {
-    pub id: String,
-    pub name: String,
-    pub songs: Vec<Song>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct AutoplayInteractionInput {
-    pub from_song_id: String,
-    pub to_song_id: String,
-    pub from_artist: String,
-    pub to_artist: String,
-    pub interaction_type: String,
-    pub timestamp: Option<i64>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct AutoplayLearningSignal {
-    pub song_id: String,
-    pub score: f64,
-    pub interactions: i64,
-}
-
-fn now_unix_ts() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-}
-
-fn autoplay_db(app: &tauri::AppHandle) -> Result<Connection, String> {
-    let db_path = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("autoplay_learning.db");
-
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-
-    let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
-    conn.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS autoplay_interactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            from_song_id TEXT NOT NULL,
-            to_song_id TEXT NOT NULL,
-            from_artist TEXT NOT NULL,
-            to_artist TEXT NOT NULL,
-            interaction_type TEXT NOT NULL,
-            occurred_at INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_autoplay_from_song ON autoplay_interactions(from_song_id, occurred_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_autoplay_from_artist ON autoplay_interactions(from_artist, occurred_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_autoplay_to_song ON autoplay_interactions(to_song_id);
-        CREATE TABLE IF NOT EXISTS genre_cache (
-            entity_key TEXT PRIMARY KEY,
-            genres TEXT NOT NULL,
-            fetched_at INTEGER NOT NULL
-        );
-        "#,
-    )
-    .map_err(|e| e.to_string())?;
-
-    Ok(conn)
-}
-
-#[tauri::command]
-async fn record_autoplay_interaction(app: tauri::AppHandle, interaction: AutoplayInteractionInput) -> Result<(), String> {
-    let conn = autoplay_db(&app)?;
-    let ts = interaction.timestamp.unwrap_or_else(now_unix_ts);
-
-    conn.execute(
-        "INSERT INTO autoplay_interactions (from_song_id, to_song_id, from_artist, to_artist, interaction_type, occurred_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            interaction.from_song_id,
-            interaction.to_song_id,
-            interaction.from_artist.to_lowercase(),
-            interaction.to_artist.to_lowercase(),
-            interaction.interaction_type,
-            ts,
-        ],
-    )
-    .map_err(|e| e.to_string())?;
-
-    let cutoff = now_unix_ts() - (180 * 24 * 60 * 60);
-    conn.execute(
-        "DELETE FROM autoplay_interactions WHERE occurred_at < ?1",
-        params![cutoff],
-    )
-    .map_err(|e| e.to_string())?;
-
-    // Spawn background genre enrichment
-    let db_path = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("autoplay_learning.db");
-    let from_artist = interaction.from_artist.to_lowercase();
-    let to_artist = interaction.to_artist.to_lowercase();
-    tokio::spawn(async move {
-        core::musicbrainz::enrich_genre_data(db_path, &from_artist, &to_artist).await;
-    });
-
-    Ok(())
-}
-
-#[tauri::command]
-async fn get_autoplay_learning_signals(
-    app: tauri::AppHandle,
-    from_song_id: String,
-    from_artist: Option<String>,
-    limit: Option<u32>,
-) -> Result<Vec<AutoplayLearningSignal>, String> {
-    let conn = autoplay_db(&app)?;
-    let requested_limit = limit.unwrap_or(40).clamp(1, 100) as usize;
-    let now = now_unix_ts() as f64;
-    let mut scores = HashMap::<String, (f64, i64)>::new();
-
-    {
-        let mut stmt = conn
-            .prepare(
-                "SELECT to_song_id, interaction_type, occurred_at FROM autoplay_interactions WHERE from_song_id = ?1 ORDER BY occurred_at DESC LIMIT 300",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(params![from_song_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?;
-
-        for row in rows {
-            let (song_id, interaction_type, occurred_at) = row.map_err(|e| e.to_string())?;
-            let age_days = ((now - occurred_at as f64).max(0.0)) / 86_400.0;
-            let decay = (-age_days / 30.0).exp();
-            let base = match interaction_type.as_str() {
-                "manual_pick" => 1.8,
-                "skip" => -0.9,
-                _ => 1.0,
-            };
-            let entry = scores.entry(song_id).or_insert((0.0, 0));
-            entry.0 += base * decay;
-            entry.1 += 1;
-        }
-    }
-
-    if let Some(artist) = from_artist {
-        let mut stmt = conn
-            .prepare(
-                "SELECT to_song_id, interaction_type, occurred_at FROM autoplay_interactions WHERE from_artist = ?1 ORDER BY occurred_at DESC LIMIT 300",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(params![artist.to_lowercase()], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?;
-
-        for row in rows {
-            let (song_id, interaction_type, occurred_at) = row.map_err(|e| e.to_string())?;
-            let age_days = ((now - occurred_at as f64).max(0.0)) / 86_400.0;
-            let decay = (-age_days / 45.0).exp();
-            let base = match interaction_type.as_str() {
-                "manual_pick" => 0.9,
-                "skip" => -0.35,
-                _ => 0.45,
-            };
-            let entry = scores.entry(song_id).or_insert((0.0, 0));
-            entry.0 += base * decay;
-            entry.1 += 1;
-        }
-    }
-
-    let mut signals = scores
-        .into_iter()
-        .map(|(song_id, (score, interactions))| AutoplayLearningSignal {
-            song_id,
-            score,
-            interactions,
-        })
-        .collect::<Vec<_>>();
-
-    signals.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-    signals.truncate(requested_limit);
-    Ok(signals)
-}
-
-#[tauri::command]
-async fn get_genre_affinity(app: tauri::AppHandle) -> Result<Vec<(String, f64)>, String> {
-    let conn = autoplay_db(&app)?;
-
-    // Get all artists with positive interactions and their counts
-    let mut stmt = conn.prepare(
-        "SELECT to_artist, COUNT(*) as cnt FROM autoplay_interactions WHERE interaction_type IN ('played', 'liked', 'completed') GROUP BY to_artist"
-    ).map_err(|e| e.to_string())?;
-
-    let artist_scores: Vec<(String, f64)> = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
-    }).map_err(|e| e.to_string())?
-    .filter_map(|r| r.ok())
-    .collect();
-
-    // For each artist, look up their genres in genre_cache
-    let mut genre_scores: HashMap<String, f64> = HashMap::new();
-    let cutoff = now_unix_ts() - (30 * 24 * 60 * 60);
-
-    for (artist, score) in &artist_scores {
-        let key = format!("artist:{}", artist);
-        if let Ok(genres_str) = conn.query_row(
-            "SELECT genres FROM genre_cache WHERE entity_key = ?1 AND fetched_at > ?2",
-            params![key, cutoff],
-            |row| row.get::<_, String>(0),
-        ) {
-            for genre in genres_str.split(',').filter(|s| !s.is_empty()) {
-                *genre_scores.entry(genre.to_string()).or_insert(0.0) += score;
-            }
-        }
-    }
-
-    let mut result: Vec<(String, f64)> = genre_scores.into_iter().collect();
-    result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    result.truncate(10);
-    Ok(result)
-}
-
-#[tauri::command]
-async fn save_user_data(app: tauri::AppHandle, data: UserData) -> Result<(), String> {
-    let path = app.path().app_data_dir().map_err(|e| e.to_string())?.join("user_data.json");
-    
-    // Ensure parent directory exists
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-
-    let json = serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?;
-    std::fs::write(path, json).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[tauri::command]
-async fn load_user_data(app: tauri::AppHandle) -> Result<UserData, String> {
-    let path = app.path().app_data_dir().map_err(|e| e.to_string())?.join("user_data.json");
-    
-    if !path.exists() {
-        return Ok(UserData::default());
-    }
-
-    let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let data: UserData = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-    Ok(data)
-}
-
-const GOOGLE_CLIENT_ID: &str = "363288825229-jlbiuir8ds26t7mt7jkdneqpq6o0s639.apps.googleusercontent.com";
-const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
-const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
-const REDIRECT_URI: &str = "com.googleusercontent.apps.363288825229-jlbiuir8ds26t7mt7jkdneqpq6o0s639://auth";
-
-#[tauri::command]
-async fn exchange_google_code(code: String) -> Result<AuthTokens, String> {
-    let client = reqwest::Client::new();
-    let resp = client.post(GOOGLE_TOKEN_URL)
-        .form(&[
-            ("client_id", GOOGLE_CLIENT_ID),
-            ("code", &code),
-            ("grant_type", "authorization_code"),
-            ("redirect_uri", REDIRECT_URI),
-        ])
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if !resp.status().is_success() {
-        let err_body = resp.text().await.unwrap_or_default();
-        return Err(format!("Token exchange failed: {}", err_body));
-    }
-
-    let data: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    
-    let access_token = data["access_token"].as_str().ok_or("No access token")?.to_string();
-    let refresh_token = data["refresh_token"].as_str().map(|s| s.to_string());
-    let expires_in = data["expires_in"].as_u64().unwrap_or(3600);
-    let expires_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() + expires_in;
-
-    Ok(AuthTokens {
-        access_token,
-        refresh_token,
-        expires_at,
-    })
-}
-
-#[tauri::command]
-async fn push_to_cloud(auth: AuthTokens, data: UserData) -> Result<(), String> {
-    let client = reqwest::Client::new();
-    
-    // 1. Find if file exists in appDataFolder
-    let list_url = "https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=name='user_data.json'";
-    let res = client.get(list_url)
-        .bearer_auth(&auth.access_token)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    
-    let list_json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-    let files = list_json["files"].as_array().ok_or("Invalid response from Drive")?;
-    
-    let content = serde_json::to_string(&data).map_err(|e| e.to_string())?;
-    
-    if files.is_empty() {
-        // Create new file
-        let metadata = serde_json::json!({
-            "name": "user_data.json",
-            "parents": ["appDataFolder"]
-        });
-        
-        let form = reqwest::multipart::Form::new()
-            .part("metadata", reqwest::multipart::Part::text(metadata.to_string()).mime_str("application/json").unwrap())
-            .part("file", reqwest::multipart::Part::text(content).mime_str("application/json").unwrap());
-            
-        client.post("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart")
-            .bearer_auth(&auth.access_token)
-            .multipart(form)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-    } else {
-        // Update existing file
-        let file_id = files[0]["id"].as_str().ok_or("No file ID found")?;
-        let update_url = format!("https://www.googleapis.com/upload/drive/v3/files/{}?uploadType=media", file_id);
-        
-        client.patch(update_url)
-            .bearer_auth(&auth.access_token)
-            .body(content)
-            .header("Content-Type", "application/json")
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    
-    Ok(())
-}
-
-#[tauri::command]
-async fn pull_from_cloud(auth: AuthTokens) -> Result<Option<UserData>, String> {
-    let client = reqwest::Client::new();
-    
-    let list_url = "https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=name='user_data.json'";
-    let res = client.get(list_url)
-        .bearer_auth(&auth.access_token)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    
-    let list_json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-    let files = list_json["files"].as_array().ok_or("Invalid response from Drive")?;
-    
-    if files.is_empty() {
-        return Ok(None);
-    }
-    
-    let file_id = files[0]["id"].as_str().ok_or("No file ID found")?;
-    let download_url = format!("https://www.googleapis.com/drive/v3/files/{}?alt=media", file_id);
-    
-    let res = client.get(download_url)
-        .bearer_auth(&auth.access_token)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    
-    let data: UserData = res.json().await.map_err(|e| e.to_string())?;
-    Ok(Some(data))
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Playlist {
-    pub id: String,
-    pub title: String,
-    pub thumbnails: Vec<Thumbnail>,
-    pub count: Option<u32>,
-    pub description: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ArtistDetails {
-    pub name: String,
-    pub description: Option<String>,
-    pub thumbnails: Vec<Thumbnail>,
-    pub songs: Vec<Song>,
-    pub albums: Vec<AlbumRef>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct AlbumDetails {
-    pub name: String,
-    pub artist: ArtistRef,
-    pub year: Option<String>,
-    pub thumbnails: Vec<Thumbnail>,
-    pub songs: Vec<Song>,
-}
-
-#[tauri::command]
-async fn get_library_playlists(auth: Option<AuthTokens>) -> Result<Vec<Playlist>, String> {
-    let api = get_api(auth).await?;
-    let results = api.get_library_playlists().await?;
-    
-    let playlists = results.into_iter().map(|p| Playlist {
-        id: p.playlist_id.get_raw().to_string(),
-        title: p.title,
-        thumbnails: p.thumbnails.into_iter().map(|t| Thumbnail {
-            url: t.url,
-            width: t.width as u64,
-            height: t.height as u64,
-        }).collect(),
-        count: None,
-        description: None,
-    }).collect();
-
-    Ok(playlists)
-}
-
-#[tauri::command]
-async fn get_playlist_tracks(playlist_id: String, auth: Option<AuthTokens>) -> Result<Vec<Song>, String> {
-    let api = get_api(auth).await?;
-    let id = ytmapi_rs::common::PlaylistID::from_raw(playlist_id);
-    api.get_playlist_tracks(id).await
-}
-
-#[tauri::command]
-async fn get_artist_details(browse_id: String, auth: Option<AuthTokens>) -> Result<ArtistDetails, String> {
-    let api = get_api(auth).await?;
-    let id = ytmapi_rs::common::ArtistChannelID::from_raw(browse_id);
-    let results = api.get_artist_data(id).await?;
-    
-    let songs = results.top_releases.songs.map(|s| {
-        s.results.into_iter().map(|r| Song {
-            video_id: r.video_id.get_raw().to_string(),
-            name: r.title,
-            artist: ArtistRef {
-                name: results.name.clone(),
-                browse_id: "".to_string(),
-            },
-            album: None,
-            duration: None,
-            thumbnails: Vec::new(),
-        }).collect()
-    }).unwrap_or_default();
-
-    let albums = results.top_releases.albums.map(|a| {
-        a.results.into_iter().map(|r| AlbumRef {
-            name: r.title,
-            browse_id: r.album_id.get_raw().to_string(),
-        }).collect()
-    }).unwrap_or_default();
-
-    Ok(ArtistDetails {
-        name: results.name,
-        description: results.description,
-        thumbnails: results.thumbnails.into_iter().map(|t| Thumbnail {
-            url: t.url,
-            width: t.width as u64,
-            height: t.height as u64,
-        }).collect(),
-        songs,
-        albums,
-    })
-}
-
-#[tauri::command]
-async fn get_album_details(browse_id: String, auth: Option<AuthTokens>) -> Result<AlbumDetails, String> {
-    let api = get_api(auth).await?;
-    let id = ytmapi_rs::common::AlbumID::from_raw(browse_id);
-    let results = api.get_album_data(id).await?;
-    
-    let songs = results.tracks.into_iter().map(|t| Song {
-        video_id: t.video_id.get_raw().to_string(),
-        name: t.title,
-        artist: ArtistRef {
-            name: results.artists.first().map(|a| a.name.clone()).unwrap_or_default(),
-            browse_id: results.artists.first().and_then(|a| a.id.as_ref()).map(|id| id.get_raw().to_string()).unwrap_or_default(),
-        },
-        album: Some(AlbumRef {
-            name: results.title.clone(),
-            browse_id: "".to_string(),
-        }),
-        duration: parse_duration(&t.duration),
-        thumbnails: Vec::new(),
-    }).collect();
-
-    Ok(AlbumDetails {
-        name: results.title,
-        artist: ArtistRef {
-            name: results.artists.first().map(|a| a.name.clone()).unwrap_or_default(),
-            browse_id: results.artists.first().and_then(|a| a.id.as_ref()).map(|id| id.get_raw().to_string()).unwrap_or_default(),
-        },
-        year: Some(results.year),
-        thumbnails: results.thumbnails.into_iter().map(|t| Thumbnail {
-            url: t.url,
-            width: t.width as u64,
-            height: t.height as u64,
-        }).collect(),
-        songs,
-    })
-}
-
-#[tauri::command]
-async fn generate_smart_mix(video_id: String, auth: Option<AuthTokens>) -> Result<Vec<Song>, String> {
-    let api = get_api(auth).await?;
-    api.get_watch_playlist(video_id).await
-}
-
-#[tauri::command]
-fn get_google_auth_url() -> String {
-    format!(
-        "{}?client_id={}&redirect_uri={}&response_type=code&scope=https://www.googleapis.com/auth/youtube.readonly%20https://www.googleapis.com/auth/drive.appdata&access_type=offline&prompt=consent",
-        GOOGLE_AUTH_URL,
-        GOOGLE_CLIENT_ID,
-        urlencoding::encode(REDIRECT_URI)
-    )
-}
-
-#[tauri::command]
-fn minimize_window(window: tauri::Window, minimize_to_tray: Option<bool>) {
-    if minimize_to_tray.unwrap_or(true) {
-        let _ = window.hide();
-    } else {
-        let _ = window.minimize();
-    }
-}
-
-#[tauri::command]
-async fn get_stream_url(video_id: String, quality: Option<String>) -> Result<String, String> {
-    core::streaming::resolve_stream_url(&video_id, quality.as_deref()).await
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct BridgeSong {
-    #[serde(rename = "videoId")]
-    video_id: String,
-    title: String,
-    artist: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct BridgePlaybackState {
-    #[serde(rename = "isPlaying")]
-    is_playing: bool,
-    #[serde(rename = "nowPlaying")]
-    now_playing: BridgeSong,
-    #[serde(rename = "queuePreview")]
-    queue_preview: Vec<BridgeSong>,
-}
-
-fn map_bridge_song(song: core::playback::NowPlaying) -> BridgeSong {
-    BridgeSong {
-        video_id: song.video_id,
-        title: song.title,
-        artist: song.artist,
-    }
-}
-
-fn emit_bridge_playback_state(app_handle: &tauri::AppHandle) {
-    let state = bridge_get_playback_state();
-    let _ = app_handle.emit("bridge-playback-state", state);
-}
-
-#[tauri::command]
-fn bridge_get_playback_state() -> BridgePlaybackState {
-    let playback = core::bridge::playback_core();
-    let now_playing = map_bridge_song(playback.now_playing());
-    let queue_preview = playback
-        .queue_preview(8)
-        .into_iter()
-        .map(map_bridge_song)
-        .collect();
-
-    BridgePlaybackState {
-        is_playing: playback.is_playing(),
-        now_playing,
-        queue_preview,
-    }
-}
-
-#[tauri::command]
-fn bridge_set_now_playing(app_handle: tauri::AppHandle, video_id: String, title: String, artist: String) {
-    core::bridge::playback_core().set_now_playing(video_id, title, artist, 0);
-    emit_bridge_playback_state(&app_handle);
-}
-
-#[tauri::command]
-fn bridge_set_playing(app_handle: tauri::AppHandle, is_playing: bool) {
-    core::bridge::playback_core().set_playing(is_playing);
-    emit_bridge_playback_state(&app_handle);
-}
-
-#[tauri::command]
-fn bridge_toggle_play_pause(app_handle: tauri::AppHandle) -> bool {
-    let is_playing = core::bridge::playback_core().toggle_play_pause();
-    emit_bridge_playback_state(&app_handle);
-    is_playing
-}
-
-#[tauri::command]
-fn bridge_prev_track(app_handle: tauri::AppHandle) -> BridgeSong {
-    let playback = core::bridge::playback_core();
-    playback.prev_track();
-    let song = map_bridge_song(playback.now_playing());
-    emit_bridge_playback_state(&app_handle);
-    song
-}
-
-#[tauri::command]
-fn bridge_next_track(app_handle: tauri::AppHandle) -> BridgeSong {
-    let playback = core::bridge::playback_core();
-    playback.next_track();
-    let song = map_bridge_song(playback.now_playing());
-    emit_bridge_playback_state(&app_handle);
-    song
-}
-
-#[tauri::command]
-async fn bridge_seed_queue(app_handle: tauri::AppHandle, query: Option<String>, limit: Option<usize>) -> Result<(), String> {
-    core::bridge::playback_core()
-        .seed_queue_from_backend(query.as_deref().unwrap_or("gaming music mix"), limit.unwrap_or(12))
-        .await?;
-    emit_bridge_playback_state(&app_handle);
-    Ok(())
 }
 
 fn make_song_item(t: &core::playback::NowPlaying) -> SongItem {
@@ -1035,7 +203,7 @@ fn fetch_autoplay_queue(
         }
     }).ok();
 
-    // Fetch thumbnails in background using standard YouTube thumbnail URL
+    // Fetch thumbnails in background using the standard thumbnail CDN URL
     if !need_thumbs.is_empty() {
         std::thread::spawn(move || {
             let http = match reqwest::blocking::Client::builder()
@@ -1899,6 +1067,10 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
 }
 
 pub fn run_native_shell() -> Result<(), slint::PlatformError> {
+    // Unify storage: fold any legacy `ytm-native` data into `auricle` before
+    // anything reads settings or user data.
+    core::persistence::migrate_legacy_dir();
+
     let playback = core::bridge::playback_core();
 
     if let Err(err) = playback.enable_audio_output() {
@@ -1965,19 +1137,42 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         ui.on_install_ytdlp(move || {
             let ui_weak2 = ui_weak.clone();
+            let ui_weak_prog = ui_weak.clone();
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_addon_busy(true);
+                ui.set_addon_installing(SharedString::from("ytdlp"));
+                ui.set_addon_progress(0.0);
                 ui.set_addon_status(SharedString::from("Installing yt-dlp…"));
             }
             std::thread::spawn(move || {
-                let result = crate::core::addons::install_ytdlp();
+                let last = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(-2));
+                let on_progress = {
+                    let last = last.clone();
+                    move |p: f32| {
+                        let permille = (p * 1000.0) as i32;
+                        if last.swap(permille, std::sync::atomic::Ordering::Relaxed) != permille {
+                            let w = ui_weak_prog.clone();
+                            slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = w.upgrade() { ui.set_addon_progress(p); }
+                            }).ok();
+                        }
+                    }
+                };
+                let result = crate::core::addons::install_ytdlp(on_progress);
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_weak2.upgrade() {
                         ui.set_addon_busy(false);
+                        ui.set_addon_installing(SharedString::from(""));
                         match result {
                             Ok(_) => {
                                 ui.set_ytdlp_installed(true);
                                 ui.set_addon_status(SharedString::from("yt-dlp installed."));
+                                // A successful install completes onboarding for good.
+                                let mut s = crate::core::persistence::load_settings();
+                                if !s.onboarding_seen {
+                                    s.onboarding_seen = true;
+                                    crate::core::persistence::save_settings(&s);
+                                }
                             }
                             Err(e) => {
                                 ui.set_addon_status(SharedString::from(format!("yt-dlp install failed: {}", e)));
@@ -1992,15 +1187,32 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         ui.on_install_ffmpeg(move || {
             let ui_weak2 = ui_weak.clone();
+            let ui_weak_prog = ui_weak.clone();
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_addon_busy(true);
+                ui.set_addon_installing(SharedString::from("ffmpeg"));
+                ui.set_addon_progress(0.0);
                 ui.set_addon_status(SharedString::from("Installing ffmpeg… this may take a moment."));
             }
             std::thread::spawn(move || {
-                let result = crate::core::addons::install_ffmpeg();
+                let last = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(-2));
+                let on_progress = {
+                    let last = last.clone();
+                    move |p: f32| {
+                        let permille = (p * 1000.0) as i32;
+                        if last.swap(permille, std::sync::atomic::Ordering::Relaxed) != permille {
+                            let w = ui_weak_prog.clone();
+                            slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = w.upgrade() { ui.set_addon_progress(p); }
+                            }).ok();
+                        }
+                    }
+                };
+                let result = crate::core::addons::install_ffmpeg(on_progress);
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_weak2.upgrade() {
                         ui.set_addon_busy(false);
+                        ui.set_addon_installing(SharedString::from(""));
                         match result {
                             Ok(_) => {
                                 ui.set_ffmpeg_installed(true);
@@ -2015,16 +1227,31 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             });
         });
     }
+    // Dismiss the first-run onboarding popup (and remember the choice).
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_dismiss_onboarding(move || {
+            let mut s = crate::core::persistence::load_settings();
+            s.onboarding_seen = true;
+            crate::core::persistence::save_settings(&s);
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_show_onboarding(false);
+            }
+        });
+    }
     // Initial add-on detection at startup
     {
         let ui_weak = ui.as_weak();
         std::thread::spawn(move || {
             let yt = crate::core::addons::ytdlp_installed();
             let ff = crate::core::addons::ffmpeg_installed();
+            let seen = crate::core::persistence::load_settings().onboarding_seen;
             slint::invoke_from_event_loop(move || {
                 if let Some(ui) = ui_weak.upgrade() {
                     ui.set_ytdlp_installed(yt);
                     ui.set_ffmpeg_installed(ff);
+                    // Show onboarding only on first run when yt-dlp is missing.
+                    ui.set_show_onboarding(!seen && !yt);
                 }
             }).ok();
         });
@@ -2691,7 +1918,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     }
                 }
             }
-            // Clear audio cache at %LOCALAPPDATA%\ytm-native\cache\
+            // Clear audio cache at %LOCALAPPDATA%\auricle\cache\
             let cache = core::cache::AudioCache::global().lock().unwrap();
             let cache_path = cache.cache_dir().to_path_buf();
             drop(cache);
@@ -3589,7 +2816,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             if let Some(ui) = ui_weak.upgrade() {
                 let currently_liked = ui.get_album_view_liked();
                 ui.set_album_view_liked(!currently_liked);
-                // Note: actual YouTube Music API rate_playlist/add_to_library calls
+                // Note: actual library rate_playlist/add_to_library calls
                 // require authentication; for now we toggle the local UI state.
                 // When auth is implemented, wire: api.rate_playlist(playlist_id, if liked INDIFFERENT else LIKE)
             }
@@ -3603,7 +2830,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             if let Some(ui) = ui_weak.upgrade() {
                 let currently_subscribed = ui.get_artist_view_subscribed();
                 ui.set_artist_view_subscribed(!currently_subscribed);
-                // Note: actual YouTube Music subscribe/unsubscribe calls
+                // Note: actual subscribe/unsubscribe calls
                 // require authentication; for now we toggle the local UI state.
             }
         });
@@ -3616,7 +2843,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             if let Some(ui) = ui_weak.upgrade() {
                 let currently_liked = ui.get_playlist_view_liked();
                 ui.set_playlist_view_liked(!currently_liked);
-                // Note: actual YouTube Music API calls require authentication;
+                // Note: actual library calls require authentication;
                 // for now we toggle the local UI state.
             }
         });
@@ -4238,7 +3465,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     .map(|c| c.to_uppercase().to_string())
                     .unwrap_or_else(|| "?".to_string());
 
-                // Fetch YouTube thumbnail when track changes (path only — load image on UI thread)
+                // Fetch thumbnail when track changes (path only — load image on UI thread)
                 let thumbnail_changed = track.video_id != last_thumbnail_id
                     && !track.video_id.is_empty()
                     && track.video_id != "native-prototype";
@@ -4980,142 +4207,4 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     fetch_home_enhanced_data(ui.as_weak());
 
     ui.run()
-}
-
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-  tauri::Builder::default()
-    .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-      let _ = app.get_webview_window("main").expect("no main window").set_focus();
-      // Handle deep links from CLI args (Windows/Linux)
-      for arg in args {
-        if arg.contains("com.googleusercontent.apps.363288825229-jlbiuir8ds26t7mt7jkdneqpq6o0s639") {
-           let _ = app.emit("deep-link", arg).unwrap();
-        }
-      }
-    }))
-    .plugin(tauri_plugin_deep_link::init())
-    .plugin(tauri_plugin_shell::init())
-    .invoke_handler(tauri::generate_handler![
-        search_music, 
-        search_artists,
-        save_user_data,
-        load_user_data,
-        get_google_auth_url,
-        exchange_google_code,
-        get_library_playlists,
-        get_playlist_tracks,
-        get_artist_details,
-        get_album_details,
-        generate_smart_mix,
-        push_to_cloud,
-        pull_from_cloud,
-        record_autoplay_interaction,
-        get_autoplay_learning_signals,
-        get_genre_affinity,
-        update_media_metadata,
-        minimize_window,
-        get_stream_url,
-        bridge_get_playback_state,
-        bridge_set_now_playing,
-        bridge_set_playing,
-        bridge_toggle_play_pause,
-        bridge_prev_track,
-        bridge_next_track,
-        bridge_seed_queue,
-    ])
-    .setup(|app| {
-        let window = app.get_webview_window("main").unwrap();
-
-        let show_item = tauri::menu::MenuItem::with_id(app, "tray_show", "Show", true, None::<&str>)
-            .map_err(|e| e.to_string())?;
-        let separator = tauri::menu::PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
-        let quit_item = tauri::menu::MenuItem::with_id(app, "tray_quit", "Quit", true, None::<&str>)
-            .map_err(|e| e.to_string())?;
-        let tray_menu = tauri::menu::Menu::with_items(app, &[&show_item, &separator, &quit_item])
-            .map_err(|e| e.to_string())?;
-        
-        // Setup system tray icon with click-to-restore behavior
-        let tray_builder = tauri::tray::TrayIconBuilder::with_id("main-tray")
-            .tooltip("Auricle")
-            .menu(&tray_menu)
-            .on_menu_event(|app, event| {
-                if event.id == "tray_show" {
-                    if let Some(w) = app.get_webview_window("main") {
-                        let _ = w.show();
-                        let _ = w.unminimize();
-                        let _ = w.set_focus();
-                    }
-                } else if event.id == "tray_quit" {
-                    std::process::exit(0);
-                }
-            })
-            .on_tray_icon_event(|tray, event| {
-                use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
-
-                match event {
-                    TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } => {
-                        let app = tray.app_handle();
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.show();
-                            let _ = w.unminimize();
-                            let _ = w.set_focus();
-                        }
-                    }
-                    _ => {}
-                }
-            });
-
-        let tray_builder = if let Some(icon) = app.default_window_icon().cloned() {
-            tray_builder.icon(icon)
-        } else {
-            tray_builder
-        };
-
-        let _tray = tray_builder.build(app).map_err(|e| e.to_string())?;
-        
-        #[cfg(target_os = "windows")]
-        let hwnd = Some(window.hwnd().unwrap().0 as *mut std::ffi::c_void);
-        #[cfg(not(target_os = "windows"))]
-        let hwnd = None;
-
-        let config = PlatformConfig {
-            dbus_name: "auricle-desktop",
-            display_name: "Auricle",
-            hwnd, 
-        };
-        
-        let mut controls = MediaControls::new(config).map_err(|e| e.to_string())?;
-        
-        let handle = app.handle().clone();
-        controls.attach(move |event| {
-            match event {
-                MediaControlEvent::Play => { let _ = handle.emit("media-play", ()).unwrap(); },
-                MediaControlEvent::Pause => { let _ = handle.emit("media-pause", ()).unwrap(); },
-                MediaControlEvent::Next => { let _ = handle.emit("media-next", ()).unwrap(); },
-                MediaControlEvent::Previous => { let _ = handle.emit("media-prev", ()).unwrap(); },
-                MediaControlEvent::Toggle => { let _ = handle.emit("media-toggle", ()).unwrap(); },
-                _ => {}
-            }
-        }).map_err(|e| e.to_string())?;
-
-        app.manage(MediaControlsState {
-            controls: Mutex::new(controls),
-        });
-
-      if cfg!(debug_assertions) {
-        app.handle().plugin(
-          tauri_plugin_log::Builder::default()
-            .level(log::LevelFilter::Info)
-            .build(),
-        )?;
-      }
-      Ok(())
-    })
-    .run(tauri::generate_context!())
-    .expect("error while running tauri application");
 }

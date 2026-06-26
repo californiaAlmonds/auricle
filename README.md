@@ -8,7 +8,7 @@ lightweight native shell with no embedded web view.
 ## Status
 
 This is an actively evolving prototype. The only supported UI is the native Slint
-shell (`src-tauri/ui/native_shell.slint`); there is no React/Vite/Express frontend.
+shell (`ui/native_shell.slint`); there is no React/Vite/Express frontend.
 
 ## Essential add-ons (yt-dlp & ffmpeg)
 
@@ -49,19 +49,17 @@ npm run release
 Equivalent direct Cargo commands:
 
 ```bash
-cargo run --bin native_shell \
-  --manifest-path src-tauri/Cargo.toml \
-  --target-dir src-tauri/target-native-slint
+cargo run --bin native_shell
 ```
 
 ## Architecture
 
-- `src-tauri/ui/native_shell.slint` — Slint UI: layout, callbacks, and state.
-- `src-tauri/src/lib.rs` — `run_native_shell()` wires UI callbacks to backend logic.
-- `src-tauri/src/core/bridge.rs` — shared `PlaybackCore` singleton.
-- `src-tauri/src/core/playback.rs` — queue, history, likes, and the playback worker.
-- `src-tauri/src/core/stream_player.rs` — HTTP/range streaming audio source.
-- `src-tauri/src/core/cache.rs` — LRU on-disk audio cache.
+- `ui/native_shell.slint` — Slint UI: layout, callbacks, and state.
+- `src/lib.rs` — `run_native_shell()` wires UI callbacks to backend logic.
+- `src/core/bridge.rs` — shared `PlaybackCore` singleton.
+- `src/core/playback.rs` — queue, history, likes, and the playback worker.
+- `src/core/stream_player.rs` — HTTP/range streaming audio source.
+- `src/core/cache.rs` — LRU on-disk audio cache.
 
 ## Technologies
 

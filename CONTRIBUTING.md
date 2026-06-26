@@ -25,11 +25,10 @@ feature/* ──PR──► release/x.y.z ──PR──► main
 
 ## Versioning rules (enforced by CI — non-bypassable)
 
-The version in [src-tauri/Cargo.toml](src-tauri/Cargo.toml) and
-[src-tauri/tauri.conf.json](src-tauri/tauri.conf.json) must always match the
+The version in [Cargo.toml](Cargo.toml) must always match the
 `release/x.y.z` branch involved in a pull request.
 
-- When a `release/x.y.z` branch is created, both files are set to `x.y.z`.
+- When a `release/x.y.z` branch is created, the version is set to `x.y.z`.
 - **Feature branches must NOT change the version.** A PR that does is blocked by
   the `check-version` status check.
 - A PR into `main` is only allowed from a `release/*` branch (enforced by the
