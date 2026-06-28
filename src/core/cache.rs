@@ -50,6 +50,10 @@ pub struct AudioCache {
     index_path: PathBuf,
     index: HashMap<String, CacheEntry>,
     limit_bytes: u64,
+    /// In-memory `last_played` touches that haven't been flushed to disk yet.
+    dirty: bool,
+    /// Last time the index was flushed — used to throttle read-path writes.
+    last_flush: std::time::Instant,
 }
 
 fn unix_now() -> u64 {
@@ -69,7 +73,7 @@ impl AudioCache {
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
-        Self { dir, index_path, index, limit_bytes }
+        Self { dir, index_path, index, limit_bytes, dirty: false, last_flush: std::time::Instant::now() }
     }
 
     /// Returns the cached file path if it exists on disk.
@@ -77,11 +81,14 @@ impl AudioCache {
         let entry = self.index.get_mut(video_id)?;
         let path = self.dir.join(format!("{}.m4a", video_id));
         if path.exists() {
+            // Update LRU timestamp in memory only; flush is throttled to keep
+            // synchronous disk I/O off the playback hot path (seek / track change).
             entry.last_played = unix_now();
-            self.save_index();
+            self.dirty = true;
+            self.maybe_flush();
             Some(path)
         } else {
-            // stale index entry — remove it
+            // stale index entry — remove it (structural change, flush immediately)
             self.index.remove(video_id);
             self.save_index();
             None
@@ -127,23 +134,36 @@ impl AudioCache {
 
     /// Evict LRU entries until total size ≤ limit.
     fn evict_if_needed(&mut self) {
-        if self.total_bytes() <= self.limit_bytes { return; }
+        let mut total = self.total_bytes();
+        if total <= self.limit_bytes { return; }
         // Sort by last_played ascending (oldest first)
         let mut entries: Vec<_> = self.index.values().cloned().collect();
         entries.sort_by_key(|e| e.last_played);
         for entry in entries {
-            if self.total_bytes() <= self.limit_bytes { break; }
+            if total <= self.limit_bytes { break; }
             let path = self.dir.join(format!("{}.m4a", entry.video_id));
             std::fs::remove_file(&path).ok();
-            self.index.remove(&entry.video_id);
+            if self.index.remove(&entry.video_id).is_some() {
+                total = total.saturating_sub(entry.file_size_bytes);
+            }
         }
         self.save_index();
     }
 
-    fn save_index(&self) {
-        if let Ok(json) = serde_json::to_string_pretty(&self.index) {
+    /// Flush the index to disk only if it's dirty and the throttle window elapsed.
+    /// Keeps `last_played` updates off the synchronous playback path.
+    fn maybe_flush(&mut self) {
+        if self.dirty && self.last_flush.elapsed().as_secs() >= 30 {
+            self.save_index();
+        }
+    }
+
+    fn save_index(&mut self) {
+        if let Ok(json) = serde_json::to_string(&self.index) {
             std::fs::write(&self.index_path, json).ok();
         }
+        self.dirty = false;
+        self.last_flush = std::time::Instant::now();
     }
 
     /// Set a new limit and immediately evict if over.
@@ -198,6 +218,7 @@ pub fn download_to_cache(
     args.extend([
         "-f".to_string(), "bestaudio[ext=m4a]/bestaudio/best".to_string(),
         "--no-playlist".to_string(),
+        "--fixup".to_string(), "never".to_string(),
         "-o".to_string(), staging_str,
         url,
     ]);
@@ -252,6 +273,7 @@ pub fn spawn_prefetch(video_id: String, title: String, artist: String) {
         args.extend([
             "-f".to_string(), "bestaudio[ext=m4a]/bestaudio/best".to_string(),
             "--no-playlist".to_string(),
+            "--fixup".to_string(), "never".to_string(),
             "-o".to_string(), staging_str.clone(),
             url,
         ]);

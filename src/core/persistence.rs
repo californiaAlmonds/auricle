@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -46,7 +47,7 @@ pub struct UserData {
     pub disliked: Vec<StoredSong>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub minimize_to_tray: bool,
     pub last_played: Option<StoredSong>,
@@ -160,21 +161,27 @@ pub fn save(data: &UserData) {
 
 /// Save just history + liked + disliked from current state.
 pub fn save_history(history: &[NowPlaying], liked: &[(String, NowPlaying)], disliked: &HashSet<String>, all_songs: &[NowPlaying]) {
+    // Previously-known disliked songs are cached in memory (seeded once from disk)
+    // so we don't re-read and re-parse user_data.json on every save.
+    let cell = DISLIKED_CACHE.get_or_init(|| Mutex::new(load().disliked));
+    let disliked_songs: Vec<StoredSong> = {
+        let known = cell.lock().map(|g| g.clone()).unwrap_or_default();
+        disliked.iter().filter_map(|id| {
+            all_songs.iter().find(|s| s.video_id == *id).map(StoredSong::from)
+        }).chain(
+            // Keep disliked entries that aren't in all_songs (preserve metadata).
+            known.into_iter()
+                .filter(|s| disliked.contains(&s.video_id) && !all_songs.iter().any(|a| a.video_id == s.video_id))
+        ).collect()
+    };
+    if let Ok(mut g) = cell.lock() {
+        *g = disliked_songs.clone();
+    }
+
     let data = UserData {
         history: history.iter().map(StoredSong::from).collect(),
         liked: liked.iter().map(|(_, np)| StoredSong::from(np)).collect(),
-        disliked: disliked.iter().filter_map(|id| {
-            all_songs.iter().find(|s| s.video_id == *id).map(StoredSong::from)
-        }).chain(
-            // Keep disliked entries that aren't in all_songs (preserve from previous saves)
-            std::fs::read_to_string(data_path())
-                .ok()
-                .and_then(|s| serde_json::from_str::<UserData>(&s).ok())
-                .unwrap_or_default()
-                .disliked
-                .into_iter()
-                .filter(|s| disliked.contains(&s.video_id) && !all_songs.iter().any(|a| a.video_id == s.video_id))
-        ).collect(),
+        disliked: disliked_songs,
     };
     save(&data);
 }
@@ -183,10 +190,21 @@ fn settings_path() -> PathBuf {
     data_dir().join("settings.json")
 }
 
-pub fn load_settings() -> AppSettings {
+static SETTINGS_CACHE: OnceLock<Mutex<AppSettings>> = OnceLock::new();
+static DISLIKED_CACHE: OnceLock<Mutex<Vec<StoredSong>>> = OnceLock::new();
+
+fn settings_from_disk() -> AppSettings {
     std::fs::read_to_string(settings_path())
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn load_settings() -> AppSettings {
+    SETTINGS_CACHE
+        .get_or_init(|| Mutex::new(settings_from_disk()))
+        .lock()
+        .map(|s| s.clone())
         .unwrap_or_default()
 }
 
@@ -195,5 +213,10 @@ pub fn save_settings(settings: &AppSettings) {
     let _ = std::fs::create_dir_all(&dir);
     if let Ok(json) = serde_json::to_string_pretty(settings) {
         let _ = std::fs::write(settings_path(), json);
+    }
+    // Keep the in-memory cache coherent with what we just wrote.
+    match SETTINGS_CACHE.get() {
+        Some(cell) => { if let Ok(mut g) = cell.lock() { *g = settings.clone(); } }
+        None => { let _ = SETTINGS_CACHE.set(Mutex::new(settings.clone())); }
     }
 }

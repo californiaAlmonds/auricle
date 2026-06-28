@@ -145,6 +145,11 @@ pub struct StreamingAudioSource {
     content_len: Option<u64>,
     /// True when the underlying source is a seekable file (not an HTTP stream).
     seekable: bool,
+    /// Reused interleaved sample buffer — avoids a per-packet allocation.
+    decode_buf: Option<SampleBuffer<i16>>,
+    /// Frame capacity of `decode_buf` and the spec it was built for.
+    decode_cap: u64,
+    decode_spec: Option<(u32, usize)>,
 }
 
 impl StreamingAudioSource {
@@ -241,6 +246,9 @@ impl StreamingAudioSource {
             sample_rate,
             content_len,
             seekable,
+            decode_buf: None,
+            decode_cap: 0,
+            decode_spec: None,
         })
     }
 
@@ -285,10 +293,22 @@ impl StreamingAudioSource {
             match self.decoder.decode(&packet) {
                 Ok(decoded) => {
                     let spec = *decoded.spec();
-                    let mut buf =
-                        SampleBuffer::<i16>::new(decoded.capacity() as u64, spec);
+                    let frames = decoded.capacity() as u64;
+                    let spec_key = (spec.rate, spec.channels.count());
+                    // Rebuild the reusable buffer only when the spec changes or a
+                    // larger packet arrives; otherwise reuse it in place.
+                    if self.decode_buf.is_none()
+                        || self.decode_spec != Some(spec_key)
+                        || self.decode_cap < frames
+                    {
+                        self.decode_buf = Some(SampleBuffer::<i16>::new(frames, spec));
+                        self.decode_cap = frames;
+                        self.decode_spec = Some(spec_key);
+                    }
+                    let buf = self.decode_buf.as_mut().unwrap();
                     buf.copy_interleaved_ref(decoded);
-                    self.sample_buf = buf.samples().to_vec();
+                    self.sample_buf.clear();
+                    self.sample_buf.extend_from_slice(buf.samples());
                     self.sample_pos = 0;
                     return true;
                 }
@@ -358,27 +378,32 @@ fn resolve_ytdlp() -> PathBuf {
     crate::core::addons::resolve_tool("yt-dlp")
 }
 
+/// Names of browsers whose cookie database exists on this machine, in priority order.
+/// Shared by the streaming path and the cache download path.
+pub fn detected_cookie_browsers() -> Vec<&'static str> {
+    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    let appdata = std::env::var("APPDATA").unwrap_or_default();
+    let mut out = Vec::new();
+    if std::path::Path::new(&local).join(r"Microsoft\Edge\User Data\Default\Cookies").exists() {
+        out.push("edge");
+    }
+    if std::path::Path::new(&local).join(r"Google\Chrome\User Data\Default\Cookies").exists() {
+        out.push("chrome");
+    }
+    if std::path::Path::new(&appdata).join("Mozilla\\Firefox\\Profiles").exists() {
+        out.push("firefox");
+    }
+    out
+}
+
 /// Returns the best-available `--cookies-from-browser` args for yt-dlp,
 /// based on which browser databases actually exist on this machine.
 /// Used by both the streaming path and the cache download path.
 pub fn cookie_args() -> Vec<String> {
-    let edge_db = std::path::Path::new(&std::env::var("LOCALAPPDATA").unwrap_or_default())
-        .join(r"Microsoft\Edge\User Data\Default\Cookies");
-    let chrome_db = std::path::Path::new(&std::env::var("LOCALAPPDATA").unwrap_or_default())
-        .join(r"Google\Chrome\User Data\Default\Cookies");
-    let firefox_dir = std::path::Path::new(&std::env::var("APPDATA").unwrap_or_default())
-        .join("Mozilla\\Firefox\\Profiles");
-    // Return the first found — caller can iterate browsers if needed
-    if edge_db.exists() {
-        return vec!["--cookies-from-browser".to_string(), "edge".to_string()];
+    match detected_cookie_browsers().first() {
+        Some(browser) => vec!["--cookies-from-browser".to_string(), browser.to_string()],
+        None => vec![],
     }
-    if chrome_db.exists() {
-        return vec!["--cookies-from-browser".to_string(), "chrome".to_string()];
-    }
-    if firefox_dir.exists() {
-        return vec!["--cookies-from-browser".to_string(), "firefox".to_string()];
-    }
-    vec![]
 }
 
 /// Fetches only the total byte size of a URL via a `Range: bytes=0-0` request.
@@ -428,17 +453,8 @@ pub fn get_stream_url(video_id: &str) -> Result<String, String> {
     let start = std::time::Instant::now();
 
     // Build a list of browsers to try based on whether their cookie DB exists.
-    let edge_db = std::path::Path::new(&std::env::var("LOCALAPPDATA").unwrap_or_default())
-        .join(r"Microsoft\Edge\User Data\Default\Cookies");
-    let chrome_db = std::path::Path::new(&std::env::var("LOCALAPPDATA").unwrap_or_default())
-        .join(r"Google\Chrome\User Data\Default\Cookies");
-    let firefox_dir = std::path::Path::new(&std::env::var("APPDATA").unwrap_or_default())
-        .join("Mozilla\\Firefox\\Profiles");
-
-    let mut browser_attempts: Vec<Option<&str>> = Vec::new();
-    if edge_db.exists()    { browser_attempts.push(Some("edge")); }
-    if chrome_db.exists()  { browser_attempts.push(Some("chrome")); }
-    if firefox_dir.exists(){ browser_attempts.push(Some("firefox")); }
+    let mut browser_attempts: Vec<Option<&str>> =
+        detected_cookie_browsers().into_iter().map(Some).collect();
     browser_attempts.push(None); // bare fallback (no cookies)
 
     let mut last_err = format!("yt-dlp not available at {}", ytdlp.display());

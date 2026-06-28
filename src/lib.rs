@@ -257,23 +257,25 @@ fn refresh_native_shell_ui(ui: &NativeShellWindow, playback: &'static core::play
     ui.set_track_initial(SharedString::from(initial.as_str()));
     ui.set_is_liked(playback.is_liked(&track.video_id));
 
-    let queue_items: Vec<SongItem> = playback.queue_upcoming().iter().map(make_song_item).collect();
+    // Fetch each list once under lock, then reuse for both the models and the
+    // missing-thumbnail scan below.
+    let upcoming = playback.queue_upcoming();
+    let liked = playback.get_liked_songs();
+
+    let queue_items: Vec<SongItem> = upcoming.iter().map(make_song_item).collect();
     ui.set_queue(ModelRc::new(VecModel::from(queue_items)));
 
-    let liked_items: Vec<SongItem> = playback.get_liked_songs().iter().map(make_song_item).collect();
+    let liked_items: Vec<SongItem> = liked.iter().map(make_song_item).collect();
     ui.set_liked_songs(ModelRc::new(VecModel::from(liked_items)));
 
     // Spawn background thumbnail fetch for items missing thumbnails
     let mut missing_vids: Vec<String> = Vec::new();
-    for np in playback.queue_upcoming().iter() {
-        let tp = std::env::temp_dir().join(format!("ytm_thumb_{}.jpg", np.video_id));
-        if !tp.exists() && !np.video_id.is_empty() {
-            missing_vids.push(np.video_id.clone());
+    for np in upcoming.iter().chain(liked.iter()) {
+        if np.video_id.is_empty() || missing_vids.contains(&np.video_id) {
+            continue;
         }
-    }
-    for np in playback.get_liked_songs().iter() {
         let tp = std::env::temp_dir().join(format!("ytm_thumb_{}.jpg", np.video_id));
-        if !tp.exists() && !np.video_id.is_empty() && !missing_vids.contains(&np.video_id) {
+        if !tp.exists() {
             missing_vids.push(np.video_id.clone());
         }
     }
@@ -3465,28 +3467,47 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     .map(|c| c.to_uppercase().to_string())
                     .unwrap_or_else(|| "?".to_string());
 
-                // Fetch thumbnail when track changes (path only — load image on UI thread)
+                // Album art when the track changes. If the thumbnail is already on
+                // disk, use it immediately; otherwise download it on a background
+                // thread so this 500ms poll loop never blocks on the network.
                 let thumbnail_changed = track.video_id != last_thumbnail_id
                     && !track.video_id.is_empty()
                     && track.video_id != "native-prototype";
 
-                let thumb_path: Option<std::path::PathBuf> = if thumbnail_changed {
-                    if let Some(ref client) = http {
-                        let url = format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", track.video_id);
-                        if let Ok(resp) = client.get(&url).send() {
-                            if resp.status().is_success() {
-                                if let Ok(bytes) = resp.bytes() {
-                                    let tmp = std::env::temp_dir()
-                                        .join(format!("ytm_thumb_{}.jpg", track.video_id));
-                                    if std::fs::write(&tmp, &bytes).is_ok() { Some(tmp) } else { None }
-                                } else { None }
-                            } else { None }
-                        } else { None }
-                    } else { None }
-                } else { None };
-
+                let mut thumb_path: Option<std::path::PathBuf> = None;
                 if thumbnail_changed {
                     last_thumbnail_id = track.video_id.clone();
+                    let cached = std::env::temp_dir()
+                        .join(format!("ytm_thumb_{}.jpg", track.video_id));
+                    if cached.exists() {
+                        thumb_path = Some(cached);
+                    } else if let Some(ref client) = http {
+                        let client = client.clone();
+                        let vid = track.video_id.clone();
+                        let ui_weak_art = ui_weak.clone();
+                        std::thread::spawn(move || {
+                            let url = format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", vid);
+                            let tmp = std::env::temp_dir().join(format!("ytm_thumb_{}.jpg", vid));
+                            let ok = client.get(&url).send().ok()
+                                .filter(|r| r.status().is_success())
+                                .and_then(|r| r.bytes().ok())
+                                .map(|b| std::fs::write(&tmp, &b).is_ok())
+                                .unwrap_or(false);
+                            if ok {
+                                slint::invoke_from_event_loop(move || {
+                                    if let Some(ui) = ui_weak_art.upgrade() {
+                                        // Only apply if this is still the current track.
+                                        if ui.get_now_playing_video_id().as_str() == vid {
+                                            if let Ok(img) = slint::Image::load_from_path(&tmp) {
+                                                ui.set_album_art(img);
+                                                ui.set_has_album_art(true);
+                                            }
+                                        }
+                                    }
+                                }).ok();
+                            }
+                        });
+                    }
                 }
 
                 // ── Push cache stats to UI every poll tick ──
