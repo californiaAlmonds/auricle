@@ -1,7 +1,7 @@
 {
   "name": "auricle-desktop",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "scripts": {
     "build": "cargo build --bin native_shell",
     "run": "cargo run --bin native_shell",
