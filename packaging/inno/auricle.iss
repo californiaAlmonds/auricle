@@ -18,9 +18,9 @@ AppPublisherURL=https://github.com/californiaAlmonds/auricle
 DefaultDirName={autopf}\Auricle
 DefaultGroupName=Auricle
 DisableProgramGroupPage=yes
-OutputDir=dist
+OutputDir=..\..\dist
 OutputBaseFilename=auricle-{#MyAppVersion}-setup
-SetupIconFile=icons\icon.ico
+SetupIconFile=..\..\icons\icon.ico
 Compression=lzma2
 SolidCompression=yes
 ArchitecturesAllowed=x64compatible
@@ -35,7 +35,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
 
 [Files]
-Source: "dist\auricle.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\dist\auricle.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\Auricle"; Filename: "{app}\auricle.exe"
