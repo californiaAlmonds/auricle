@@ -1,6 +1,6 @@
 [package]
 name = "auricle"
-version = "0.1.1"
+version = "0.1.2"
 description = "Auricle — a native music player desktop shell built with Rust and Slint"
 authors = ["you"]
 license = "GPL-3.0-only"
