@@ -5,6 +5,10 @@ Auricle is a native desktop music player for Windows, built with **Rust** and th
 queue, likes/history, OS media-key integration, and a local audio cache — all in a
 lightweight native shell with no embedded web view.
 
+[![Download auricle](https://a.fsdn.com/con/app/sf-download-button)](https://sourceforge.net/projects/auricle/files/latest/download)
+
+![Auricle screenshot](docs/screenshot.png)
+
 ## Status
 
 This is an actively evolving prototype. The only supported UI is the native Slint

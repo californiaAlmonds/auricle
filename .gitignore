@@ -11,6 +11,7 @@
 # ── Build / log artifacts ─────────────────────────────────────
 build_output.txt
 *.log
+/dist/
 
 # ── Environment / secrets ─────────────────────────────────────
 .env
@@ -28,3 +29,6 @@ rearchitecture.md
 # ── OS / editor cruft ─────────────────────────────────────────
 .DS_Store
 Thumbs.db
+
+# ── Temporary screenshots ─────────────────────────────────────
+/shot*.png
