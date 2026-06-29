@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>auricle</id>
+    <version>0.0.0</version>
+    <title>Auricle</title>
+    <authors>californiaAlmonds</authors>
+    <projectUrl>https://github.com/californiaAlmonds/auricle</projectUrl>
+    <projectSourceUrl>https://github.com/californiaAlmonds/auricle</projectSourceUrl>
+    <packageSourceUrl>https://github.com/californiaAlmonds/auricle</packageSourceUrl>
+    <licenseUrl>https://github.com/californiaAlmonds/auricle/blob/main/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <tags>music youtube-music player rust slint audio</tags>
+    <summary>A native YouTube Music desktop client built with Rust and Slint.</summary>
+    <description>Auricle is a native Windows music player desktop shell built with Rust and Slint. Optional third-party tools (yt-dlp, ffmpeg) are downloaded by the user; they are not bundled or redistributed.</description>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>
