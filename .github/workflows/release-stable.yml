@@ -111,8 +111,8 @@ jobs:
           HASH=$(sha256sum "dist/auricle-${V}-portable.zip" | cut -d' ' -f1)
           git clone "https://x-access-token:${{ secrets.SCOOP_BUCKET_TOKEN }}@github.com/californiaAlmonds/scoop-auricle.git" bucket
           mkdir -p bucket/bucket
-          sed -e "s/0.0.0/${V}/g" \
-              -e "s/0000000000000000000000000000000000000000000000000000000000000000/${HASH}/g" \
+          sed -e "s/__VERSION__/${V}/g" \
+              -e "s/__HASH__/${HASH}/g" \
               packaging/scoop/auricle.json > bucket/bucket/auricle.json
           cd bucket
           git config user.name "github-actions[bot]"
@@ -127,10 +127,8 @@ jobs:
         run: |
           $V = "${{ steps.ver.outputs.version }}"
           $hash = (Get-FileHash "dist/auricle-$V-setup.exe" -Algorithm SHA256).Hash.ToLower()
-          (Get-Content packaging/chocolatey/auricle.nuspec) -replace '0.0.0', $V | Set-Content packaging/chocolatey/auricle.nuspec
-          (Get-Content packaging/chocolatey/tools/chocolateyinstall.ps1) `
-            -replace '0.0.0', $V `
-            -replace '0{64}', $hash | Set-Content packaging/chocolatey/tools/chocolateyinstall.ps1
+          (Get-Content packaging/chocolatey/auricle.nuspec).Replace('__VERSION__', $V) | Set-Content packaging/chocolatey/auricle.nuspec
+          (Get-Content packaging/chocolatey/tools/chocolateyinstall.ps1).Replace('__VERSION__', $V).Replace('__CHECKSUM__', $hash) | Set-Content packaging/chocolatey/tools/chocolateyinstall.ps1
           choco pack packaging/chocolatey/auricle.nuspec --outputdirectory dist
           choco push "dist/auricle.$V.nupkg" --source https://push.chocolatey.org/ --api-key "${{ secrets.CHOCO_API_TOKEN }}"
 
