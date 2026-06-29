@@ -2,7 +2,7 @@
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
     <id>auricle</id>
-    <version>0.0.0</version>
+    <version>__VERSION__</version>
     <title>Auricle</title>
     <authors>californiaAlmonds</authors>
     <projectUrl>https://github.com/californiaAlmonds/auricle</projectUrl>
