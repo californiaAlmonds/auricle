@@ -4,7 +4,7 @@ version = "0.1.1"
 description = "Auricle — a native music player desktop shell built with Rust and Slint"
 authors = ["you"]
 license = "GPL-3.0-only"
-repository = ""
+repository = "https://github.com/californiaAlmonds/auricle"
 edition = "2021"
 rust-version = "1.77.2"
 default-run = "auricle"
@@ -32,6 +32,14 @@ symphonia = { version = "0.5.5", features = ["aac", "mp3", "isomp4", "opt-simd"]
 tray-icon = "0.19"
 image = { version = "0.25", default-features = false, features = ["png"] }
 zip = "2.2"
+self_update = { version = "0.42", default-features = false, features = ["rustls", "archive-zip", "compression-zip-deflate"], optional = true }
+
+[features]
+# `self-update` is on by default for the portable build. Installer/Store builds
+# (scoop/winget/chocolatey/msix) must be built with `--no-default-features` so the
+# package manager / Microsoft Store owns updates instead of the in-app updater.
+default = ["self-update"]
+self-update = ["dep:self_update"]
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

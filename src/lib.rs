@@ -1229,6 +1229,62 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             });
         });
     }
+    // ── Updates (portable build only) ─────────────────────────────────────────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_check_updates(move || {
+            let ui_weak2 = ui_weak.clone();
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_update_busy(true);
+                ui.set_update_status(SharedString::from("Checking for updates…"));
+            }
+            std::thread::spawn(move || {
+                let result = crate::core::updater::check_latest();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak2.upgrade() {
+                        ui.set_update_busy(false);
+                        match result {
+                            Ok(c) => {
+                                ui.set_update_available(c.update_available);
+                                ui.set_update_status(SharedString::from(if c.update_available {
+                                    format!("Update available: v{}", c.latest)
+                                } else {
+                                    "You're up to date.".to_string()
+                                }));
+                            }
+                            Err(e) => ui.set_update_status(SharedString::from(format!("Update check failed: {e}"))),
+                        }
+                    }
+                }).ok();
+            });
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_apply_update(move || {
+            let ui_weak2 = ui_weak.clone();
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_update_busy(true);
+                ui.set_update_status(SharedString::from("Downloading update…"));
+            }
+            std::thread::spawn(move || {
+                let result = crate::core::updater::apply_update();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak2.upgrade() {
+                        ui.set_update_busy(false);
+                        match result {
+                            Ok(v) => {
+                                ui.set_update_available(false);
+                                ui.set_update_status(SharedString::from(format!("Updated to v{v}. Restart to apply.")));
+                            }
+                            Err(e) => ui.set_update_status(SharedString::from(format!("Update failed: {e}"))),
+                        }
+                    }
+                }).ok();
+            });
+        });
+    }
+
     // Dismiss the first-run onboarding popup (and remember the choice).
     {
         let ui_weak = ui.as_weak();
@@ -1256,6 +1312,25 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     ui.set_show_onboarding(!seen && !yt);
                 }
             }).ok();
+        });
+    }
+
+    // Version + update capability (portable build self-updates; installer/Store hidden)
+    ui.set_app_version(SharedString::from(crate::core::updater::current_version()));
+    ui.set_self_update_enabled(crate::core::updater::self_update_supported());
+    if crate::core::updater::self_update_supported() {
+        let ui_weak = ui.as_weak();
+        std::thread::spawn(move || {
+            if let Ok(c) = crate::core::updater::check_latest() {
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_update_available(c.update_available);
+                        if c.update_available {
+                            ui.set_update_status(SharedString::from(format!("Update available: v{}", c.latest)));
+                        }
+                    }
+                }).ok();
+            }
         });
     }
 
