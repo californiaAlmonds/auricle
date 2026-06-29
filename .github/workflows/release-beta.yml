@@ -47,8 +47,10 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp "target/release/native_shell.exe" \
-             "dist/auricle-${{ steps.ver.outputs.version }}.exe"
+          V="${{ steps.ver.outputs.version }}"
+          # Beta ships portable (self-update enabled) only.
+          cp "target/release/native_shell.exe" "auricle.exe"
+          7z a "dist/auricle-${V}-portable.zip" "auricle.exe"
 
       - name: Publish pre-release
         uses: softprops/action-gh-release@v2
@@ -57,4 +59,4 @@ jobs:
           name: Auricle ${{ steps.ver.outputs.version }}
           prerelease: true
           generate_release_notes: true
-          files: dist/auricle-${{ steps.ver.outputs.version }}.exe
+          files: dist/auricle-${{ steps.ver.outputs.version }}-portable.zip

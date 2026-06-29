@@ -634,6 +634,16 @@ export component NativeShellWindow inherits Window {
     callback install-ffmpeg();
     callback refresh-addons();
 
+    // App updates — only the portable build self-updates. Installer/Store builds
+    // hide this entirely (self-update-enabled = false) and defer to their manager.
+    in-out property <string> app-version: "";
+    in-out property <bool> self-update-enabled: false;
+    in-out property <bool> update-available: false;
+    in-out property <bool> update-busy: false;
+    in-out property <string> update-status: "";
+    callback check-updates();
+    callback apply-update();
+
     // First-run onboarding popup for add-on installation.
     in-out property <bool> show-onboarding: false;
     callback dismiss-onboarding();
@@ -2310,6 +2320,34 @@ export component NativeShellWindow inherits Window {
                                             Text { text: "Auricle"; font-size: 16px; font-weight: 600; color: #ffffff; }
                                             Text { text: "Native • Rust + Slint"; font-size: 12px; color: #5a5a5a; }
                                         }
+                                    }
+                                }
+                                // Updates (portable build only)
+                                if self-update-enabled: Text { text: "Updates"; font-size: 14px; font-weight: 600; color: #808080; }
+                                if self-update-enabled: Rectangle {
+                                    border-radius: 12px; background: #0f0f0f; border-color: #1a1a1a; border-width: 1px;
+                                    VerticalLayout { padding: 18px; spacing: 14px;
+                                        HorizontalLayout { spacing: 12px;
+                                            VerticalLayout { alignment: center; spacing: 2px; horizontal-stretch: 1;
+                                                Text { text: "Current version"; font-size: 14px; color: #c0c0c0; }
+                                                Text { text: "v\{app-version}"; font-size: 12px; color: #5a5a5a; }
+                                            }
+                                            if update-available: Rectangle {
+                                                width: 110px; height: 32px; border-radius: 8px;
+                                                background: update-busy ? #181818 : (upd-ta.has-hover ? #f06a6a : #e85d5d);
+                                                animate background { duration: 100ms; }
+                                                Text { text: "Update now"; font-size: 13px; color: update-busy ? #5a5a5a : #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+                                                upd-ta := TouchArea { clicked => { if !update-busy { apply-update(); } } }
+                                            }
+                                            if !update-available: Rectangle {
+                                                width: 130px; height: 32px; border-radius: 8px;
+                                                background: update-busy ? #181818 : (chk-ta.has-hover ? #242424 : transparent);
+                                                border-color: #333333; border-width: 1px;
+                                                Text { text: "Check for updates"; font-size: 12px; color: update-busy ? #5a5a5a : #c0c0c0; horizontal-alignment: center; vertical-alignment: center; }
+                                                chk-ta := TouchArea { clicked => { if !update-busy { check-updates(); } } }
+                                            }
+                                        }
+                                        if update-status != "": Text { text: update-status; font-size: 12px; color: #8a8a8a; wrap: word-wrap; }
                                     }
                                 }
                                 // Essential add-ons

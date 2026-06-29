@@ -4,3 +4,4 @@ pub mod bridge;
 pub mod cache;
 pub mod persistence;
 pub mod addons;
+pub mod updater;
