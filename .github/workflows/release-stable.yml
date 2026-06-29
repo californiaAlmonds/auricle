@@ -43,15 +43,47 @@ jobs:
           BRANCH="${{ github.event.pull_request.head.ref }}"
           echo "version=${BRANCH#release/}" >> "$GITHUB_OUTPUT"
 
-      - name: Build release binary
-        run: npm run release
+      - name: Build portable binary (self-update enabled)
+        run: cargo build --bin native_shell --release
 
-      - name: Stage artifact
+      - name: Build installer binary (self-update disabled)
+        run: cargo build --bin native_shell --release --no-default-features --target-dir target/installer
+
+      - name: Stage artifacts
         shell: bash
         run: |
           mkdir -p dist
-          cp "target/release/native_shell.exe" \
-             "dist/auricle-${{ steps.ver.outputs.version }}.exe"
+          V="${{ steps.ver.outputs.version }}"
+          # Portable: zip with bin named auricle.exe so self_update can self-replace.
+          cp "target/release/native_shell.exe" "auricle.exe"
+          7z a "dist/auricle-${V}-portable.zip" "auricle.exe"
+          # Installer-profile standalone exe (no self-update); fed to packager/MSIX.
+          cp "target/installer/release/native_shell.exe" "dist/auricle-${V}-installer.exe"
+
+      # Code signing is OPTIONAL and disabled until SignPath credentials are added.
+      # SignPath Foundation grants free Authenticode signing to OSS projects:
+      #   1. Apply at https://about.signpath.io/product/open-source
+      #   2. Add repo secrets SIGNPATH_API_TOKEN and SIGNPATH_ORG_ID, then create a
+      #      SignPath project "auricle" + signing policy "release-signing".
+      #   3. Uncomment the upload + sign steps below; mapping the secret to an env
+      #      var (HAS_SIGNPATH) keeps `if:` valid even before the secret exists.
+      # - name: Upload artifacts for signing
+      #   id: upload
+      #   uses: actions/upload-artifact@v4
+      #   with: { name: auricle-unsigned, path: dist/ }
+      # - name: Code sign (SignPath)
+      #   env:
+      #     SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+      #     SIGNPATH_ORG_ID: ${{ secrets.SIGNPATH_ORG_ID }}
+      #   uses: signpath/github-action-submit-signing-request@v1
+      #   with:
+      #     api-token: ${{ env.SIGNPATH_API_TOKEN }}
+      #     organization-id: ${{ env.SIGNPATH_ORG_ID }}
+      #     project-slug: auricle
+      #     signing-policy-slug: release-signing
+      #     artifact-configuration-slug: zip
+      #     github-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      #     wait-for-completion: true
 
       - name: Publish stable release
         uses: softprops/action-gh-release@v2
@@ -61,4 +93,51 @@ jobs:
           prerelease: false
           body: ${{ github.event.pull_request.body }}
           generate_release_notes: true
-          files: dist/auricle-${{ steps.ver.outputs.version }}.exe
+          files: |
+            dist/auricle-${{ steps.ver.outputs.version }}-portable.zip
+            dist/auricle-${{ steps.ver.outputs.version }}-installer.exe
+
+      # ── Scoop: update manifest in the bucket repo ────────────────────────────
+      - name: Publish Scoop manifest
+        shell: bash
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          HASH=$(sha256sum "dist/auricle-${V}-portable.zip" | cut -d' ' -f1)
+          git clone "https://x-access-token:${{ secrets.SCOOP_BUCKET_TOKEN }}@github.com/californiaAlmonds/scoop-auricle.git" bucket
+          mkdir -p bucket/bucket
+          sed -e "s/0.0.0/${V}/g" \
+              -e "s/0000000000000000000000000000000000000000000000000000000000000000/${HASH}/g" \
+              packaging/scoop/auricle.json > bucket/bucket/auricle.json
+          cd bucket
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add bucket/auricle.json
+          git commit -m "auricle: update to ${V}" || echo "no changes"
+          git push
+
+      # ── Chocolatey: pack + push ──────────────────────────────────────────────
+      - name: Publish Chocolatey package
+        shell: pwsh
+        run: |
+          $V = "${{ steps.ver.outputs.version }}"
+          $hash = (Get-FileHash "dist/auricle-$V-installer.exe" -Algorithm SHA256).Hash.ToLower()
+          (Get-Content packaging/chocolatey/auricle.nuspec) -replace '0.0.0', $V | Set-Content packaging/chocolatey/auricle.nuspec
+          (Get-Content packaging/chocolatey/tools/chocolateyinstall.ps1) `
+            -replace '0.0.0', $V `
+            -replace '0{64}', $hash | Set-Content packaging/chocolatey/tools/chocolateyinstall.ps1
+          choco pack packaging/chocolatey/auricle.nuspec --outputdirectory dist
+          choco push "dist/auricle.$V.nupkg" --source https://push.chocolatey.org/ --api-key "${{ secrets.CHOCO_API_TOKEN }}"
+
+      # ── winget: open/refresh manifest PR to microsoft/winget-pkgs ─────────────
+      # First-ever submission must be created once with `wingetcreate new`; after
+      # the PackageIdentifier exists, this updates it on every release. Needs a
+      # GitHub PAT (public_repo) in the WINGET_TOKEN secret.
+      - name: Publish to winget
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        shell: pwsh
+        run: |
+          $V = "${{ steps.ver.outputs.version }}"
+          $url = "https://github.com/californiaAlmonds/auricle/releases/download/v$V/auricle-$V-installer.exe"
+          Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+          ./wingetcreate.exe update californiaAlmonds.Auricle --version $V --urls "$url" --submit --token "$env:WINGET_TOKEN"
