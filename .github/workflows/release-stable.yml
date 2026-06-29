@@ -57,8 +57,14 @@ jobs:
           # Portable: zip with bin named auricle.exe so self_update can self-replace.
           cp "target/release/native_shell.exe" "auricle.exe"
           7z a "dist/auricle-${V}-portable.zip" "auricle.exe"
-          # Installer-profile standalone exe (no self-update); fed to packager/MSIX.
-          cp "target/installer/release/native_shell.exe" "dist/auricle-${V}-installer.exe"
+          # Installer-profile standalone exe (no self-update); fed to Inno Setup.
+          cp "target/installer/release/native_shell.exe" "dist/auricle.exe"
+
+      - name: Build setup.exe (Inno Setup)
+        shell: pwsh
+        run: |
+          $V = "${{ steps.ver.outputs.version }}"
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$V" packaging\inno\auricle.iss
 
       # Code signing is OPTIONAL and disabled until SignPath credentials are added.
       # SignPath Foundation grants free Authenticode signing to OSS projects:
@@ -95,7 +101,7 @@ jobs:
           generate_release_notes: true
           files: |
             dist/auricle-${{ steps.ver.outputs.version }}-portable.zip
-            dist/auricle-${{ steps.ver.outputs.version }}-installer.exe
+            dist/auricle-${{ steps.ver.outputs.version }}-setup.exe
 
       # ── Scoop: update manifest in the bucket repo ────────────────────────────
       - name: Publish Scoop manifest
@@ -120,7 +126,7 @@ jobs:
         shell: pwsh
         run: |
           $V = "${{ steps.ver.outputs.version }}"
-          $hash = (Get-FileHash "dist/auricle-$V-installer.exe" -Algorithm SHA256).Hash.ToLower()
+          $hash = (Get-FileHash "dist/auricle-$V-setup.exe" -Algorithm SHA256).Hash.ToLower()
           (Get-Content packaging/chocolatey/auricle.nuspec) -replace '0.0.0', $V | Set-Content packaging/chocolatey/auricle.nuspec
           (Get-Content packaging/chocolatey/tools/chocolateyinstall.ps1) `
             -replace '0.0.0', $V `
@@ -138,6 +144,6 @@ jobs:
         shell: pwsh
         run: |
           $V = "${{ steps.ver.outputs.version }}"
-          $url = "https://github.com/californiaAlmonds/auricle/releases/download/v$V/auricle-$V-installer.exe"
+          $url = "https://github.com/californiaAlmonds/auricle/releases/download/v$V/auricle-$V-setup.exe"
           Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
           ./wingetcreate.exe update californiaAlmonds.Auricle --version $V --urls "$url" --submit --token "$env:WINGET_TOKEN"
