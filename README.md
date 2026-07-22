@@ -53,7 +53,7 @@ npm run release
 Equivalent direct Cargo commands:
 
 ```bash
-cargo run --bin native_shell
+cargo run --bin auricle
 ```
 
 ## Architecture

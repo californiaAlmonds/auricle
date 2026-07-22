@@ -136,6 +136,45 @@ component TabPill inherits Rectangle {
     ta := TouchArea { clicked => { root.clicked(); } }
 }
 
+// ─── Context-menu row (consistent icon slot + label alignment) ────────────────
+// One row of a right-click popup menu. Every row uses a fixed-width icon slot so
+// all labels line up, whether the icon is an SVG image or a text glyph.
+component CtxMenuItem inherits Rectangle {
+    in property <string> label;
+    in property <image> icon;
+    in property <bool> use-image: true;      // false → render `glyph` text instead
+    in property <string> glyph: "";
+    in property <length> glyph-size: 15px;
+    in property <color> icon-color: #b0b0b0;
+    in property <color> label-color: #e0e0e0;
+    callback clicked;
+    height: 40px;
+    border-radius: 4px;
+    background: mi-ta.has-hover ? #ffffff14 : transparent;
+    HorizontalLayout {
+        padding-left: 14px; padding-right: 12px; spacing: 12px; alignment: start;
+        // Fixed-width icon slot; every glyph/image is centered in the full row
+        // height so labels AND icons line up regardless of glyph size.
+        Rectangle {
+            width: 22px;
+            if root.use-image: Image {
+                source: root.icon; width: 16px; height: 16px; colorize: root.icon-color;
+                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            }
+            if !root.use-image: Text {
+                text: root.glyph; font-size: root.glyph-size; color: root.icon-color;
+                width: parent.width; height: parent.height;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+        }
+        Text {
+            text: root.label; font-size: 14px; font-weight: 500; color: root.label-color;
+            vertical-alignment: center; horizontal-stretch: 1; overflow: elide;
+        }
+    }
+    mi-ta := TouchArea { clicked => { root.clicked(); } }
+}
+
 component SongRow inherits Rectangle {
     in property <string> song-title; in property <string> song-artist;
     in property <string> song-album; in property <string> song-duration;
@@ -223,89 +262,17 @@ component SongRow inherits Rectangle {
             drop-shadow-blur: 16px; drop-shadow-color: #00000080; drop-shadow-offset-y: 4px;
             VerticalLayout {
                 padding: 6px;
-                Rectangle {
-                    height: 38px; border-radius: 4px;
-                    background: rctx1.has-hover ? #ffffff14 : transparent;
-                    HorizontalLayout {
-                        padding-left: 14px; spacing: 12px; alignment: start;
-                        Text { text: "+"; font-size: 18px; color: #b0b0b0; vertical-alignment: center; width: 20px; }
-                        Text { text: "Add to queue"; font-size: 14px; font-weight: 500; color: #e0e0e0; vertical-alignment: center; }
-                    }
-                    rctx1 := TouchArea { clicked => { root.queue-clicked(); row-ctx-popup.close(); } }
-                }
-                Rectangle {
-                    height: 38px; border-radius: 4px;
-                    background: rctx-pn.has-hover ? #ffffff14 : transparent;
-                    HorizontalLayout {
-                        padding-left: 14px; spacing: 12px; alignment: start;
-                        Image { source: @image-url("icons/next.svg"); width: 16px; height: 16px; colorize: #b0b0b0; vertical-alignment: center; }
-                        Text { text: "Play next"; font-size: 14px; font-weight: 500; color: #e0e0e0; vertical-alignment: center; }
-                    }
-                    rctx-pn := TouchArea { clicked => { root.play-next-clicked(); row-ctx-popup.close(); } }
-                }
-                Rectangle {
-                    height: 38px; border-radius: 4px;
-                    background: rctx2.has-hover ? #ffffff14 : transparent;
-                    HorizontalLayout {
-                        padding-left: 14px; spacing: 12px; alignment: start;
-                        Image { source: @image-url("icons/play.svg"); width: 16px; height: 16px; colorize: #b0b0b0; vertical-alignment: center; }
-                        Text { text: "Play"; font-size: 14px; font-weight: 500; color: #e0e0e0; vertical-alignment: center; }
-                    }
-                    rctx2 := TouchArea { clicked => { root.play-clicked(); row-ctx-popup.close(); } }
-                }
-                Rectangle {
-                    height: 38px; border-radius: 4px;
-                    background: rctx-radio.has-hover ? #ffffff14 : transparent;
-                    HorizontalLayout {
-                        padding-left: 14px; spacing: 12px; alignment: start;
-                        Image { source: @image-url("icons/radio.svg"); width: 16px; height: 16px; colorize: #b0b0b0; vertical-alignment: center; }
-                        Text { text: "Go to song radio"; font-size: 14px; font-weight: 500; color: #e0e0e0; vertical-alignment: center; }
-                    }
-                    rctx-radio := TouchArea { clicked => { root.song-radio-clicked(); row-ctx-popup.close(); } }
-                }
-                Rectangle {
-                    height: 38px; border-radius: 4px;
-                    background: rctx-artist.has-hover ? #ffffff14 : transparent;
-                    HorizontalLayout {
-                        padding-left: 14px; spacing: 12px; alignment: start;
-                        Text { text: "👤"; font-size: 14px; color: #b0b0b0; vertical-alignment: center; width: 20px; }
-                        Text { text: "Go to artist"; font-size: 14px; font-weight: 500; color: #e0e0e0; vertical-alignment: center; }
-                    }
-                    rctx-artist := TouchArea { clicked => { root.go-to-artist-clicked(); row-ctx-popup.close(); } }
-                }
-                Rectangle {
-                    height: 38px; border-radius: 4px;
-                    background: rctx-album.has-hover ? #ffffff14 : transparent;
-                    HorizontalLayout {
-                        padding-left: 14px; spacing: 12px; alignment: start;
-                        Image { source: @image-url("icons/album.svg"); width: 16px; height: 16px; colorize: #b0b0b0; vertical-alignment: center; }
-                        Text { text: "Go to album"; font-size: 14px; font-weight: 500; color: #e0e0e0; vertical-alignment: center; }
-                    }
-                    rctx-album := TouchArea { clicked => { root.go-to-album-clicked(); row-ctx-popup.close(); } }
-                }
-                if root.show-unlike: Rectangle {
-                    height: 38px; border-radius: 4px;
-                    background: rctx-unlike.has-hover ? #ffffff14 : transparent;
-                    HorizontalLayout {
-                        padding-left: 14px; spacing: 12px; alignment: start;
-                        Text { text: "\u{2764}"; font-size: 14px; color: #e85d5d; vertical-alignment: center; width: 20px; }
-                        Text { text: "Remove from liked"; font-size: 14px; font-weight: 500; color: #e0e0e0; vertical-alignment: center; }
-                    }
-                    rctx-unlike := TouchArea { clicked => { root.unlike-clicked(); row-ctx-popup.close(); } }
-                }
+                CtxMenuItem { use-image: false; glyph: "+"; glyph-size: 18px; label: "Add to queue"; clicked => { root.queue-clicked(); row-ctx-popup.close(); } }
+                CtxMenuItem { icon: @image-url("icons/next.svg"); label: "Play next"; clicked => { root.play-next-clicked(); row-ctx-popup.close(); } }
+                CtxMenuItem { icon: @image-url("icons/play.svg"); label: "Play"; clicked => { root.play-clicked(); row-ctx-popup.close(); } }
+                CtxMenuItem { icon: @image-url("icons/radio.svg"); label: "Go to song radio"; clicked => { root.song-radio-clicked(); row-ctx-popup.close(); } }
+                CtxMenuItem { use-image: false; glyph: "👤"; label: "Go to artist"; clicked => { root.go-to-artist-clicked(); row-ctx-popup.close(); } }
+                CtxMenuItem { icon: @image-url("icons/album.svg"); label: "Go to album"; clicked => { root.go-to-album-clicked(); row-ctx-popup.close(); } }
+                if root.show-unlike: CtxMenuItem { use-image: false; glyph: "\u{2764}"; icon-color: #e85d5d; label: "Remove from liked"; clicked => { root.unlike-clicked(); row-ctx-popup.close(); } }
                 Rectangle {
                     height: 1px; background: #ffffff10;
                 }
-                Rectangle {
-                    height: 38px; border-radius: 4px;
-                    background: rctx-dislike.has-hover ? #ffffff14 : transparent;
-                    HorizontalLayout {
-                        padding-left: 14px; spacing: 12px; alignment: start;
-                        Text { text: "\u{1F6AB}"; font-size: 13px; color: #b0b0b0; vertical-alignment: center; width: 20px; }
-                        Text { text: "Remove from taste profile"; font-size: 13px; font-weight: 500; color: #e0e0e0; vertical-alignment: center; }
-                    }
-                    rctx-dislike := TouchArea { clicked => { root.dislike-clicked(); row-ctx-popup.close(); } }
-                }
+                CtxMenuItem { use-image: false; glyph: "\u{1F6AB}"; glyph-size: 13px; label: "Remove from taste profile"; clicked => { root.dislike-clicked(); row-ctx-popup.close(); } }
             }
         }
     }
@@ -414,56 +381,11 @@ component SongCard inherits Rectangle {
             drop-shadow-blur: 16px; drop-shadow-color: #00000080; drop-shadow-offset-y: 4px;
             VerticalLayout {
                 padding: 6px;
-                Rectangle {
-                    height: 40px; border-radius: 4px;
-                    background: ctx1.has-hover ? #ffffff14 : transparent;
-                    HorizontalLayout {
-                        padding-left: 14px; spacing: 12px; alignment: start;
-                        Text { text: "+"; font-size: 18px; color: #b0b0b0; vertical-alignment: center; width: 20px; }
-                        Text { text: "Add to queue"; font-size: 14px; font-weight: 500; color: #e0e0e0; vertical-alignment: center; }
-                    }
-                    ctx1 := TouchArea { clicked => { root.queue-clicked(); ctx-popup.close(); } }
-                }
-                Rectangle {
-                    height: 40px; border-radius: 4px;
-                    background: ctx-pn.has-hover ? #ffffff14 : transparent;
-                    HorizontalLayout {
-                        padding-left: 14px; spacing: 12px; alignment: start;
-                        Image { source: @image-url("icons/next.svg"); width: 16px; height: 16px; colorize: #b0b0b0; vertical-alignment: center; }
-                        Text { text: "Play next"; font-size: 14px; font-weight: 500; color: #e0e0e0; vertical-alignment: center; }
-                    }
-                    ctx-pn := TouchArea { clicked => { root.play-next-clicked(); ctx-popup.close(); } }
-                }
-                Rectangle {
-                    height: 40px; border-radius: 4px;
-                    background: ctx2.has-hover ? #ffffff14 : transparent;
-                    HorizontalLayout {
-                        padding-left: 14px; spacing: 12px; alignment: start;
-                        Text { text: "▶"; font-size: 14px; color: #b0b0b0; vertical-alignment: center; width: 20px; }
-                        Text { text: "Play"; font-size: 14px; font-weight: 500; color: #e0e0e0; vertical-alignment: center; }
-                    }
-                    ctx2 := TouchArea { clicked => { root.clicked(); ctx-popup.close(); } }
-                }
-                Rectangle {
-                    height: 40px; border-radius: 4px;
-                    background: ctx3.has-hover ? #ffffff14 : transparent;
-                    HorizontalLayout {
-                        padding-left: 14px; spacing: 12px; alignment: start;
-                        Image { source: @image-url("icons/radio.svg"); width: 16px; height: 16px; colorize: #b0b0b0; vertical-alignment: center; }
-                        Text { text: "Go to song radio"; font-size: 14px; font-weight: 500; color: #e0e0e0; vertical-alignment: center; }
-                    }
-                    ctx3 := TouchArea { clicked => { root.song-radio-clicked(); ctx-popup.close(); } }
-                }
-                Rectangle {
-                    height: 40px; border-radius: 4px;
-                    background: ctx4.has-hover ? #ffffff14 : transparent;
-                    HorizontalLayout {
-                        padding-left: 14px; spacing: 12px; alignment: start;
-                        Text { text: "👤"; font-size: 14px; color: #b0b0b0; vertical-alignment: center; width: 20px; }
-                        Text { text: "Go to artist"; font-size: 14px; font-weight: 500; color: #e0e0e0; vertical-alignment: center; }
-                    }
-                    ctx4 := TouchArea { clicked => { root.go-to-artist-clicked(); ctx-popup.close(); } }
-                }
+                CtxMenuItem { use-image: false; glyph: "+"; glyph-size: 18px; label: "Add to queue"; clicked => { root.queue-clicked(); ctx-popup.close(); } }
+                CtxMenuItem { icon: @image-url("icons/next.svg"); label: "Play next"; clicked => { root.play-next-clicked(); ctx-popup.close(); } }
+                CtxMenuItem { use-image: false; glyph: "▶"; glyph-size: 13px; label: "Play"; clicked => { root.clicked(); ctx-popup.close(); } }
+                CtxMenuItem { icon: @image-url("icons/radio.svg"); label: "Go to song radio"; clicked => { root.song-radio-clicked(); ctx-popup.close(); } }
+                CtxMenuItem { use-image: false; glyph: "👤"; label: "Go to artist"; clicked => { root.go-to-artist-clicked(); ctx-popup.close(); } }
             }
         }
     }
@@ -490,6 +412,11 @@ export component NativeShellWindow inherits Window {
     in-out property <string> current-view: "Home";
     in-out property <bool> sidebar-open: true;
     in-out property <bool> queue-pane-open: false;
+    // Responsive breakpoint. Set imperatively from `changed width` (below) rather
+    // than as a reactive binding on root.width — a reactive binding would form a
+    // layout-info loop (element sizes depend on width, width depends on their
+    // layout-info) which Slint flags as deprecated / may panic.
+    property <bool> compact: false;   // < 1200px: shrink header + player-bar side panels
     in-out property <string> library-tab: "Liked";
     in-out property <[AlbumItem]> library-albums: [];
     in-out property <[ArtistItem]> library-artists: [];
@@ -622,16 +549,22 @@ export component NativeShellWindow inherits Window {
     in-out property <int> cache-used-mb: 0;
     in-out property <int> cache-song-count: 0;
     callback set-cache-limit(int);
+    // Prefetch: how many upcoming songs to fully cache ahead of the current one.
+    in-out property <int> prefetch-depth: 1;
+    callback set-prefetch-depth(int);
 
     // Essential add-ons (yt-dlp / ffmpeg) — optional third-party tools, not bundled.
     in-out property <bool> ytdlp-installed: false;
+    in-out property <bool> deno-installed: false;
     in-out property <bool> ffmpeg-installed: false;
     in-out property <bool> addon-busy: false;
     in-out property <string> addon-status: "";
     in-out property <string> addon-installing: "";   // "ytdlp" | "ffmpeg" | ""
     in-out property <float> addon-progress: 0.0;      // 0.0–1.0, negative = indeterminate
     callback install-ytdlp();
+    callback update-ytdlp();
     callback install-ffmpeg();
+    callback install-deno();
     callback refresh-addons();
 
     // App updates — only the portable build self-updates. Installer/Store builds
@@ -658,6 +591,11 @@ export component NativeShellWindow inherits Window {
     default-font-size: 14px;
     default-font-weight: 500;
 
+    // Recompute the responsive breakpoint imperatively on resize (avoids a layout
+    // binding loop — see the `compact` property note above).
+    init => { compact = root.width < 1200px; }
+    changed width => { compact = root.width < 1200px; }
+
     forward-focus: key-scope;
     key-scope := FocusScope {
         key-pressed(e) => {
@@ -672,12 +610,23 @@ export component NativeShellWindow inherits Window {
 
         VerticalLayout {
 
+            // Width probe — an inner element whose width tracks the window. Its
+            // `changed width` fires reliably during layout/resize (the Window's own
+            // `changed width` doesn't fire in some backends), driving the responsive
+            // `compact` flag imperatively so there's no layout binding loop.
+            Rectangle {
+                height: 0;
+                changed width => { root.compact = self.width < 1200px; }
+            }
+
             // ── Main area (above player bar) ──────────────────────────────
             HorizontalLayout {
                 vertical-stretch: 1;
 
                 // ── Left sidebar ──────────────────────────────────────────
-                if sidebar-open: Rectangle {
+                // Auto-hides when the queue pane is open on a narrow window so
+                // the main content keeps enough room instead of being squeezed.
+                if sidebar-open && !(compact && queue-pane-open): Rectangle {
                     width: 260px; background: #0a0a0a;
                     Rectangle { x: parent.width - 1px; y: 0; width: 1px; height: parent.height; background: #1a1a1a; }
 
@@ -739,7 +688,7 @@ export component NativeShellWindow inherits Window {
                         height: 60px; background: #000000;
                         Rectangle { y: parent.height - 1px; height: 1px; width: parent.width; background: #1a1a1a; }
                         HorizontalLayout {
-                            padding-left: 20px; padding-right: 20px; spacing: 12px; alignment: center;
+                            padding-left: 20px; padding-right: 20px; spacing: 12px;
 
                             IconBtn { svg-icon: @image-url("icons/menu.svg"); use-svg: true; icon-color: #808080; clicked => { toggle-sidebar(); } }
 
@@ -757,9 +706,12 @@ export component NativeShellWindow inherits Window {
                                 nav-fwd-ta := TouchArea { enabled: can-go-forward; clicked => { nav-forward(); } }
                             }
 
-                            // Search bar
+                            // Search bar — stretchy so the header (and the whole center
+                            // column) can shrink instead of forcing a large min-width
+                            // that pushes the queue pane off-screen on narrow windows.
                             search-bar-rect := Rectangle {
-                                width: 420px; height: 40px; border-radius: 20px;
+                                horizontal-stretch: 1; min-width: 150px; max-width: 420px;
+                                height: 40px; border-radius: 20px;
                                 background: #1a1a1a;
                                 border-color: search-inp.has-focus ? #ffffff30 : #ffffff10;
                                 border-width: 1px;
@@ -791,9 +743,10 @@ export component NativeShellWindow inherits Window {
                                 }
                             }
 
-                            // Nav pills
-                            HorizontalLayout {
-                                spacing: 4px; width: 220px;
+                            // Nav pills — hidden on compact widths (nav is still
+                            // available via the sidebar) so the header can shrink.
+                            if !compact: HorizontalLayout {
+                                spacing: 4px;
                                 TabPill { label: "Home";    active: current-view == "Home";    clicked => { navigate("Home"); }    }
                                 TabPill { label: "Explore"; active: current-view == "Explore"; clicked => { navigate("Explore"); } }
                                 TabPill { label: "Library"; active: current-view == "Library"; clicked => { navigate("Library"); } }
@@ -2366,8 +2319,16 @@ export component NativeShellWindow inherits Window {
                                                     Text { text: "yt-dlp"; font-size: 14px; color: #c0c0c0; }
                                                     Text { text: "Required for audio streaming and downloads."; font-size: 12px; color: #5a5a5a; }
                                                 }
-                                                if ytdlp-installed && addon-installing != "ytdlp": HorizontalLayout { spacing: 10px; alignment: end;
+                                                if ytdlp-installed && addon-installing != "ytdlp" && addon-installing != "ytdlp-update": HorizontalLayout { spacing: 8px; alignment: end;
                                                     Text { text: "✓ Installed"; font-size: 13px; color: #4a9d5a; vertical-alignment: center; }
+                                                    Rectangle {
+                                                        width: 80px; height: 32px; border-radius: 8px;
+                                                        background: addon-busy ? #181818 : (yt-upd-ta.has-hover ? #2a6a3a : #1d5a30);
+                                                        border-color: #2a7a40; border-width: 1px;
+                                                        animate background { duration: 100ms; }
+                                                        Text { text: "Update"; font-size: 12px; color: addon-busy ? #5a5a5a : #80e090; horizontal-alignment: center; vertical-alignment: center; }
+                                                        yt-upd-ta := TouchArea { clicked => { if !addon-busy { update-ytdlp(); } } }
+                                                    }
                                                     Rectangle {
                                                         width: 104px; height: 32px; border-radius: 8px;
                                                         background: addon-busy ? #181818 : (yt-rep-ta.has-hover ? #242424 : transparent);
@@ -2391,6 +2352,10 @@ export component NativeShellWindow inherits Window {
                                                     text: addon-progress < 0 ? "…" : (Math.round(addon-progress * 100) + "%");
                                                     width: 40px; font-size: 11px; color: #8a8a8a; vertical-alignment: center;
                                                 }
+                                            }
+                                            if addon-installing == "ytdlp-update": HorizontalLayout { spacing: 10px; alignment: center;
+                                                Text { text: "Updating yt-dlp…"; font-size: 12px; color: #8a8a8a; horizontal-stretch: 1; }
+                                                AddonProgress { value: addon-progress; width: 120px; }
                                             }
                                         }
                                         Rectangle { height: 1px; background: #1a1a1a; }
@@ -2429,6 +2394,43 @@ export component NativeShellWindow inherits Window {
                                             }
                                         }
                                         if addon-status != "": Text { text: addon-status; font-size: 12px; color: #8a8a8a; wrap: word-wrap; }
+
+                                        Rectangle { height: 1px; background: #1a1a1a; }
+
+                                        // Deno row — JS runtime needed by yt-dlp for YouTube 403 signature
+                                        VerticalLayout { spacing: 10px;
+                                            HorizontalLayout { spacing: 12px;
+                                                VerticalLayout { alignment: center; spacing: 2px; horizontal-stretch: 1;
+                                                    Text { text: "Deno"; font-size: 14px; color: #c0c0c0; }
+                                                    Text { text: "JavaScript runtime used by yt-dlp for YouTube. Fixes 403 errors on some videos."; font-size: 12px; color: #5a5a5a; wrap: word-wrap; }
+                                                }
+                                                if deno-installed && addon-installing != "deno": HorizontalLayout { spacing: 10px; alignment: end;
+                                                    Text { text: "✓ Installed"; font-size: 13px; color: #4a9d5a; vertical-alignment: center; }
+                                                    Rectangle {
+                                                        width: 104px; height: 32px; border-radius: 8px;
+                                                        background: addon-busy ? #181818 : (dn-rep-ta.has-hover ? #242424 : transparent);
+                                                        border-color: #333333; border-width: 1px;
+                                                        animate background { duration: 100ms; }
+                                                        Text { text: "Repair install"; font-size: 12px; color: addon-busy ? #5a5a5a : #c0c0c0; horizontal-alignment: center; vertical-alignment: center; }
+                                                        dn-rep-ta := TouchArea { clicked => { if !addon-busy { install-deno(); } } }
+                                                    }
+                                                }
+                                                if !deno-installed && addon-installing != "deno": Rectangle {
+                                                    width: 92px; height: 32px; border-radius: 8px;
+                                                    background: addon-busy ? #181818 : (dn-ins-ta.has-hover ? #333333 : #2a2a2a);
+                                                    animate background { duration: 100ms; }
+                                                    Text { text: "Install"; font-size: 13px; color: addon-busy ? #5a5a5a : #ffffff; horizontal-alignment: center; vertical-alignment: center; }
+                                                    dn-ins-ta := TouchArea { clicked => { if !addon-busy { install-deno(); } } }
+                                                }
+                                            }
+                                            if addon-installing == "deno": HorizontalLayout { spacing: 10px; alignment: center;
+                                                AddonProgress { value: addon-progress; horizontal-stretch: 1; }
+                                                Text {
+                                                    text: addon-progress < 0 ? "…" : (Math.round(addon-progress * 100) + "%");
+                                                    width: 40px; font-size: 11px; color: #8a8a8a; vertical-alignment: center;
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 // Audio
@@ -2535,6 +2537,27 @@ export component NativeShellWindow inherits Window {
                                                 TouchArea { clicked => { minimize-to-tray = !minimize-to-tray; set-minimize-to-tray(minimize-to-tray); } }
                                             }
                                         }
+                                        Rectangle { height: 1px; background: #1a1a1a; }
+                                        // Prefetch depth
+                                        VerticalLayout { spacing: 10px;
+                                            VerticalLayout { spacing: 4px;
+                                                Text { text: "Prefetch ahead"; font-size: 14px; color: #c0c0c0; }
+                                                Text { text: "How many upcoming songs to fully cache in advance. Higher makes rapid skipping smoother but uses more data."; font-size: 12px; color: #4a4a4a; wrap: word-wrap; }
+                                            }
+                                            HorizontalLayout { spacing: 8px; alignment: start;
+                                                for n in [1, 2, 3]: Rectangle {
+                                                    width: 84px; height: 32px; border-radius: 16px;
+                                                    background: prefetch-depth == n ? #e85d5d : #1a1a1a;
+                                                    Text {
+                                                        text: n == 1 ? "1 song" : (n + " songs");
+                                                        color: prefetch-depth == n ? #ffffff : #6a6a6a;
+                                                        font-size: 12px; font-weight: 600;
+                                                        horizontal-alignment: center; vertical-alignment: center;
+                                                    }
+                                                    TouchArea { clicked => { set-prefetch-depth(n); } }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -2544,7 +2567,8 @@ export component NativeShellWindow inherits Window {
 
                 // ── Right queue pane (Spotify-style) ─────────────────────────
                 if queue-pane-open: Rectangle {
-                    width: 320px; background: #121212;
+                    width: compact ? 288px : 320px;
+                    background: #121212;
                     Rectangle { x: 0; y: 0; width: 1px; height: parent.height; background: #1a1a1a; }
                     VerticalLayout {
                         padding: 12px; padding-left: 12px; padding-right: 12px; spacing: 0px;
@@ -2604,7 +2628,7 @@ export component NativeShellWindow inherits Window {
                                     border-radius: 6px;
                                     background: item.video-id == now-playing-video-id ? #ffffff06 : (qrow-ta.has-hover ? #ffffff0a : transparent);
                                     HorizontalLayout {
-                                        padding-left: 4px; padding-right: 36px; padding-top: 8px; padding-bottom: 8px; spacing: 10px; alignment: start;
+                                        padding-left: 4px; padding-right: 48px; padding-top: 8px; padding-bottom: 8px; spacing: 10px; alignment: start;
                                         Rectangle {
                                             width: 48px; height: 48px; border-radius: 4px; clip: true;
                                             background: #2a2a2a;
@@ -2632,12 +2656,20 @@ export component NativeShellWindow inherits Window {
                                             }
                                         }
                                     }
-                                    // Remove button on top of touch area (positioned absolutely)
-                                    if qrow-ta.has-hover: Rectangle {
-                                        x: parent.width - 36px; y: 18px;
-                                        width: 28px; height: 28px; border-radius: 14px;
-                                        background: rm-ta.has-hover ? #ffffff20 : #ffffff0a;
-                                        Image { source: @image-url("icons/close.svg"); width: 14px; height: 14px; colorize: rm-ta.has-hover ? #ffffff : #a0a0a0; x: 7px; y: 7px; }
+                                    // Remove button — a wide right-edge strip so it's easy to hit
+                                    // (previously a tiny 28px circle you'd miss). Always present so
+                                    // it's reliably clickable; fades in on row/button hover.
+                                    Rectangle {
+                                        x: parent.width - 46px; y: 0;
+                                        width: 46px; height: parent.height;
+                                        opacity: (qrow-ta.has-hover || rm-ta.has-hover) ? 1.0 : 0.0;
+                                        animate opacity { duration: 120ms; }
+                                        Rectangle {
+                                            width: 30px; height: 30px; border-radius: 15px;
+                                            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                                            background: rm-ta.has-hover ? #ffffff20 : #ffffff0a;
+                                            Image { source: @image-url("icons/close.svg"); width: 14px; height: 14px; colorize: rm-ta.has-hover ? #ffffff : #a0a0a0; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
+                                        }
                                         rm-ta := TouchArea { clicked => { remove-from-queue(i); } }
                                     }
                                     qrow-ctx := PopupWindow {
@@ -2648,26 +2680,8 @@ export component NativeShellWindow inherits Window {
                                             drop-shadow-blur: 16px; drop-shadow-color: #00000080; drop-shadow-offset-y: 4px;
                                             VerticalLayout {
                                                 padding: 6px;
-                                                Rectangle {
-                                                    height: 40px; border-radius: 4px;
-                                                    background: qctx1.has-hover ? #ffffff14 : transparent;
-                                                    HorizontalLayout {
-                                                        padding-left: 14px; spacing: 12px; alignment: start;
-                                                        Text { text: "✕"; font-size: 14px; color: #b0b0b0; vertical-alignment: center; width: 20px; }
-                                                        Text { text: "Remove from queue"; font-size: 14px; font-weight: 500; color: #e0e0e0; vertical-alignment: center; }
-                                                    }
-                                                    qctx1 := TouchArea { clicked => { remove-from-queue(i); qrow-ctx.close(); } }
-                                                }
-                                                Rectangle {
-                                                    height: 40px; border-radius: 4px;
-                                                    background: qctx2.has-hover ? #ffffff14 : transparent;
-                                                    HorizontalLayout {
-                                                        padding-left: 14px; spacing: 12px; alignment: start;
-                                                        Image { source: @image-url("icons/play.svg"); width: 16px; height: 16px; colorize: #b0b0b0; vertical-alignment: center; }
-                                                        Text { text: "Play"; font-size: 14px; font-weight: 500; color: #e0e0e0; vertical-alignment: center; }
-                                                    }
-                                                    qctx2 := TouchArea { clicked => { play-song(item.video-id, item.title, item.artist, item.duration-secs); qrow-ctx.close(); } }
-                                                }
+                                                CtxMenuItem { use-image: false; glyph: "✕"; label: "Remove from queue"; clicked => { remove-from-queue(i); qrow-ctx.close(); } }
+                                                CtxMenuItem { icon: @image-url("icons/play.svg"); label: "Play"; clicked => { play-song(item.video-id, item.title, item.artist, item.duration-secs); qrow-ctx.close(); } }
                                             }
                                         }
                                     }
@@ -2752,46 +2766,10 @@ export component NativeShellWindow inherits Window {
                                                 drop-shadow-blur: 16px; drop-shadow-color: #00000080; drop-shadow-offset-y: 4px;
                                                 VerticalLayout {
                                                     padding: 6px;
-                                                    Rectangle {
-                                                        height: 38px; border-radius: 4px;
-                                                        background: apctx1.has-hover ? #ffffff14 : transparent;
-                                                        HorizontalLayout {
-                                                            padding-left: 14px; spacing: 12px; alignment: start;
-                                                            Image { source: @image-url("icons/play.svg"); width: 16px; height: 16px; colorize: #b0b0b0; vertical-alignment: center; }
-                                                            Text { text: "Play"; font-size: 14px; font-weight: 500; color: #e0e0e0; vertical-alignment: center; }
-                                                        }
-                                                        apctx1 := TouchArea { clicked => { play-autoplay-song(i); ap-ctx.close(); } }
-                                                    }
-                                                    Rectangle {
-                                                        height: 38px; border-radius: 4px;
-                                                        background: apctx2.has-hover ? #ffffff14 : transparent;
-                                                        HorizontalLayout {
-                                                            padding-left: 14px; spacing: 12px; alignment: start;
-                                                            Text { text: "+"; font-size: 18px; color: #b0b0b0; vertical-alignment: center; width: 20px; }
-                                                            Text { text: "Add to queue"; font-size: 14px; font-weight: 500; color: #e0e0e0; vertical-alignment: center; }
-                                                        }
-                                                        apctx2 := TouchArea { clicked => { queue-song(item.video-id, item.title, item.artist); ap-ctx.close(); } }
-                                                    }
-                                                    Rectangle {
-                                                        height: 38px; border-radius: 4px;
-                                                        background: apctx3.has-hover ? #ffffff14 : transparent;
-                                                        HorizontalLayout {
-                                                            padding-left: 14px; spacing: 12px; alignment: start;
-                                                            Image { source: @image-url("icons/next.svg"); width: 16px; height: 16px; colorize: #b0b0b0; vertical-alignment: center; }
-                                                            Text { text: "Play next"; font-size: 14px; font-weight: 500; color: #e0e0e0; vertical-alignment: center; }
-                                                        }
-                                                        apctx3 := TouchArea { clicked => { play-next-song(item.video-id, item.title, item.artist, item.duration-secs); ap-ctx.close(); } }
-                                                    }
-                                                    Rectangle {
-                                                        height: 38px; border-radius: 4px;
-                                                        background: apctx4.has-hover ? #ffffff14 : transparent;
-                                                        HorizontalLayout {
-                                                            padding-left: 14px; spacing: 12px; alignment: start;
-                                                            Text { text: "✕"; font-size: 14px; color: #b0b0b0; vertical-alignment: center; width: 20px; }
-                                                            Text { text: "Remove"; font-size: 14px; font-weight: 500; color: #e0e0e0; vertical-alignment: center; }
-                                                        }
-                                                        apctx4 := TouchArea { clicked => { remove-from-autoplay(i); ap-ctx.close(); } }
-                                                    }
+                                                    CtxMenuItem { icon: @image-url("icons/play.svg"); label: "Play"; clicked => { play-autoplay-song(i); ap-ctx.close(); } }
+                                                    CtxMenuItem { use-image: false; glyph: "+"; glyph-size: 18px; label: "Add to queue"; clicked => { queue-song(item.video-id, item.title, item.artist); ap-ctx.close(); } }
+                                                    CtxMenuItem { icon: @image-url("icons/next.svg"); label: "Play next"; clicked => { play-next-song(item.video-id, item.title, item.artist, item.duration-secs); ap-ctx.close(); } }
+                                                    CtxMenuItem { use-image: false; glyph: "✕"; label: "Remove"; clicked => { remove-from-autoplay(i); ap-ctx.close(); } }
                                                 }
                                             }
                                         }
@@ -2814,7 +2792,7 @@ export component NativeShellWindow inherits Window {
 
                     // Now playing info (left)
                     HorizontalLayout {
-                        width: 300px; spacing: 12px; alignment: start;
+                        width: compact ? 210px : 300px; spacing: 12px; alignment: start;
 
                         if has-album-art: Rectangle {
                             width: 60px; height: 60px; border-radius: 8px; clip: true;
@@ -2928,11 +2906,11 @@ export component NativeShellWindow inherits Window {
 
                     // Volume + queue toggle (right)
                     HorizontalLayout {
-                        width: 220px; spacing: 10px; alignment: end;
+                        width: compact ? 52px : 220px; spacing: 10px; alignment: end;
 
                         IconBtn { svg-icon: @image-url("icons/queue.svg"); use-svg: true; active: queue-pane-open; icon-color: queue-pane-open ? #ffffff : #4a4a4a; clicked => { toggle-queue-pane(); } }
 
-                        HorizontalLayout {
+                        if !compact: HorizontalLayout {
                             spacing: 8px; alignment: center;
                             Image { source: @image-url("icons/volume.svg"); width: 18px; height: 18px; colorize: #5a5a5a; vertical-alignment: center; }
 
@@ -3019,24 +2997,8 @@ export component NativeShellWindow inherits Window {
                         drop-shadow-blur: 12px; drop-shadow-color: #00000080;
                         VerticalLayout {
                             padding: 6px; spacing: 2px;
-                            Rectangle {
-                                height: 34px; border-radius: 6px;
-                                background: ctx-play-ta.has-hover ? #ffffff10 : transparent;
-                                HorizontalLayout { padding-left: 12px; alignment: start; spacing: 8px;
-                                    Text { text: "\u{25B6}"; font-size: 13px; color: #e0e0e0; vertical-alignment: center; }
-                                    Text { text: "Play"; font-size: 13px; color: #e0e0e0; vertical-alignment: center; }
-                                }
-                                ctx-play-ta := TouchArea { clicked => { play-song(item.video-id, item.title, item.artist, item.duration-secs); search-dropdown-open = false; search-inp.text = ""; live-search(""); } }
-                            }
-                            Rectangle {
-                                height: 34px; border-radius: 6px;
-                                background: ctx-queue-ta.has-hover ? #ffffff10 : transparent;
-                                HorizontalLayout { padding-left: 12px; alignment: start; spacing: 8px;
-                                    Text { text: "\u{2795}"; font-size: 13px; color: #e0e0e0; vertical-alignment: center; }
-                                    Text { text: "Add to queue"; font-size: 13px; color: #e0e0e0; vertical-alignment: center; }
-                                }
-                                ctx-queue-ta := TouchArea { clicked => { queue-song(item.video-id, item.title, item.artist); } }
-                            }
+                            CtxMenuItem { use-image: false; glyph: "\u{25B6}"; glyph-size: 13px; label: "Play"; clicked => { play-song(item.video-id, item.title, item.artist, item.duration-secs); search-dropdown-open = false; search-inp.text = ""; live-search(""); } }
+                            CtxMenuItem { use-image: false; glyph: "\u{2795}"; glyph-size: 13px; label: "Add to queue"; clicked => { queue-song(item.video-id, item.title, item.artist); } }
                         }
                     }
                 }

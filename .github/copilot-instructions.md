@@ -17,8 +17,8 @@
 - Native audio extraction uses `core/stream_player.rs`: a yt-dlp based streaming source + HTTP/range decode path used by the playback worker. `yt-dlp` is a user-installed add-on, not bundled.
 
 ## Build/run workflows
-- Build: `npm run build` (or directly: `cargo build --bin native_shell`)
-- Run: `npm run run` (or directly: `cargo run --bin native_shell`)
+- Build: `npm run build` (or directly: `cargo build --bin auricle`)
+- Run: `npm run run` (or directly: `cargo run --bin auricle`)
 - Release build: `npm run release` (adds `--release` flag)
 - There is no webview, React, Vite, or legacy frontend path. The only UI is the native Slint shell.
 - There are currently no established automated tests in this repo; rely on smoke checks for playback, queue, search, and tray behavior.
@@ -40,7 +40,7 @@
 - **One worker per subtask**: spawn a dedicated subagent for each subtask. Each worker must read this file first.
 - **Inter-worker communication**: all workers share context — each must declare what files/symbols it touches and what contracts (function signatures, struct fields, callback names) it depends on. If Worker B depends on a type Worker A is creating, Worker A's output is resolved first.
 - **Conflict prevention**: no two workers may edit the same function body simultaneously. Coordinate at function/callback granularity.
-- **Merge verification**: after all subtask workers complete, the coordinator verifies the combined result compiles (`cargo build --bin native_shell`) and performs a smoke-check summary.
+- **Merge verification**: after all subtask workers complete, the coordinator verifies the combined result compiles (`cargo build --bin auricle`) and performs a smoke-check summary.
 
 ## When adding features
 - Implement one vertical slice end-to-end (Slint callback -> Rust handler -> `PlaybackCore`/module -> UI refresh).

@@ -8,7 +8,7 @@
 ///
 /// Eviction: LRU by `last_played_unix_secs` when total size > limit.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -54,6 +54,10 @@ pub struct AudioCache {
     dirty: bool,
     /// Last time the index was flushed — used to throttle read-path writes.
     last_flush: std::time::Instant,
+    /// Video IDs that must not be evicted (current + upcoming songs). Set each
+    /// poll from the playback look-ahead so we never drop a song we're about to
+    /// play and then have to re-download it. Not persisted.
+    protected: HashSet<String>,
 }
 
 fn unix_now() -> u64 {
@@ -68,12 +72,24 @@ impl AudioCache {
     pub fn open(limit_bytes: u64) -> Self {
         let dir = cache_dir();
         std::fs::create_dir_all(&dir).ok();
+        // Sweep leftover `.part` staging files from a previous run — any download
+        // interrupted by exit/crash left a partial file that would otherwise block
+        // a fresh download (the dedup check treats an existing `.part` as "in
+        // progress"). At open time no download is running, so all are stale.
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("part") {
+                    std::fs::remove_file(&path).ok();
+                }
+            }
+        }
         let index_path = dir.join("cache_index.json");
         let index: HashMap<String, CacheEntry> = std::fs::read_to_string(&index_path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
-        Self { dir, index_path, index, limit_bytes, dirty: false, last_flush: std::time::Instant::now() }
+        Self { dir, index_path, index, limit_bytes, dirty: false, last_flush: std::time::Instant::now(), protected: HashSet::new() }
     }
 
     /// Returns the cached file path if it exists on disk.
@@ -141,6 +157,9 @@ impl AudioCache {
         entries.sort_by_key(|e| e.last_played);
         for entry in entries {
             if total <= self.limit_bytes { break; }
+            // Never evict the current/upcoming songs — dropping one we're about to
+            // play would force a wasteful re-download moments later.
+            if self.protected.contains(&entry.video_id) { continue; }
             let path = self.dir.join(format!("{}.m4a", entry.video_id));
             std::fs::remove_file(&path).ok();
             if self.index.remove(&entry.video_id).is_some() {
@@ -148,6 +167,12 @@ impl AudioCache {
             }
         }
         self.save_index();
+    }
+
+    /// Mark a set of video IDs as protected from eviction (current + upcoming).
+    /// Replaces the previous protected set. Cheap; called from the poll loop.
+    pub fn set_protected(&mut self, ids: impl IntoIterator<Item = String>) {
+        self.protected = ids.into_iter().collect();
     }
 
     /// Flush the index to disk only if it's dirty and the throttle window elapsed.
@@ -199,8 +224,55 @@ fn cache_dir() -> PathBuf {
 
 // ── Download helper ────────────────────────────────────────────────────────────
 
-/// Download a video's audio to the cache using yt-dlp.
-/// Returns the final cached path on success.
+/// Download a video's audio into `staging`, reusing the already-resolved stream
+/// URL for a plain HTTP download (no extra yt-dlp) when possible, and falling
+/// back to a full yt-dlp download (robust against CDN 403 on the signed URL).
+fn download_audio(video_id: &str, staging: &Path) -> Result<(), String> {
+    let staging_str = staging.to_str().unwrap_or("").to_string();
+
+    // 1. Fast path: HTTP download from the resolved signed URL. `get_stream_url`
+    //    hits the in-memory URL cache for the current song, so this avoids a
+    //    second yt-dlp process entirely in the common case. For prefetch-ahead
+    //    songs it also warms the URL cache so their playback starts instantly.
+    if let Ok(url) = crate::core::stream_player::get_stream_url(video_id) {
+        std::fs::remove_file(staging).ok();
+        match crate::core::stream_player::download_url_to_file(&url, staging) {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                eprintln!("[cache] {video_id}: http download failed ({e}); trying yt-dlp");
+                std::fs::remove_file(staging).ok();
+            }
+        }
+    }
+
+    // 2. Fallback: full yt-dlp download (handles a signed-URL 403 that the direct
+    //    HTTP GET can't, so un-streamable songs still get cached for next time).
+    let yt_dlp = find_yt_dlp();
+    let watch_url = format!("https://www.youtube.com/watch?v={}", video_id);
+    let mut args = crate::core::stream_player::cookie_args();
+    args.extend([
+        "-f".to_string(), "bestaudio[ext=m4a]/bestaudio/best".to_string(),
+        "--no-playlist".to_string(),
+        "--fixup".to_string(), "never".to_string(),
+        "-o".to_string(), staging_str,
+        watch_url,
+    ]);
+    let mut cmd = std::process::Command::new(&yt_dlp);
+    cmd.args(&args);
+    crate::core::addons::set_addon_path_env(&mut cmd);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let output = cmd.output().map_err(|e| format!("yt-dlp spawn error: {e}"))?;
+    if !output.status.success() {
+        return Err(format!("yt-dlp download failed: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+    Ok(())
+}
+
+/// Download a video's audio to the cache. Returns the final cached path.
 pub fn download_to_cache(
     cache: &mut AudioCache,
     video_id: &str,
@@ -208,37 +280,7 @@ pub fn download_to_cache(
     artist: &str,
 ) -> Result<PathBuf, String> {
     let staging = cache.staging_path(video_id);
-    std::fs::remove_file(&staging).ok();
-
-    let yt_dlp = find_yt_dlp();
-    let url = format!("https://www.youtube.com/watch?v={}", video_id);
-    let staging_str = staging.to_str().unwrap_or("").to_string();
-
-    let mut args = crate::core::stream_player::cookie_args();
-    args.extend([
-        "-f".to_string(), "bestaudio[ext=m4a]/bestaudio/best".to_string(),
-        "--no-playlist".to_string(),
-        "--fixup".to_string(), "never".to_string(),
-        "-o".to_string(), staging_str,
-        url,
-    ]);
-
-    let mut cmd = std::process::Command::new(&yt_dlp);
-    cmd.args(&args);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
-    let output = cmd
-        .output()
-        .map_err(|e| format!("yt-dlp spawn error: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("yt-dlp download failed: {stderr}"));
-    }
-
+    download_audio(video_id, &staging)?;
     cache.commit(video_id, title, artist)
         .ok_or_else(|| "Failed to commit cache entry".to_string())
 }
@@ -247,9 +289,9 @@ fn find_yt_dlp() -> std::path::PathBuf {
     crate::core::addons::resolve_tool("yt-dlp")
 }
 
-/// Spawn a background thread to download `video_id` to cache.
-/// Returns immediately. Does nothing if the file is already cached or staging.
-pub fn spawn_prefetch(video_id: String, title: String, artist: String) {
+/// Spawn a background thread to download `video_id` to cache (full file).
+/// Returns immediately. Does nothing if already cached or a download is running.
+pub fn spawn_cache_download(video_id: String, title: String, artist: String) {
     // Quick check — already cached or in-progress staging file?
     {
         let Ok(mut cache) = AudioCache::global().lock() else { return };
@@ -265,44 +307,20 @@ pub fn spawn_prefetch(video_id: String, title: String, artist: String) {
             cache.staging_path(&video_id)
         };
 
-        let yt_dlp = find_yt_dlp();
-        let url = format!("https://www.youtube.com/watch?v={}", video_id);
-        let staging_str = staging.to_str().unwrap_or("").to_string();
-
-        let mut args = crate::core::stream_player::cookie_args();
-        args.extend([
-            "-f".to_string(), "bestaudio[ext=m4a]/bestaudio/best".to_string(),
-            "--no-playlist".to_string(),
-            "--fixup".to_string(), "never".to_string(),
-            "-o".to_string(), staging_str.clone(),
-            url,
-        ]);
-
-        eprintln!("[cache-prefetch] Starting background download: {video_id}");
-        let mut cmd = std::process::Command::new(&yt_dlp);
-        cmd.args(&args);
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        }
-        match cmd.output() {
-            Ok(out) if out.status.success() => {
+        eprintln!("[cache] Starting background download: {video_id}");
+        match download_audio(&video_id, &staging) {
+            Ok(()) => {
                 // Commit (brief lock)
                 if let Ok(mut cache) = AudioCache::global().lock() {
                     match cache.commit(&video_id, &title, &artist) {
-                        Some(path) => eprintln!("[cache-prefetch] ✓ {video_id} → {}", path.display()),
-                        None => eprintln!("[cache-prefetch] ✗ {video_id}: commit failed"),
+                        Some(path) => eprintln!("[cache] ✓ {video_id} → {}", path.display()),
+                        None => eprintln!("[cache] ✗ {video_id}: commit failed"),
                     }
                 }
             }
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                eprintln!("[cache-prefetch] ✗ {video_id}: {stderr}");
-                std::fs::remove_file(&staging_str).ok();
-            }
             Err(e) => {
-                eprintln!("[cache-prefetch] ✗ {video_id}: spawn error: {e}");
+                eprintln!("[cache] ✗ {video_id}: {e}");
+                std::fs::remove_file(&staging).ok();
             }
         }
     });

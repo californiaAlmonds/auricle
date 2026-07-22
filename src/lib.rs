@@ -139,8 +139,8 @@ fn make_song_item(t: &core::playback::NowPlaying) -> SongItem {
 
 fn fetch_autoplay_queue(
     ui_weak: slint::Weak<NativeShellWindow>,
-    autoplay_queue_data: Arc<Mutex<Vec<core::playback::NowPlaying>>>,
     video_id: String,
+    resume: bool,
 ) {
     let seed_vid = video_id.clone();
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -176,14 +176,32 @@ fn fetch_autoplay_queue(
     });
     // Filter out the seed song itself
     let songs: Vec<_> = songs.into_iter().filter(|s| s.video_id != seed_vid).collect();
+
+    // Drop tracks played very recently so radio keeps moving forward instead of
+    // replaying the same batch. Fall back to the seed-filtered list if dedup
+    // would leave nothing to play.
+    let songs: Vec<_> = {
+        let pb = crate::core::bridge::playback_core();
+        let mut recent: std::collections::HashSet<String> =
+            pb.get_history().into_iter().take(30).map(|h| h.video_id).collect();
+        recent.insert(pb.now_playing().video_id);
+        let deduped: Vec<_> = songs.iter().filter(|s| !recent.contains(&s.video_id)).cloned().collect();
+        if deduped.is_empty() { songs } else { deduped }
+    };
+
     if songs.is_empty() {
         eprintln!("[autoplay] watch playlist returned 0 songs");
         return;
     }
     // Store in shared state
     {
-        let mut aq = autoplay_queue_data.lock().unwrap();
-        *aq = songs.clone();
+        crate::core::bridge::playback_core().set_autoplay_queue(songs.clone());
+    }
+
+    // Triggered by an exhausted queue — resume playback now that fresh songs
+    // are available, otherwise playback would dead-stop at the end of radio.
+    if resume {
+        crate::core::bridge::playback_core().request_autoplay();
     }
     // Collect video IDs that need thumbnails
     let need_thumbs: Vec<(usize, String)> = songs.iter().enumerate()
@@ -1118,6 +1136,27 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // ── Prefetch depth (shared live with the background poll loop) ─────────────
+    let prefetch_depth: Arc<std::sync::atomic::AtomicU32> = Arc::new(
+        std::sync::atomic::AtomicU32::new(
+            core::persistence::load_settings().prefetch_depth.clamp(1, 3),
+        ),
+    );
+    {
+        let ui_weak = ui.as_weak();
+        let prefetch_depth = prefetch_depth.clone();
+        ui.on_set_prefetch_depth(move |depth| {
+            let depth = depth.clamp(1, 3);
+            prefetch_depth.store(depth as u32, std::sync::atomic::Ordering::Relaxed);
+            let mut settings = core::persistence::load_settings();
+            settings.prefetch_depth = depth as u32;
+            core::persistence::save_settings(&settings);
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_prefetch_depth(depth);
+            }
+        });
+    }
+
     // ── Essential add-ons (yt-dlp / ffmpeg) ───────────────────────────────────
     {
         let ui_weak = ui.as_weak();
@@ -1126,10 +1165,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             std::thread::spawn(move || {
                 let yt = crate::core::addons::ytdlp_installed();
                 let ff = crate::core::addons::ffmpeg_installed();
+                let dn = crate::core::addons::deno_installed();
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_weak2.upgrade() {
                         ui.set_ytdlp_installed(yt);
                         ui.set_ffmpeg_installed(ff);
+                        ui.set_deno_installed(dn);
                     }
                 }).ok();
             });
@@ -1229,6 +1270,91 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             });
         });
     }
+    // ── Update yt-dlp ─────────────────────────────────────────────────────────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_update_ytdlp(move || {
+            let ui_weak2 = ui_weak.clone();
+            let ui_weak_prog = ui_weak.clone();
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_addon_busy(true);
+                ui.set_addon_installing(SharedString::from("ytdlp-update"));
+                ui.set_addon_progress(-1.0);
+                ui.set_addon_status(SharedString::from("Updating yt-dlp…"));
+            }
+            std::thread::spawn(move || {
+                let last = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(-2));
+                let on_progress = {
+                    let last = last.clone();
+                    move |p: f32| {
+                        let permille = (p * 1000.0) as i32;
+                        if last.swap(permille, std::sync::atomic::Ordering::Relaxed) != permille {
+                            let w = ui_weak_prog.clone();
+                            slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = w.upgrade() { ui.set_addon_progress(p); }
+                            }).ok();
+                        }
+                    }
+                };
+                let result = crate::core::addons::update_ytdlp(on_progress);
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak2.upgrade() {
+                        ui.set_addon_busy(false);
+                        ui.set_addon_installing(SharedString::from(""));
+                        match result {
+                            Ok(_) => ui.set_addon_status(SharedString::from("yt-dlp updated to latest.")),
+                            Err(e) => ui.set_addon_status(SharedString::from(format!("yt-dlp update failed: {}", e))),
+                        }
+                    }
+                }).ok();
+            });
+        });
+    }
+    // ── Install Deno ──────────────────────────────────────────────────────────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_install_deno(move || {
+            let ui_weak2 = ui_weak.clone();
+            let ui_weak_prog = ui_weak.clone();
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_addon_busy(true);
+                ui.set_addon_installing(SharedString::from("deno"));
+                ui.set_addon_progress(0.0);
+                ui.set_addon_status(SharedString::from("Installing Deno…"));
+            }
+            std::thread::spawn(move || {
+                let last = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(-2));
+                let on_progress = {
+                    let last = last.clone();
+                    move |p: f32| {
+                        let permille = (p * 1000.0) as i32;
+                        if last.swap(permille, std::sync::atomic::Ordering::Relaxed) != permille {
+                            let w = ui_weak_prog.clone();
+                            slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = w.upgrade() { ui.set_addon_progress(p); }
+                            }).ok();
+                        }
+                    }
+                };
+                let result = crate::core::addons::install_deno(on_progress);
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak2.upgrade() {
+                        ui.set_addon_busy(false);
+                        ui.set_addon_installing(SharedString::from(""));
+                        match result {
+                            Ok(_) => {
+                                ui.set_deno_installed(true);
+                                ui.set_addon_status(SharedString::from("Deno installed. yt-dlp can now handle YouTube signature extraction."));
+                            }
+                            Err(e) => {
+                                ui.set_addon_status(SharedString::from(format!("Deno install failed: {}", e)));
+                            }
+                        }
+                    }
+                }).ok();
+            });
+        });
+    }
     // ── Updates (portable build only) ─────────────────────────────────────────
     {
         let ui_weak = ui.as_weak();
@@ -1303,11 +1429,13 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         std::thread::spawn(move || {
             let yt = crate::core::addons::ytdlp_installed();
             let ff = crate::core::addons::ffmpeg_installed();
+            let dn = crate::core::addons::deno_installed();
             let seen = crate::core::persistence::load_settings().onboarding_seen;
             slint::invoke_from_event_loop(move || {
                 if let Some(ui) = ui_weak.upgrade() {
                     ui.set_ytdlp_installed(yt);
                     ui.set_ffmpeg_installed(ff);
+                    ui.set_deno_installed(dn);
                     // Show onboarding only on first run when yt-dlp is missing.
                     ui.set_show_onboarding(!seen && !yt);
                 }
@@ -1563,8 +1691,8 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
 
     // Autoplay state
     let autoplay_enabled: Arc<std::sync::atomic::AtomicBool> = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let autoplay_seed_vid: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
-    let autoplay_queue_data: Arc<Mutex<Vec<core::playback::NowPlaying>>> = Arc::new(Mutex::new(Vec::new()));
+    // The autoplay/radio queue and seed now live inside PlaybackCore
+    // (playback.set_autoplay_queue / pop_autoplay / autoplay_seed / …).
 
     fn push_nav_entry(nav_history: &Arc<Mutex<Vec<NavEntry>>>, nav_cursor: &Arc<Mutex<usize>>, view: String, context_id: String) {
         let mut hist = nav_history.lock().unwrap();
@@ -1721,8 +1849,6 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     // ── Play specific song ────────────────────────────────────────────────────
     {
         let ui_weak = ui.as_weak();
-        let autoplay_seed_vid = autoplay_seed_vid.clone();
-        let autoplay_queue_data = autoplay_queue_data.clone();
         ui.on_play_song(move |video_id, title, artist, duration_secs| {
             // set_now_playing calls sync_audio_playback internally.
             // We set is_playing FIRST so sync_audio_playback actually starts audio.
@@ -1734,15 +1860,13 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             if let Some(ui) = ui_weak.upgrade() {
                 refresh_native_shell_ui(&ui, playback);
             }
-            // Update autoplay seed (this is an "external play")
-            autoplay_seed_vid.lock().unwrap().replace_range(.., video_id.as_str());
-            // Clear old autoplay queue and fetch new one
-            autoplay_queue_data.lock().unwrap().clear();
+            // Update autoplay seed (this is an "external play") + reset radio queue
+            playback.set_autoplay_seed(video_id.as_str());
+            playback.clear_autoplay_queue();
             let ui_w = ui_weak.clone();
-            let aq_data = autoplay_queue_data.clone();
             let vid = video_id.to_string();
             std::thread::spawn(move || {
-                fetch_autoplay_queue(ui_w, aq_data, vid);
+                fetch_autoplay_queue(ui_w, vid, false);
             });
         });
     }
@@ -1754,14 +1878,17 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             let fraction = fraction.clamp(0.0, 1.0) as f64;
             let dur = playback.track_duration_secs() as f64;
             let target_secs = fraction * dur;
-            playback.seek_to_secs(target_secs);
-            // Snap UI immediately to the clicked position.
-            // Audio follows via sink.try_seek() (Range request for streams, file-seek for cached).
-            if let Some(ui) = ui_weak.upgrade() {
-                ui.set_progress(fraction as f32);
-                let m = target_secs as u64 / 60;
-                let s = target_secs as u64 % 60;
-                ui.set_current_time(SharedString::from(format!("{m}:{s:02}")));
+            let applied = playback.seek_to_secs(target_secs);
+            // Only snap the UI when the audio actually moved. While streaming and
+            // not yet cached, an arbitrary seek can't be honored — leave the bar
+            // where playback really is so the timeline can't desync.
+            if applied {
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_progress(fraction as f32);
+                    let m = target_secs as u64 / 60;
+                    let s = target_secs as u64 % 60;
+                    ui.set_current_time(SharedString::from(format!("{m}:{s:02}")));
+                }
             }
         });
     }
@@ -1798,19 +1925,14 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     // ── Play next (insert at top of queue) ───────────────────────────────────
     {
         let ui_weak = ui.as_weak();
-        let autoplay_queue_data = autoplay_queue_data.clone();
         ui.on_play_next_song(move |video_id, title, artist, duration_secs| {
             playback.play_next(video_id.as_str(), title.as_str(), artist.as_str(), duration_secs as u32);
             // Also remove from autoplay queue if present
-            {
-                let mut aq = autoplay_queue_data.lock().unwrap();
-                aq.retain(|s| s.video_id != video_id.as_str());
-            }
+            playback.autoplay_remove_id(video_id.as_str());
             if let Some(ui) = ui_weak.upgrade() {
                 let items: Vec<SongItem> = playback.queue_upcoming().iter().map(make_song_item).collect();
                 ui.set_queue(ModelRc::new(VecModel::from(items)));
-                let aq = autoplay_queue_data.lock().unwrap();
-                let ap_items: Vec<SongItem> = aq.iter().map(|np| make_song_item(np)).collect();
+                let ap_items: Vec<SongItem> = playback.autoplay_queue().iter().map(make_song_item).collect();
                 ui.set_autoplay_queue(ModelRc::new(VecModel::from(ap_items)));
             }
         });
@@ -1818,16 +1940,9 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
 
     // ── Remove from autoplay queue ───────────────────────────────────────────
     {
-        let autoplay_queue_data = autoplay_queue_data.clone();
         let ui_weak = ui.as_weak();
         ui.on_remove_from_autoplay(move |index| {
-            let songs = {
-                let mut aq = autoplay_queue_data.lock().unwrap();
-                if (index as usize) < aq.len() {
-                    aq.remove(index as usize);
-                }
-                aq.clone()
-            };
+            let songs = playback.remove_autoplay(index as usize);
             if let Some(ui) = ui_weak.upgrade() {
                 let items: Vec<SongItem> = songs.iter().map(|np| make_song_item(np)).collect();
                 ui.set_autoplay_queue(ModelRc::new(VecModel::from(items)));
@@ -1850,13 +1965,8 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     // ── Play from autoplay queue ─────────────────────────────────────────────
     {
         let ui_weak = ui.as_weak();
-        let autoplay_queue_data = autoplay_queue_data.clone();
-        let autoplay_seed_vid = autoplay_seed_vid.clone();
         ui.on_play_autoplay_song(move |index| {
-            let song = {
-                let aq = autoplay_queue_data.lock().unwrap();
-                aq.get(index as usize).cloned()
-            };
+            let song = playback.autoplay_get(index as usize);
             if let Some(song) = song {
                 {
                     let mut state = playback.state_lock();
@@ -1867,13 +1977,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     refresh_native_shell_ui(&ui, playback);
                 }
                 // Re-seed autoplay from the newly played song
-                autoplay_seed_vid.lock().unwrap().replace_range(.., &song.video_id);
-                autoplay_queue_data.lock().unwrap().clear();
+                playback.set_autoplay_seed(&song.video_id);
+                playback.clear_autoplay_queue();
                 let ui_w = ui_weak.clone();
-                let aq_data = autoplay_queue_data.clone();
                 let vid = song.video_id.clone();
                 std::thread::spawn(move || {
-                    fetch_autoplay_queue(ui_w, aq_data, vid);
+                    fetch_autoplay_queue(ui_w, vid, false);
                 });
             }
         });
@@ -1989,7 +2098,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        if name.starts_with("ytm_thumb_") || name.starts_with("ytm_stream_") {
+                        if name.starts_with("ytm_thumb_") {
                             let _ = std::fs::remove_file(&path);
                         }
                     }
@@ -2014,6 +2123,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     {
         let settings = core::persistence::load_settings();
         ui.set_minimize_to_tray(settings.minimize_to_tray);
+        ui.set_prefetch_depth(settings.prefetch_depth.clamp(1, 3) as i32);
     }
     {
         ui.on_set_minimize_to_tray(move |val| {
@@ -3409,15 +3519,15 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         #[cfg(target_os = "windows")]
         let app_hwnd = app_hwnd.clone();
         let autoplay_enabled = autoplay_enabled.clone();
-        let autoplay_queue_data = autoplay_queue_data.clone();
-        let autoplay_seed_vid = autoplay_seed_vid.clone();
+        let prefetch_depth = prefetch_depth.clone();
         std::thread::spawn(move || {
             let http = reqwest::blocking::Client::builder()
                 .timeout(std::time::Duration::from_secs(8))
                 .build()
                 .ok();
             let mut last_thumbnail_id = String::new();
-            let mut last_precached_id = String::new(); // track which next-song we've pre-cached
+            let mut last_precached_id = String::new(); // next-song we've queued a full cache download for
+            let mut last_upgraded_id = String::new();  // song we've upgraded stream→cache
             let mut thumb_refresh_counter: u32 = 0;
             let mut thumb_fetch_spawned = false;
 
@@ -3470,10 +3580,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 // Autoplay: play next from autoplay queue when user queue runs out
                 if playback.take_autoplay_needed() {
                     if autoplay_enabled.load(std::sync::atomic::Ordering::Relaxed) {
-                        let next_song = {
-                            let mut aq = autoplay_queue_data.lock().unwrap();
-                            if !aq.is_empty() { Some(aq.remove(0)) } else { None }
-                        };
+                        let next_song = playback.pop_autoplay();
                         if let Some(song) = next_song {
                             {
                                 let mut state = playback.state_lock();
@@ -3481,24 +3588,35 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                             }
                             playback.set_now_playing(&song.video_id, &song.title, &song.artist, song.duration_secs);
                             let ui_w = ui_weak.clone();
-                            let aq_data = autoplay_queue_data.clone();
                             slint::invoke_from_event_loop(move || {
                                 if let Some(ui) = ui_w.upgrade() {
                                     refresh_native_shell_ui(&ui, playback);
                                     // Update autoplay queue model
-                                    let items: Vec<SongItem> = aq_data.lock().unwrap().iter().map(make_song_item).collect();
+                                    let items: Vec<SongItem> = playback.autoplay_queue().iter().map(make_song_item).collect();
                                     ui.set_autoplay_queue(ModelRc::new(VecModel::from(items)));
                                 }
                             }).ok();
                         } else {
-                            // Autoplay queue exhausted — fetch more based on seed
-                            let seed = autoplay_seed_vid.lock().unwrap().clone();
+                            // Autoplay queue exhausted — continue radio from the most
+                            // recently played track so we get a fresh continuation
+                            // instead of replaying the original seed's batch.
+                            let seed = {
+                                let np = playback.now_playing().video_id;
+                                if !np.is_empty() && np != "native-prototype" {
+                                    np
+                                } else {
+                                    playback.autoplay_seed()
+                                }
+                            };
                             if !seed.is_empty() {
+                                // Keep the seed fresh for the next exhaustion cycle.
+                                playback.set_autoplay_seed(&seed);
                                 let ui_w = ui_weak.clone();
-                                let aq_data = autoplay_queue_data.clone();
                                 std::thread::spawn(move || {
-                                    fetch_autoplay_queue(ui_w, aq_data, seed);
+                                    fetch_autoplay_queue(ui_w, seed, true);
                                 });
+                            } else {
+                                eprintln!("[autoplay] queue exhausted but no seed available — stopping");
                             }
                         }
                     }
@@ -3512,7 +3630,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     // so yt-dlp cookie DB isn't locked by a competing process.
                     let np = playback.now_playing();
                     if !np.video_id.is_empty() && np.video_id != "native-prototype" {
-                        crate::core::cache::spawn_prefetch(np.video_id.clone(), np.title.clone(), np.artist.clone());
+                        crate::core::cache::spawn_cache_download(np.video_id.clone(), np.title.clone(), np.artist.clone());
                         // Persist as last played
                         let mut settings = core::persistence::load_settings();
                         settings.last_played = Some(core::persistence::StoredSong {
@@ -3528,6 +3646,10 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 let track = playback.now_playing();
                 let is_playing = playback.is_playing();
                 let elapsed = playback.elapsed_secs();
+                // Backfill duration detected from the audio stream (for songs whose
+                // metadata lacked one) so total-time, the progress bar, and seeking work.
+                let detected = playback.take_detected_duration();
+                if detected > 0 { playback.set_current_duration(detected); }
                 let dur = playback.track_duration_secs();
                 let liked = playback.is_liked(&track.video_id);
 
@@ -3596,10 +3718,67 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                         .unwrap_or((0, 0, 500))
                 };
 
-                // ── Pre-cache next song once current song is 25% through ──
+                // ── Look-ahead prewarm once the current song is 25% through ──
+                // Combine the user queue's upcoming songs with the autoplay queue
+                // (playback flows seamlessly from either), then fully cache the
+                // next `prefetch_depth` songs and URL-prewarm the one right after.
+                // This is what makes queue/autoplay transitions instant instead of
+                // paying the ~3s yt-dlp resolve on every track change.
                 if is_playing && progress > 0.25 && last_precached_id != track.video_id {
                     last_precached_id = track.video_id.clone();
-                    playback.cache_next_song_if_needed();
+                    let depth = prefetch_depth.load(std::sync::atomic::Ordering::Relaxed).clamp(1, 3) as usize;
+                    let want = depth + 1; // cache `depth`, plus URL-warm the next one
+                    let mut next: Vec<core::playback::NowPlaying> = playback.queue_upcoming();
+                    if next.len() < want {
+                        for s in playback.autoplay_queue() {
+                            if next.len() >= want { break; }
+                            if s.video_id != track.video_id
+                                && next.iter().all(|n| n.video_id != s.video_id)
+                            {
+                                next.push(s);
+                            }
+                        }
+                    }
+                    // Fully cache the next `depth` songs so they start instantly.
+                    for song in next.iter().take(depth) {
+                        crate::core::cache::spawn_cache_download(
+                            song.video_id.clone(), song.title.clone(), song.artist.clone());
+                    }
+                    // Warm just the stream URL of the song right after the cached ones.
+                    if let Some(after) = next.get(depth) {
+                        crate::core::stream_player::prefetch_stream_url(&after.video_id);
+                    }
+                    // Protect the current song + everything we just looked ahead to
+                    // from LRU eviction, so we never drop a song we're about to play.
+                    if let Ok(mut cache) = crate::core::cache::AudioCache::global().lock() {
+                        let mut protect: Vec<String> = Vec::with_capacity(next.len() + 1);
+                        protect.push(track.video_id.clone());
+                        protect.extend(next.iter().map(|n| n.video_id.clone()));
+                        cache.set_protected(protect);
+                    }
+                }
+
+                // ── Silent stream→cache upgrade (only while paused) ──
+                // When the current streaming song's cache download has finished
+                // AND playback is paused, swap the source to the local file now.
+                // Doing it while paused makes the sink swap inaudible (no samples
+                // are flowing), so there's no mid-song hiccup. On resume it plays
+                // from the cached file (instant seeks, immune to the stream
+                // dropping). If the user never pauses, the song simply streams to
+                // the end with no swap — and seeks still load the cache on demand
+                // via the worker's Seek handler. Fires once per song.
+                if !is_playing
+                    && !playback.is_current_cached()
+                    && track.video_id != last_upgraded_id
+                    && !track.video_id.is_empty()
+                    && track.video_id != "native-prototype"
+                {
+                    let cached_path = crate::core::cache::AudioCache::global().lock().ok()
+                        .and_then(|mut c| c.get(&track.video_id));
+                    if let Some(path) = cached_path {
+                        last_upgraded_id = track.video_id.clone();
+                        playback.upgrade_current_to_cache(path);
+                    }
                 }
 
                 // ── Periodic thumbnail fetch for queue items (every 3s = 6 ticks) ──
@@ -3814,12 +3993,35 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             }
             // Fetch autoplay queue for last played song
             {
-                autoplay_seed_vid.lock().unwrap().replace_range(.., &last.video_id);
+                playback.set_autoplay_seed(&last.video_id);
                 let ui_w = ui.as_weak();
-                let aq_data = autoplay_queue_data.clone();
                 let vid = last.video_id.clone();
                 std::thread::spawn(move || {
-                    fetch_autoplay_queue(ui_w, aq_data, vid);
+                    fetch_autoplay_queue(ui_w, vid, false);
+                });
+            }
+            // Warmup: pre-fetch the stream URL (and cache if not already cached)
+            // in the background so the first play starts without the usual ~3s
+            // yt-dlp delay. For a cached song this is a no-op; for a streaming
+            // song it populates the in-memory URL cache (6h TTL) so the worker's
+            // spawn_stream_fetch gets an instant cache hit.
+            {
+                let vid = last.video_id.clone();
+                let title = last.title.clone();
+                let artist = last.artist.clone();
+                std::thread::spawn(move || {
+                    // If already cached on disk, no network work needed.
+                    let already_cached = crate::core::cache::AudioCache::global()
+                        .lock().ok()
+                        .and_then(|mut c| c.get(&vid))
+                        .is_some();
+                    if !already_cached {
+                        // Resolve and cache the stream URL (~3s) so the first
+                        // play is instant, then kick off the full cache download
+                        // so seeks and offline playback work immediately.
+                        let _ = crate::core::stream_player::get_stream_url(&vid);
+                        crate::core::cache::spawn_cache_download(vid, title, artist);
+                    }
                 });
             }
         }

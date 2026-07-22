@@ -53,11 +53,18 @@ pub struct AppSettings {
     pub last_played: Option<StoredSong>,
     #[serde(default)]
     pub onboarding_seen: bool,
+    /// How many upcoming songs to fully cache ahead of the current one.
+    /// 1 = just the next song (default); higher smooths rapid skipping at the
+    /// cost of more background downloads.
+    #[serde(default = "default_prefetch_depth")]
+    pub prefetch_depth: u32,
 }
+
+fn default_prefetch_depth() -> u32 { 1 }
 
 impl Default for AppSettings {
     fn default() -> Self {
-        Self { minimize_to_tray: true, last_played: None, onboarding_seen: false }
+        Self { minimize_to_tray: true, last_played: None, onboarding_seen: false, prefetch_depth: default_prefetch_depth() }
     }
 }
 

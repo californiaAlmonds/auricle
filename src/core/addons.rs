@@ -18,6 +18,9 @@ const YTDLP_WIN_URL: &str =
     "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
 const FFMPEG_WIN_ZIP_URL: &str =
     "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip";
+/// Deno single-binary zip for Windows x64.
+const DENO_WIN_ZIP_URL: &str =
+    "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip";
 
 /// Per-user directory where downloaded add-on binaries are stored:
 /// `%LOCALAPPDATA%\auricle\bin\` on Windows.
@@ -82,6 +85,21 @@ fn detect(tool: &str, version_arg: &str) -> bool {
     matches!(cmd.output(), Ok(o) if o.status.success())
 }
 
+/// Prepends the per-user add-on directory to the PATH for a spawned process
+/// so that yt-dlp can discover Deno (and ffmpeg) even when they're not on the
+/// system PATH. Call this on every Command that runs yt-dlp.
+pub fn set_addon_path_env(cmd: &mut Command) {
+    let addon = addon_dir();
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    let mut parts: Vec<std::path::PathBuf> = std::env::split_paths(&current).collect();
+    if !parts.contains(&addon) {
+        parts.insert(0, addon);
+    }
+    if let Ok(new_path) = std::env::join_paths(parts) {
+        cmd.env("PATH", new_path);
+    }
+}
+
 /// True if a usable `yt-dlp` is available (add-on dir or PATH).
 pub fn ytdlp_installed() -> bool {
     detect("yt-dlp", "--version")
@@ -90,6 +108,11 @@ pub fn ytdlp_installed() -> bool {
 /// True if a usable `ffmpeg` is available (add-on dir or PATH).
 pub fn ffmpeg_installed() -> bool {
     detect("ffmpeg", "-version")
+}
+
+/// True if a usable `deno` is available (add-on dir or PATH).
+pub fn deno_installed() -> bool {
+    detect("deno", "--version")
 }
 
 /// Download `url` into memory, reporting progress through `on_progress`.
@@ -206,6 +229,85 @@ pub fn install_ffmpeg(on_progress: impl Fn(f32) + Send) -> Result<(), String> {
 
         if extracted == 0 {
             return Err("ffmpeg.exe not found in downloaded archive".into());
+        }
+        on_progress(1.0);
+        Ok(())
+    }
+}
+
+/// Update yt-dlp to the latest version.
+///
+/// Tries `yt-dlp -U` (self-update) first; if that fails or yt-dlp isn't
+/// already installed, falls back to a fresh download of the latest release.
+pub fn update_ytdlp(on_progress: impl Fn(f32) + Send) -> Result<(), String> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = on_progress;
+        Err("Automatic update is only supported on Windows.".into())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let ytdlp = resolve_tool("yt-dlp");
+        // Attempt self-update via `yt-dlp -U` (reports its own progress text;
+        // we can't easily parse it, so report indeterminate).
+        on_progress(-1.0);
+        let self_update_ok = if ytdlp.exists() {
+            let mut cmd = Command::new(&ytdlp);
+            cmd.arg("-U");
+            set_addon_path_env(&mut cmd);
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            cmd.output().map(|o| o.status.success()).unwrap_or(false)
+        } else {
+            false
+        };
+        if self_update_ok {
+            on_progress(1.0);
+            return Ok(());
+        }
+        // Self-update unavailable or failed — fall back to re-download.
+        install_ytdlp(on_progress)
+    }
+}
+
+/// Download `deno` into the per-user add-on directory. Windows only.
+///
+/// Deno ships as a single-file zip containing `deno.exe`. The zip is small
+/// (~50 MB) so the download maps cleanly to `0.0..=0.9` and extraction to
+/// `0.9..=1.0`.
+pub fn install_deno(on_progress: impl Fn(f32) + Send) -> Result<(), String> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = on_progress;
+        Err("Automatic install is only supported on Windows. Please install Deno manually.".into())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let dir = addon_dir();
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let bytes = http_download(DENO_WIN_ZIP_URL, &|p: f32| {
+            on_progress(if p < 0.0 { p } else { p * 0.9 });
+        })?;
+        let reader = std::io::Cursor::new(bytes);
+        let mut archive = zip::ZipArchive::new(reader).map_err(|e| e.to_string())?;
+        let count = archive.len().max(1);
+        let mut extracted = false;
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
+            let name = file.name().to_lowercase();
+            if name == "deno.exe" || name.ends_with("/deno.exe") {
+                let dest = dir.join("deno.exe");
+                let tmp  = dir.join("deno.exe.part");
+                {
+                    let mut out = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+                    std::io::copy(&mut file, &mut out).map_err(|e| e.to_string())?;
+                }
+                std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
+                extracted = true;
+            }
+            on_progress(0.9 + 0.1 * ((i + 1) as f32 / count as f32));
+        }
+        if !extracted {
+            return Err("deno.exe not found in downloaded archive".into());
         }
         on_progress(1.0);
         Ok(())
