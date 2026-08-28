@@ -271,36 +271,41 @@ fn spawn_sidebar_artist_thumbs(ui_weak: slint::Weak<NativeShellWindow>) {
         .filter(|(n, _)| !n.is_empty())
         .collect();
     if seeds.is_empty() { return; }
-    std::thread::spawn(move || {
-        let Some(http) = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(8)).build().ok() else { return };
+    core::net::spawn(move || {
+        let http = core::net::http();
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok();
+        // Build the API handle ONCE for the whole batch. `new_unauthenticated`
+        // sets up a TLS stack and does a token round-trip, so creating it per
+        // artist (as this loop used to) multiplied startup cost by the number of
+        // sidebar artists. Reusing it across `block_on` calls is safe because
+        // they all run on this same, still-alive runtime.
+        let api = rt.as_ref().and_then(|rt| {
+            rt.block_on(async { ytmapi_rs::YtMusic::new_unauthenticated().await.ok() })
+        });
         for (name, bid) in seeds {
             // Cache key: channel id when known, else the (lowercased) name.
             let key = if bid.is_empty() { format!("name_{}", name.to_lowercase()) } else { bid.clone() };
             let path = library_thumb_path("artist", &key);
             if !path.exists() {
                 let mut url = String::new();
-                if let Some(ref rt) = rt {
+                if let (Some(rt), Some(api)) = (rt.as_ref(), api.as_ref()) {
                     let name_q = name.clone();
                     let bid_q = bid.clone();
                     url = rt.block_on(async {
-                        use ytmapi_rs::YtMusic;
                         use ytmapi_rs::common::ArtistChannelID;
                         use ytmapi_rs::query::{SearchQuery, search::ArtistsFilter};
-                        let api = YtMusic::new_unauthenticated().await.ok()?;
                         // Have a channel id → fetch the artist page thumbnail.
                         if !bid_q.is_empty() {
                             if let Ok(art) = api.get_artist(ArtistChannelID::from_raw(&bid_q)).await {
-                                return art.thumbnails.last().map(|t| t.url.clone());
+                                return pick_thumb(&art.thumbnails).map(|t| t.url.clone());
                             }
                         }
                         // Otherwise resolve by name; the search result carries a thumbnail.
                         let res = api.query(SearchQuery::new(name_q).with_filter(ArtistsFilter)).await.ok()?;
                         let first = res.into_iter().next()?;
-                        if let Some(t) = first.thumbnails.last() { return Some(t.url.clone()); }
+                        if let Some(t) = pick_thumb(&first.thumbnails) { return Some(t.url.clone()); }
                         let art = api.get_artist(first.browse_id).await.ok()?;
-                        art.thumbnails.last().map(|t| t.url.clone())
+                        pick_thumb(&art.thumbnails).map(|t| t.url.clone())
                     }).unwrap_or_default();
                 }
                 if url.is_empty() { continue; }
@@ -370,22 +375,23 @@ fn spawn_sidebar_album_thumbs(ui_weak: slint::Weak<NativeShellWindow>) {
         .filter(|s| !s.is_empty())
         .collect();
     if ids.is_empty() { return; }
-    std::thread::spawn(move || {
-        let Some(http) = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(8)).build().ok() else { return };
+    core::net::spawn(move || {
+        let http = core::net::http();
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok();
+        // One API handle for the whole batch — see spawn_sidebar_artist_thumbs.
+        let api = rt.as_ref().and_then(|rt| {
+            rt.block_on(async { ytmapi_rs::YtMusic::new_unauthenticated().await.ok() })
+        });
         for id in ids {
             let path = library_thumb_path("album", &id);
             if !path.exists() {
                 let mut url = String::new();
-                if let Some(ref rt) = rt {
+                if let (Some(rt), Some(api)) = (rt.as_ref(), api.as_ref()) {
                     let id_q = id.clone();
                     url = rt.block_on(async {
-                        use ytmapi_rs::YtMusic;
                         use ytmapi_rs::common::AlbumID;
-                        let api = YtMusic::new_unauthenticated().await.ok()?;
                         let alb = api.get_album(AlbumID::from_raw(&id_q)).await.ok()?;
-                        alb.thumbnails.last().map(|t| t.url.clone())
+                        pick_thumb(&alb.thumbnails).map(|t| t.url.clone())
                     }).unwrap_or_default();
                 }
                 if url.is_empty() { continue; }
@@ -425,6 +431,45 @@ fn library_thumb_path(kind: &str, id: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("ytm_lib_{}_{}.jpg", kind, safe))
 }
 
+/// Deletes thumbnails cached by older builds, which stored whatever the API
+/// listed last — for artists that could be a 2880x1200 banner.
+///
+/// These files are keyed by id, so the usual `path.exists()` check would keep
+/// reusing them forever and the UI thread would keep paying to decode them.
+/// Anything far larger than a right-sized JPEG is dropped so it gets refetched at
+/// a sane resolution. Runs once ever, tracked in settings.
+fn purge_oversized_thumb_cache() {
+    // A 320px JPEG lands well under this; the banners ran 200 KB to 1 MB.
+    const MAX_CACHED_THUMB_BYTES: u64 = 100 * 1024;
+
+    let mut settings = core::persistence::load_settings();
+    if settings.thumb_cache_purged {
+        return;
+    }
+
+    let mut removed = 0usize;
+    if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            // Only this app's own thumbnail files.
+            if !name.starts_with("ytm_") || !name.ends_with(".jpg") {
+                continue;
+            }
+            let oversized = entry.metadata().map(|m| m.len() > MAX_CACHED_THUMB_BYTES).unwrap_or(false);
+            if oversized && std::fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    if removed > 0 {
+        eprintln!("[thumb-cache] dropped {removed} oversized cached thumbnails");
+    }
+
+    settings.thumb_cache_purged = true;
+    core::persistence::save_settings(&settings);
+}
+
 /// Load a cached thumbnail image if it exists on disk.
 fn load_cached_thumb(path: &std::path::Path) -> (slint::Image, bool) {
     if path.exists() {
@@ -435,14 +480,51 @@ fn load_cached_thumb(path: &std::path::Path) -> (slint::Image, bool) {
     (Default::default(), false)
 }
 
+/// Longest edge, in pixels, we ever want a cached thumbnail to be.
+///
+/// The largest place any of these images is drawn is a ~176px card, so 320
+/// still leaves headroom for high-DPI displays.
+const THUMB_TARGET_PX: u64 = 320;
+
+/// Picks the smallest thumbnail variant that still covers [`THUMB_TARGET_PX`] on
+/// its longest edge, falling back to the largest available.
+///
+/// The API offers everything from 60px squares up to 2880x1200 artist banners.
+/// The previous code took the last (i.e. always the biggest) variant, so the
+/// on-disk cache ended up holding multi-megapixel banners that then had to be
+/// decoded on the UI thread just to be drawn at 48px in the sidebar.
+fn pick_thumb<T: ThumbSize>(thumbs: &[T]) -> Option<&T> {
+    thumbs
+        .iter()
+        .filter(|t| t.longest_edge() >= THUMB_TARGET_PX)
+        .min_by_key(|t| t.longest_edge())
+        .or_else(|| thumbs.iter().max_by_key(|t| t.longest_edge()))
+}
+
+/// Lets [`pick_thumb`] work over both our own [`Thumbnail`] and the one the
+/// `ytmapi_rs` responses carry.
+trait ThumbSize {
+    fn longest_edge(&self) -> u64;
+}
+
+impl ThumbSize for Thumbnail {
+    fn longest_edge(&self) -> u64 { self.width.max(self.height) }
+}
+
+impl ThumbSize for ytmapi_rs::common::Thumbnail {
+    fn longest_edge(&self) -> u64 { self.width.max(self.height) }
+}
+
 /// Background: fetch missing album-art for the saved-albums list (from the stored
 /// thumbnail URL, or via the API if none), cache it, and update the model rows.
 fn spawn_album_thumb_loader(ui_weak: slint::Weak<NativeShellWindow>) {
-    std::thread::spawn(move || {
+    core::net::spawn(move || {
         let albums = core::library::saved_albums();
-        let Some(http) = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(8)).build().ok() else { return };
+        let http = core::net::http();
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok();
+        // One API handle for the whole batch, built lazily: most albums already
+        // have a stored thumbnail URL, so often it is never needed at all.
+        let mut api = None;
         for a in albums {
             if a.browse_id.is_empty() { continue; }
             let path = library_thumb_path("album", &a.browse_id);
@@ -450,13 +532,16 @@ fn spawn_album_thumb_loader(ui_weak: slint::Weak<NativeShellWindow>) {
                 let mut url = a.thumbnail_url.clone();
                 if url.is_empty() {
                     if let Some(ref rt) = rt {
-                        url = rt.block_on(async {
-                            use ytmapi_rs::YtMusic;
-                            use ytmapi_rs::common::AlbumID;
-                            let api = YtMusic::new_unauthenticated().await.ok()?;
-                            let alb = api.get_album(AlbumID::from_raw(&a.browse_id)).await.ok()?;
-                            alb.thumbnails.last().map(|t| t.url.clone())
-                        }).unwrap_or_default();
+                        if api.is_none() {
+                            api = rt.block_on(async { ytmapi_rs::YtMusic::new_unauthenticated().await.ok() });
+                        }
+                        if let Some(api) = api.as_ref() {
+                            url = rt.block_on(async {
+                                use ytmapi_rs::common::AlbumID;
+                                let alb = api.get_album(AlbumID::from_raw(&a.browse_id)).await.ok()?;
+                                pick_thumb(&alb.thumbnails).map(|t| t.url.clone())
+                            }).unwrap_or_default();
+                        }
                         if !url.is_empty() { core::library::set_album_thumbnail(&a.browse_id, &url); }
                     }
                 }
@@ -494,11 +579,12 @@ fn spawn_album_thumb_loader(ui_weak: slint::Weak<NativeShellWindow>) {
 /// Background: fetch missing artist images for the followed-artists list, cache
 /// them, and update the model rows (and the sidebar).
 fn spawn_artist_thumb_loader(ui_weak: slint::Weak<NativeShellWindow>) {
-    std::thread::spawn(move || {
+    core::net::spawn(move || {
         let artists = core::library::followed_artists();
-        let Some(http) = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(8)).build().ok() else { return };
+        let http = core::net::http();
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok();
+        // One API handle for the whole batch, built lazily — see the album loader.
+        let mut api = None;
         for a in artists {
             if a.browse_id.is_empty() { continue; }
             let path = library_thumb_path("artist", &a.browse_id);
@@ -506,13 +592,16 @@ fn spawn_artist_thumb_loader(ui_weak: slint::Weak<NativeShellWindow>) {
                 let mut url = a.thumbnail_url.clone();
                 if url.is_empty() {
                     if let Some(ref rt) = rt {
-                        url = rt.block_on(async {
-                            use ytmapi_rs::YtMusic;
-                            use ytmapi_rs::common::ArtistChannelID;
-                            let api = YtMusic::new_unauthenticated().await.ok()?;
-                            let art = api.get_artist(ArtistChannelID::from_raw(&a.browse_id)).await.ok()?;
-                            art.thumbnails.last().map(|t| t.url.clone())
-                        }).unwrap_or_default();
+                        if api.is_none() {
+                            api = rt.block_on(async { ytmapi_rs::YtMusic::new_unauthenticated().await.ok() });
+                        }
+                        if let Some(api) = api.as_ref() {
+                            url = rt.block_on(async {
+                                use ytmapi_rs::common::ArtistChannelID;
+                                let art = api.get_artist(ArtistChannelID::from_raw(&a.browse_id)).await.ok()?;
+                                pick_thumb(&art.thumbnails).map(|t| t.url.clone())
+                            }).unwrap_or_default();
+                        }
                         if !url.is_empty() { core::library::set_artist_thumbnail(&a.browse_id, &url); }
                     }
                 }
@@ -823,7 +912,7 @@ fn format_duration_secs(secs: u32) -> String {
 }
 
 fn fetch_trending_songs(ui_weak: slint::Weak<NativeShellWindow>) {
-    std::thread::spawn(move || {
+    core::net::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let songs = rt.block_on(async {
             // Build a personalized query from the user's taste profile
@@ -866,7 +955,7 @@ fn fetch_trending_songs(ui_weak: slint::Weak<NativeShellWindow>) {
             // Collect Send-safe raw data (include thumb URL)
             let raw: Vec<(String, String, String, u32, String)> = songs.into_iter().take(15).map(|s| {
                 let dur = s.duration.unwrap_or(0);
-                let thumb_url = s.thumbnails.last().map(|t| t.url.clone()).unwrap_or_default();
+                let thumb_url = pick_thumb(&s.thumbnails).map(|t| t.url.clone()).unwrap_or_default();
                 (s.video_id, s.name, s.artist.name, dur, thumb_url)
             }).collect();
 
@@ -900,11 +989,8 @@ fn fetch_trending_songs(ui_weak: slint::Weak<NativeShellWindow>) {
 
             // Fetch thumbnails in background
             if !thumb_urls.is_empty() {
-                std::thread::spawn(move || {
-                    let http = reqwest::blocking::Client::builder()
-                        .timeout(std::time::Duration::from_secs(8))
-                        .build().ok();
-                    let Some(http) = http else { return; };
+                core::net::spawn(move || {
+                    let http = core::net::http();
                     for (idx, url) in thumb_urls {
                         if let Ok(resp) = http.get(&url).send() {
                             if let Ok(bytes) = resp.bytes() {
@@ -1013,7 +1099,7 @@ impl TasteAffinity {
 fn fetch_followed_songs(ui_weak: slint::Weak<NativeShellWindow>) {
     let followed = core::library::followed_artists();
     if followed.is_empty() { return; }
-    std::thread::spawn(move || {
+    core::net::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let raw: Vec<(String, String, String, u32, String)> = rt.block_on(async {
             use ytmapi_rs::YtMusic;
@@ -1027,7 +1113,7 @@ fn fetch_followed_songs(ui_weak: slint::Weak<NativeShellWindow>) {
                     let songs = map_search_results(res);
                     for s in songs.into_iter().take(3) {
                         if seen.insert(s.video_id.clone()) {
-                            let thumb = s.thumbnails.last().map(|t| t.url.clone()).unwrap_or_default();
+                            let thumb = pick_thumb(&s.thumbnails).map(|t| t.url.clone()).unwrap_or_default();
                             out.push((s.video_id, s.name, s.artist.name, s.duration.unwrap_or(0), thumb));
                         }
                     }
@@ -1062,8 +1148,8 @@ fn fetch_followed_songs(ui_weak: slint::Weak<NativeShellWindow>) {
             }
         }).ok();
         if !thumb_urls.is_empty() {
-            std::thread::spawn(move || {
-                let Some(http) = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(8)).build().ok() else { return };
+            core::net::spawn(move || {
+                let http = core::net::http();
                 for (idx, url) in thumb_urls {
                     if let Ok(resp) = http.get(&url).send() {
                         if let Ok(bytes) = resp.bytes() {
@@ -1107,7 +1193,7 @@ fn fetch_personalized_songs(ui_weak: slint::Weak<NativeShellWindow>) {
     // Use the last liked song as seed for watch playlist
     let seed_vid = liked.last().unwrap().video_id.clone();
 
-    std::thread::spawn(move || {
+    core::net::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let songs = rt.block_on(async {
             let guest_api = ytmapi_rs::YtMusic::new_unauthenticated().await.ok()?;
@@ -1127,7 +1213,7 @@ fn fetch_personalized_songs(ui_weak: slint::Weak<NativeShellWindow>) {
 
         if let Some(songs) = songs {
             let raw: Vec<(String, String, String, String)> = songs.into_iter().map(|s| {
-                let thumb_url = s.thumbnails.last().map(|t| t.url.clone()).unwrap_or_default();
+                let thumb_url = pick_thumb(&s.thumbnails).map(|t| t.url.clone()).unwrap_or_default();
                 (s.video_id, s.name, s.artist.name, thumb_url)
             }).collect();
 
@@ -1161,11 +1247,8 @@ fn fetch_personalized_songs(ui_weak: slint::Weak<NativeShellWindow>) {
 
             // Fetch thumbnails in background
             if !thumb_urls.is_empty() {
-                std::thread::spawn(move || {
-                    let http = reqwest::blocking::Client::builder()
-                        .timeout(std::time::Duration::from_secs(8))
-                        .build().ok();
-                    let Some(http) = http else { return; };
+                core::net::spawn(move || {
+                    let http = core::net::http();
                     for (idx, url) in thumb_urls {
                         if let Ok(resp) = http.get(&url).send() {
                             if let Ok(bytes) = resp.bytes() {
@@ -1303,7 +1386,7 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
     {
         let ui_weak = ui_weak.clone();
         let seeds = new_release_seeds;
-        std::thread::spawn(move || {
+        core::net::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             let albums = rt.block_on(async {
                 use ytmapi_rs::YtMusic;
@@ -1336,7 +1419,7 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
                             .chain(art.top_releases.singles.iter().flat_map(|s| s.results.iter()));
                         for a in releases {
                             let year: i32 = a.year.trim().parse().unwrap_or(0);
-                            let thumb = a.thumbnails.last().map(|t| t.url.clone()).unwrap_or_default();
+                            let thumb = pick_thumb(&a.thumbnails).map(|t| t.url.clone()).unwrap_or_default();
                             cand.push((a.title.clone(), a.album_id.get_raw().to_string(), disp.clone(), year, thumb));
                         }
                     }
@@ -1386,11 +1469,8 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
 
             // Fetch album thumbnails
             if !thumb_urls.is_empty() {
-                std::thread::spawn(move || {
-                    let http = match reqwest::blocking::Client::builder()
-                        .timeout(std::time::Duration::from_secs(8)).build() {
-                        Ok(c) => c, Err(_) => return,
-                    };
+                core::net::spawn(move || {
+                    let http = core::net::http();
                     for (idx, url) in &thumb_urls {
                         if let Ok(resp) = http.get(url).send() {
                             if let Ok(bytes) = resp.bytes() {
@@ -1425,7 +1505,7 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
     {
         let ui_weak = ui_weak.clone();
         let artists = top_artists_clone.clone();
-        std::thread::spawn(move || {
+        core::net::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             let (mix1, mix2, mix3, mix1_title, mix2_title, mix3_title) = rt.block_on(async {
                 use ytmapi_rs::YtMusic;
@@ -1444,7 +1524,7 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
                     .into_iter().take(10)
                     .map(|s| {
                         let dur = parse_duration(&s.duration).unwrap_or(0);
-                        let thumb = s.thumbnails.last().map(|t| t.url.clone()).unwrap_or_default();
+                        let thumb = pick_thumb(&s.thumbnails).map(|t| t.url.clone()).unwrap_or_default();
                         (s.video_id.get_raw().to_string(), s.title, s.artist, dur, thumb)
                     }).collect();
 
@@ -1457,7 +1537,7 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
                     .into_iter().take(10)
                     .map(|s| {
                         let dur = parse_duration(&s.duration).unwrap_or(0);
-                        let thumb = s.thumbnails.last().map(|t| t.url.clone()).unwrap_or_default();
+                        let thumb = pick_thumb(&s.thumbnails).map(|t| t.url.clone()).unwrap_or_default();
                         (s.video_id.get_raw().to_string(), s.title, s.artist, dur, thumb)
                     }).collect();
 
@@ -1469,7 +1549,7 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
                     .into_iter().take(10)
                     .map(|s| {
                         let dur = parse_duration(&s.duration).unwrap_or(0);
-                        let thumb = s.thumbnails.last().map(|t| t.url.clone()).unwrap_or_default();
+                        let thumb = pick_thumb(&s.thumbnails).map(|t| t.url.clone()).unwrap_or_default();
                         (s.video_id.get_raw().to_string(), s.title, s.artist, dur, thumb)
                     }).collect();
 
@@ -1520,11 +1600,8 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
 
             // Fetch thumbnails for mixes
             if !all_thumb_urls.is_empty() {
-                std::thread::spawn(move || {
-                    let http = match reqwest::blocking::Client::builder()
-                        .timeout(std::time::Duration::from_secs(8)).build() {
-                        Ok(c) => c, Err(_) => return,
-                    };
+                core::net::spawn(move || {
+                    let http = core::net::http();
                     for (mix_num, idx, url) in &all_thumb_urls {
                         if let Ok(resp) = http.get(url).send() {
                             if let Ok(bytes) = resp.bytes() {
@@ -1564,7 +1641,7 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
     // ── Thread 3: Genre mix ───────────────────────────────────────────────────
     if let Some(genre_kw) = genre_keyword {
         let ui_weak = ui_weak.clone();
-        std::thread::spawn(move || {
+        core::net::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             let songs = rt.block_on(async {
                 use ytmapi_rs::YtMusic;
@@ -1579,7 +1656,7 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
                     .into_iter().take(10)
                     .map(|s| {
                         let dur = parse_duration(&s.duration).unwrap_or(0);
-                        let thumb = s.thumbnails.last().map(|t| t.url.clone()).unwrap_or_default();
+                        let thumb = pick_thumb(&s.thumbnails).map(|t| t.url.clone()).unwrap_or_default();
                         (s.video_id.get_raw().to_string(), s.title, s.artist, dur, thumb)
                     }).collect::<Vec<_>>()
             });
@@ -1616,11 +1693,8 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
 
             // Fetch thumbnails for genre mix
             if !thumb_urls.is_empty() {
-                std::thread::spawn(move || {
-                    let http = match reqwest::blocking::Client::builder()
-                        .timeout(std::time::Duration::from_secs(8)).build() {
-                        Ok(c) => c, Err(_) => return,
-                    };
+                core::net::spawn(move || {
+                    let http = core::net::http();
                     for (idx, url) in &thumb_urls {
                         if let Ok(resp) = http.get(url).send() {
                             if let Ok(bytes) = resp.bytes() {
@@ -1654,7 +1728,7 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
     // ── Thread 4: Language-based music ────────────────────────────────────────
     if let Some(language) = detected_language {
         let ui_weak = ui_weak.clone();
-        std::thread::spawn(move || {
+        core::net::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             let songs = rt.block_on(async {
                 use ytmapi_rs::YtMusic;
@@ -1669,7 +1743,7 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
                     .into_iter().take(10)
                     .map(|s| {
                         let dur = parse_duration(&s.duration).unwrap_or(0);
-                        let thumb = s.thumbnails.last().map(|t| t.url.clone()).unwrap_or_default();
+                        let thumb = pick_thumb(&s.thumbnails).map(|t| t.url.clone()).unwrap_or_default();
                         (s.video_id.get_raw().to_string(), s.title, s.artist, dur, thumb)
                     }).collect::<Vec<_>>()
             });
@@ -1706,11 +1780,8 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
 
             // Fetch thumbnails for language section
             if !thumb_urls.is_empty() {
-                std::thread::spawn(move || {
-                    let http = match reqwest::blocking::Client::builder()
-                        .timeout(std::time::Duration::from_secs(8)).build() {
-                        Ok(c) => c, Err(_) => return,
-                    };
+                core::net::spawn(move || {
+                    let http = core::net::http();
                     for (idx, url) in &thumb_urls {
                         if let Ok(resp) = http.get(url).send() {
                             if let Ok(bytes) = resp.bytes() {
@@ -1830,6 +1901,10 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     // URL but that URL gets 403'd past the first ~1 MiB, which shows up as every
     // song failing to play. Checked at most weekly; silent and non-blocking.
     core::addons::spawn_ytdlp_auto_update();
+
+    // One-time sweep of thumbnails cached at their source resolution by older
+    // builds. Done before any thumbnail loader starts so nothing races it.
+    purge_oversized_thumb_cache();
 
     let playback = core::bridge::playback_core();
 
@@ -3019,7 +3094,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                 // Artist results
                                 let mut artist_thumb_urls: Vec<(usize, String)> = vec![];
                                 let artist_items: Vec<ArtistItem> = artists.into_iter().take(10).enumerate().map(|(i, a)| {
-                                    if let Some(t) = a.thumbnails.last() {
+                                    if let Some(t) = pick_thumb(&a.thumbnails) {
                                         artist_thumb_urls.push((i, t.url.clone()));
                                     }
                                     ArtistItem {
@@ -3035,7 +3110,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                 // Album results
                                 let mut album_thumb_urls: Vec<(usize, String)> = vec![];
                                 let album_items: Vec<AlbumItem> = albums.into_iter().take(10).enumerate().map(|(i, a)| {
-                                    if let Some(t) = a.thumbnails.last() {
+                                    if let Some(t) = pick_thumb(&a.thumbnails) {
                                         album_thumb_urls.push((i, t.url.clone()));
                                     }
                                     AlbumItem {
@@ -3233,7 +3308,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                             Ok(artist) => {
                                 ui.set_artist_view_name(SharedString::from(artist.name.as_str()));
                                 ui.set_artist_view_has_thumbnail(false);
-                                let art_thumb = artist.thumbnails.last().map(|t| t.url.clone()).unwrap_or_default();
+                                let art_thumb = pick_thumb(&artist.thumbnails).map(|t| t.url.clone()).unwrap_or_default();
                                 if let Ok(mut c) = cur_artist.lock() {
                                     *c = core::library::SavedArtist {
                                         browse_id: browse_id_c.clone(),
@@ -3331,7 +3406,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                     .flat_map(|section| section.results.iter())
                                     .enumerate()
                                     .map(|(i, a)| {
-                                        if let Some(t) = a.thumbnails.last() {
+                                        if let Some(t) = pick_thumb(&a.thumbnails) {
                                             album_thumb_urls.push((i, t.url.clone()));
                                         }
                                         AlbumItem {
@@ -3351,7 +3426,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                     .flat_map(|section| section.results.iter())
                                     .enumerate()
                                     .map(|(i, a)| {
-                                        if let Some(t) = a.thumbnails.last() {
+                                        if let Some(t) = pick_thumb(&a.thumbnails) {
                                             single_thumb_urls.push((i, t.url.clone()));
                                         }
                                         AlbumItem {
@@ -3373,7 +3448,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                         use ytmapi_rs::parse::SearchResultVideo;
                                         match v {
                                             SearchResultVideo::Video { title, video_id, views, thumbnails, channel_name, .. } => {
-                                                Some((title.clone(), video_id.get_raw().to_string(), views.clone(), thumbnails.last().map(|t| t.url.clone()), channel_name.clone()))
+                                                Some((title.clone(), video_id.get_raw().to_string(), views.clone(), pick_thumb(&thumbnails).map(|t| t.url.clone()), channel_name.clone()))
                                             }
                                             _ => None,
                                         }
@@ -3442,7 +3517,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                         .chain(artist.top_releases.singles.iter().flat_map(|s| s.results.iter()));
                                     all_with_thumbs
                                         .filter(|a| a.year == latest_year)
-                                        .find_map(|a| a.thumbnails.last().map(|t| t.url.clone()))
+                                        .find_map(|a| pick_thumb(&a.thumbnails).map(|t| t.url.clone()))
                                 } else { None };
                                 if let Some(l) = latest {
                                     ui.set_artist_view_latest_release(l);
@@ -3457,7 +3532,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                 let ui_w_videos = ui_weak3.clone();
                                 let ui_w_related = ui_weak3.clone();
                                 let ui_w_latest = ui_weak3.clone();
-                                if let Some(thumb) = artist.thumbnails.last() {
+                                if let Some(thumb) = pick_thumb(&artist.thumbnails) {
                                     let thumb_url = thumb.url.clone();
                                     let ui_w = ui_weak3;
                                     std::thread::spawn(move || {
@@ -4246,7 +4321,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                 ui.set_album_view_artist(SharedString::from(artist_name.as_str()));
                                 ui.set_album_view_year(SharedString::from(album.year.as_str()));
                                 ui.set_album_view_has_thumbnail(false);
-                                let alb_thumb = album.thumbnails.last().map(|t| t.url.clone()).unwrap_or_default();
+                                let alb_thumb = pick_thumb(&album.thumbnails).map(|t| t.url.clone()).unwrap_or_default();
                                 if let Ok(mut c) = cur_album.lock() {
                                     *c = core::library::SavedAlbum {
                                         browse_id: browse_id_c.clone(),
@@ -4288,7 +4363,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
 
                                 // Fetch album thumbnail
                                 let ui_weak_recs = ui_weak3.clone();
-                                if let Some(thumb) = album.thumbnails.last() {
+                                if let Some(thumb) = pick_thumb(&album.thumbnails) {
                                     let thumb_url = thumb.url.clone();
                                     std::thread::spawn(move || {
                                         if let Ok(client) = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(5)).build() {
@@ -4341,7 +4416,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                                     .filter(|a| a.album_id.get_raw() != current_browse_id)
                                                     .take(10)
                                                     .map(|a| {
-                                                        let thumb = a.thumbnails.last().map(|t| t.url.clone());
+                                                        let thumb = pick_thumb(&a.thumbnails).map(|t| t.url.clone());
                                                         (a.title.clone(), a.album_id.get_raw().to_string(), artist.name.clone(), a.year.clone(), thumb)
                                                     }).collect();
                                             }
@@ -4354,7 +4429,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                                 .filter(|a| a.album_id.get_raw() != current_browse_id)
                                                 .take(6)
                                                 .map(|a| {
-                                                    let thumb = a.thumbnails.last().map(|t| t.url.clone());
+                                                    let thumb = pick_thumb(&a.thumbnails).map(|t| t.url.clone());
                                                     (a.title.clone(), a.album_id.get_raw().to_string(), a.artist.clone(), a.year.clone(), thumb)
                                                 }).collect();
                                         }
@@ -5373,7 +5448,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
 
                                 // Fetch playlist thumbnail from first track
                                 let thumb_url = songs.first()
-                                    .and_then(|s| s.thumbnails.last())
+                                    .and_then(|s| pick_thumb(&s.thumbnails))
                                     .map(|t| t.url.clone());
 
                                 if let Some(url) = thumb_url {
@@ -5461,11 +5536,11 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                                     use ytmapi_rs::parse::SearchResultPlaylist;
                                                     match p {
                                                         SearchResultPlaylist::Featured(f) => {
-                                                            let thumb = f.thumbnails.last().map(|t| t.url.clone());
+                                                            let thumb = pick_thumb(&f.thumbnails).map(|t| t.url.clone());
                                                             Some((f.title.clone(), f.playlist_id.get_raw().to_string(), f.songs.clone(), thumb))
                                                         },
                                                         SearchResultPlaylist::Community(c) => {
-                                                            let thumb = c.thumbnails.last().map(|t| t.url.clone());
+                                                            let thumb = pick_thumb(&c.thumbnails).map(|t| t.url.clone());
                                                             Some((c.title.clone(), c.playlist_id.get_raw().to_string(), c.views.clone(), thumb))
                                                         },
                                                         _ => None,

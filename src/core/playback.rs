@@ -302,6 +302,9 @@ fn spawn_audio_worker(
     thread::Builder::new()
         .name("ytm-native-audio".to_string())
         .spawn(move || {
+            // Drives track transitions and seeks; a late wake-up here shows up as a
+            // gap between songs, so keep it above ordinary background work.
+            crate::core::audio_priority::raise_current_thread();
             let mut engine = match create_audio_engine(detected_duration) {
                 Ok(e) => e,
                 Err(err) => {

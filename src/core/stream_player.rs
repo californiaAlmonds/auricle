@@ -340,6 +340,9 @@ impl BufferedHttpStream {
         std::thread::Builder::new()
             .name("ytm-stream-reader".to_string())
             .spawn(move || {
+                // Stay ahead of the decoder: if read-ahead falls behind under load
+                // the decode thread starves no matter how high its own priority is.
+                crate::core::audio_priority::raise_current_thread();
                 let mut pos: u64 = start;
                 let mut reconnects: u32 = 0;
                 let mut tee = tee;
@@ -661,6 +664,11 @@ impl StreamingAudioSource {
     }
 
     fn fill_next_packet(&mut self) -> bool {
+        // This runs on cpal's WASAPI stream thread, which cpal leaves at normal
+        // priority. Claim real-time audio scheduling the first time we decode on
+        // this thread so a busy foreground app (e.g. a game) can't preempt us
+        // past the buffer deadline. Idempotent and near-free after the first call.
+        crate::core::audio_priority::register_audio_thread();
         loop {
             let packet = match self.format.next_packet() {
                 Ok(p) => p,

@@ -80,6 +80,9 @@ pub struct AppSettings {
     /// background. 0 = never checked.
     #[serde(default)]
     pub last_ytdlp_update_check: u64,
+    /// Set once the one-time sweep of oversized cached thumbnails has run.
+    #[serde(default)]
+    pub thumb_cache_purged: bool,
 }
 
 fn default_prefetch_depth() -> u32 { 1 }
@@ -96,6 +99,7 @@ impl Default for AppSettings {
             theme_name: default_theme_name(),
             theme_mode: default_theme_mode(),
             last_ytdlp_update_check: 0,
+            thumb_cache_purged: false,
         }
     }
 }
