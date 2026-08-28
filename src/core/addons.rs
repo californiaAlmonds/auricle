@@ -269,6 +269,87 @@ pub fn update_ytdlp(on_progress: impl Fn(f32) + Send) -> Result<(), String> {
     }
 }
 
+/// Wall-clock unix seconds.
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// How often yt-dlp is refreshed in the background.
+const YTDLP_UPDATE_INTERVAL_SECS: u64 = 7 * 24 * 3600;
+
+/// Refreshes yt-dlp in the background if it hasn't been checked in a week.
+///
+/// YouTube rotates its stream signing and throttling rules constantly. When
+/// yt-dlp falls behind, it still resolves a CDN URL but that URL is only served
+/// in part — the CDN answers with HTTP 403 past roughly the first megabyte, so
+/// every song fails to play while the logs show a successful resolve. Keeping
+/// yt-dlp current is the only reliable prevention, so do it silently instead of
+/// waiting for the user to notice playback is broken and find the Settings button.
+///
+/// Non-blocking: returns immediately and does the work on a detached thread.
+pub fn spawn_ytdlp_auto_update() {
+    if !ytdlp_installed() {
+        return; // nothing to update; onboarding handles first install
+    }
+    let settings = crate::core::persistence::load_settings();
+    let now = unix_now();
+    if now.saturating_sub(settings.last_ytdlp_update_check) < YTDLP_UPDATE_INTERVAL_SECS {
+        return;
+    }
+    std::thread::spawn(move || {
+        // Record the attempt up front so a persistently failing update (offline,
+        // locked file) can't retry on every launch.
+        let mut settings = crate::core::persistence::load_settings();
+        settings.last_ytdlp_update_check = unix_now();
+        crate::core::persistence::save_settings(&settings);
+
+        match update_ytdlp(|_| {}) {
+            Ok(_) => {
+                // Previously cached URLs were signed by the old client and are
+                // partly blocked; drop them so the next play re-resolves.
+                crate::core::stream_player::clear_url_cache();
+                eprintln!("[addons] yt-dlp auto-update complete");
+            }
+            Err(e) => eprintln!("[addons] yt-dlp auto-update skipped: {e}"),
+        }
+    });
+}
+
+/// Guards [`force_ytdlp_update_once`] so a run of unplayable songs triggers at
+/// most one update per process.
+static FORCED_UPDATE_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Updates yt-dlp immediately, at most once per process run.
+///
+/// Called when playback gives up with an HTTP 403 from the CDN — the signature
+/// of a yt-dlp that YouTube has outgrown. Recovering here means the *next* song
+/// plays instead of the user hitting a wall of failures until they find the
+/// manual update button.
+pub fn force_ytdlp_update_once() {
+    if !ytdlp_installed() {
+        return;
+    }
+    if FORCED_UPDATE_DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    std::thread::spawn(|| {
+        eprintln!("[addons] playback blocked (HTTP 403) — refreshing yt-dlp");
+        match update_ytdlp(|_| {}) {
+            Ok(_) => {
+                crate::core::stream_player::clear_url_cache();
+                let mut settings = crate::core::persistence::load_settings();
+                settings.last_ytdlp_update_check = unix_now();
+                crate::core::persistence::save_settings(&settings);
+                eprintln!("[addons] yt-dlp refreshed — retry playback");
+            }
+            Err(e) => eprintln!("[addons] yt-dlp refresh failed: {e}"),
+        }
+    });
+}
+
 /// Download `deno` into the per-user add-on directory. Windows only.
 ///
 /// Deno ships as a single-file zip containing `deno.exe`. The zip is small

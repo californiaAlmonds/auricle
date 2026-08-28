@@ -1,4 +1,4 @@
-﻿use std::sync::{mpsc, Mutex};
+﻿use std::sync::{mpsc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -14,12 +14,68 @@ use crate::core::stream_player::{get_stream_url, StreamingAudioSource};
 use crate::core::cache::AudioCache;
 use crate::core::persistence;
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct NowPlaying {
     pub video_id: String,
     pub title: String,
     pub artist: String,
     pub duration_secs: u32,
+    #[serde(default)]
+    pub album: String,
+    #[serde(default)]
+    pub album_id: String,
+    #[serde(default)]
+    pub artist_id: String,
+}
+
+/// Session-scoped song metadata (album name + artist/album browse-ids) learned
+/// from API results as songs are displayed. Lets the queue, now-playing, and
+/// context menus resolve "go to album/artist" directly by id even though the
+/// play/queue callbacks only carry the four basic scalars.
+static SONG_META: OnceLock<Mutex<std::collections::HashMap<String, SongMeta>>> = OnceLock::new();
+
+#[derive(Clone, Default)]
+pub struct SongMeta {
+    pub album: String,
+    pub album_id: String,
+    pub artist_id: String,
+}
+
+fn song_meta() -> &'static Mutex<std::collections::HashMap<String, SongMeta>> {
+    SONG_META.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Record album/browse-id metadata for a video so playback and context menus can
+/// use it later. Only non-empty fields overwrite existing values (merge), so a
+/// richer source doesn't get clobbered by a sparser one.
+pub fn register_song_meta(video_id: &str, album: &str, album_id: &str, artist_id: &str) {
+    if video_id.is_empty() || video_id == "native-prototype" { return; }
+    if album.is_empty() && album_id.is_empty() && artist_id.is_empty() { return; }
+    if let Ok(mut map) = song_meta().lock() {
+        let e = map.entry(video_id.to_string()).or_default();
+        if !album.is_empty() { e.album = album.to_string(); }
+        if !album_id.is_empty() { e.album_id = album_id.to_string(); }
+        if !artist_id.is_empty() { e.artist_id = artist_id.to_string(); }
+    }
+}
+
+/// Fetch previously-registered metadata for `video_id`.
+pub fn get_song_meta(video_id: &str) -> Option<SongMeta> {
+    song_meta().lock().ok()?.get(video_id).cloned()
+}
+
+impl NowPlaying {
+    /// Build a NowPlaying, backfilling album/browse-ids from the session meta map
+    /// (and, in turn, registering any fields it already carries).
+    pub fn enriched(video_id: String, title: String, artist: String, duration_secs: u32) -> Self {
+        let mut np = NowPlaying { video_id, title, artist, duration_secs, ..Default::default() };
+        if let Some(meta) = get_song_meta(&np.video_id) {
+            np.album = meta.album;
+            np.album_id = meta.album_id;
+            np.artist_id = meta.artist_id;
+        }
+        np
+    }
 }
 
 pub struct PlaybackState {
@@ -487,6 +543,13 @@ fn spawn_audio_worker(
                                             // Exhausted retries — unfreeze the UI and skip to the
                                             // next track instead of stalling on "loading" forever.
                                             log_native_audio_error("playback", "stream-load-giveup", &video_id, &err);
+                                            // A 403 from the CDN on a freshly signed URL means
+                                            // yt-dlp is behind YouTube's current stream rules
+                                            // (the URL is only served in part). Refresh it so
+                                            // subsequent songs recover on their own.
+                                            if err.contains("403") {
+                                                crate::core::addons::force_ytdlp_update_once();
+                                            }
                                             audio_loading_flag.store(false, Ordering::Relaxed);
                                             engine.current_video_id = None;
                                             stream_retries = 0;
@@ -628,6 +691,7 @@ impl PlaybackCore {
                     title: "Native Shell Prototype".to_string(),
                     artist: "Auricle".to_string(),
                     duration_secs: 0,
+                    ..Default::default()
                 }],
                 queue_index: 0,
                 now_playing: NowPlaying {
@@ -635,6 +699,7 @@ impl PlaybackCore {
                     title: "Native Shell Prototype".to_string(),
                     artist: "Auricle".to_string(),
                     duration_secs: 0,
+                    ..Default::default()
                 },
                 is_playing: false,
                 audio_enabled: false,
@@ -776,12 +841,7 @@ impl PlaybackCore {
         // Save previous track BEFORE overwriting
         let prev = state.now_playing.clone();
 
-        state.now_playing = NowPlaying {
-            video_id: video_id.into(),
-            title: title.into(),
-            artist: artist.into(),
-            duration_secs,
-        };
+        state.now_playing = NowPlaying::enriched(video_id.into(), title.into(), artist.into(), duration_secs);
         // Reset playback timer for the new track
         state.paused_elapsed = std::time::Duration::ZERO;
         state.track_started_at = if state.is_playing { Some(std::time::Instant::now()) } else { None };
@@ -944,6 +1004,7 @@ impl PlaybackCore {
                     title: song.title,
                     artist: song.artist,
                     duration_secs,
+                    ..Default::default()
                 }
             })
             .collect();
@@ -1196,12 +1257,7 @@ impl PlaybackCore {
     }
 
     pub fn add_to_queue(&self, video_id: impl Into<String>, title: impl Into<String>, artist: impl Into<String>, duration_secs: u32) {
-        let song = NowPlaying {
-            video_id: video_id.into(),
-            title: title.into(),
-            artist: artist.into(),
-            duration_secs,
-        };
+        let song = NowPlaying::enriched(video_id.into(), title.into(), artist.into(), duration_secs);
         let vid = song.video_id.clone();
         let mut state = self.state.lock().unwrap();
         // Don't add duplicates
@@ -1215,12 +1271,7 @@ impl PlaybackCore {
 
     /// Insert a song right after the currently-playing track (play next).
     pub fn play_next(&self, video_id: impl Into<String>, title: impl Into<String>, artist: impl Into<String>, duration_secs: u32) {
-        let song = NowPlaying {
-            video_id: video_id.into(),
-            title: title.into(),
-            artist: artist.into(),
-            duration_secs,
-        };
+        let song = NowPlaying::enriched(video_id.into(), title.into(), artist.into(), duration_secs);
         let vid = song.video_id.clone();
         let mut state = self.state.lock().unwrap();
         // Remove existing duplicate if present
@@ -1256,6 +1307,23 @@ impl PlaybackCore {
         }
     }
 
+    /// Moves the `upcoming_index`-th upcoming song to play right after the current
+    /// track (the queue-row "Play next"). Index is into `queue_upcoming()`.
+    pub fn move_queue_song_next(&self, upcoming_index: usize) {
+        let mut state = self.state.lock().unwrap();
+        let start = state.queue_index + 1;
+        let abs = state.queue.iter().enumerate()
+            .skip(start)
+            .filter(|(_, np)| np.video_id != "native-prototype")
+            .nth(upcoming_index)
+            .map(|(idx, _)| idx);
+        if let Some(idx) = abs {
+            let song = state.queue.remove(idx);
+            let insert_pos = (state.queue_index + 1).min(state.queue.len());
+            state.queue.insert(insert_pos, song);
+        }
+    }
+
     /// Toggles the liked state of video_id, returns the new liked state.
     pub fn toggle_like(&self, video_id: &str) -> bool {
         let mut liked_ids = self.liked_ids.lock().unwrap();
@@ -1280,6 +1348,7 @@ impl PlaybackCore {
                     title: String::new(),
                     artist: String::new(),
                     duration_secs: 0,
+                    ..Default::default()
                 });
             drop(state);
             liked_songs.push(song);
@@ -1315,7 +1384,7 @@ impl PlaybackCore {
         self.liked_ids.lock().unwrap().remove(video_id);
         self.liked_songs.lock().unwrap().retain(|s| s.video_id != video_id);
         // Store the metadata for persistence
-        let song = NowPlaying { video_id: video_id.to_string(), title: title.to_string(), artist: artist.to_string(), duration_secs };
+        let song = NowPlaying { video_id: video_id.to_string(), title: title.to_string(), artist: artist.to_string(), duration_secs, ..Default::default() };
         // We pass it through persist
         let _ = song; // metadata stored via persist's all_songs scan
         self.persist();

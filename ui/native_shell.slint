@@ -42,27 +42,81 @@ struct MoodItem {
     params: string,
 }
 
+// ─── Theme (single source of truth for colors + radii) ───────────────────────
+// The whole palette is DERIVED from one `accent` color + a light/dark `is-light`
+// flag, so a single user choice re-skins the app while the relationships between
+// colors stay fixed. Rust sets `accent` + `is-light` from the saved settings.
+export global Theme {
+    // Inputs (set from Rust / Settings)
+    in property <color> accent: #6486b0;      // default "Default Blue" — muted steel blue (from reference)
+    in property <bool> is-light: false;
+
+    // Palette sampled from the reference: crisp, OPAQUE dark-slate surfaces carrying
+    // only a small accent tint. NOTE `accent.mix(base, f)` = f*accent + (1-f)*base,
+    // so a SMALL f keeps the surface mostly the neutral dark base. (The previous code
+    // wrote `base.mix(accent, 0.04)` which is ~96% accent — that is what turned the
+    // whole app washed-out blue.)
+    out property <color> bg:            is-light ? accent.mix(#ffffff, 0.05)  : accent.mix(#0c1016, 0.05);
+    out property <color> surface:       is-light ? accent.mix(#ffffff, 0.06)  : accent.mix(#12161f, 0.06);
+    out property <color> surface-2:     is-light ? accent.mix(#ffffff, 0.07)  : accent.mix(#171d27, 0.06);
+    out property <color> surface-hover: is-light ? accent.mix(#e9ecf1, 0.09)  : accent.mix(#212835, 0.07);
+    out property <color> elevated:      is-light ? #ffffff                    : accent.mix(#1b212c, 0.06);
+
+    // Panel/menu surfaces (kept the glass-* names) — now fully OPAQUE for the clean,
+    // crisp look of the reference instead of the previous frosted haze.
+    out property <color> glass:        is-light ? #ffffff : accent.mix(#12161f, 0.06);
+    out property <color> glass-strong: is-light ? #ffffff : accent.mix(#1a2029, 0.06);
+    out property <color> glass-hover:  is-light ? #eceef3 : accent.mix(#232b38, 0.06);
+
+    // Frosted chrome (player bar / queue pane). Slightly translucent for a premium
+    // glass hint, kept high-opacity so it never turns muddy.
+    out property <color> frost:    is-light ? #ffffff.with-alpha(0.82) : accent.mix(#141a24, 0.06).with-alpha(0.9);
+    out property <color> frost-hi: is-light ? #000000.with-alpha(0.06) : #ffffff.with-alpha(0.08);
+
+    // Text
+    out property <color> text:       is-light ? #171a20 : #f2f4f8;
+    out property <color> text-muted: is-light ? #565d69 : #97a1ae;
+    out property <color> text-dim:   is-light ? #838b98 : #5a6470;
+
+    // Accent variants
+    out property <color> accent-strong: accent.brighter(0.15);
+    out property <color> accent-soft:   accent.with-alpha(0.16);
+    out property <color> on-accent:     is-light ? #111318 : #ffffff;
+
+    // Lines / borders
+    out property <color> border:      is-light ? #000000.with-alpha(0.09) : #ffffff.with-alpha(0.07);
+    out property <color> border-soft: is-light ? #000000.with-alpha(0.05) : #ffffff.with-alpha(0.045);
+
+    // Hover veils (used over images / transparent rows)
+    out property <color> hover-veil:  is-light ? #000000.with-alpha(0.05) : #ffffff.with-alpha(0.05);
+
+    // Corner radii
+    out property <length> radius-sm: 8px;
+    out property <length> radius:    14px;
+    out property <length> radius-lg: 20px;
+}
+
 // ─── Shared components ────────────────────────────────────────────────────────
 
 component IconBtn inherits Rectangle {
     in property <string> icon;
-    in property <color> icon-color: #8a8a8a;
+    in property <color> icon-color: Theme.text-muted;
     in property <bool> active: false;
     in property <image> svg-icon;
     in property <bool> use-svg: false;
     callback clicked();
-    width: 36px; height: 36px; border-radius: 8px;
-    background: ta.has-hover ? #ffffff14 : (active ? #ffffff0c : transparent);
+    width: 36px; height: 36px; border-radius: Theme.radius-sm;
+    background: ta.has-hover ? Theme.hover-veil : (active ? Theme.accent-soft : transparent);
     if !use-svg: Text {
         text: root.icon;
-        color: ta.has-hover ? #ffffff : (root.active ? #ffffff : root.icon-color);
+        color: ta.has-hover ? Theme.text : (root.active ? Theme.text : root.icon-color);
         font-size: 18px;
         horizontal-alignment: center; vertical-alignment: center;
     }
     if use-svg: Image {
         source: root.svg-icon;
         width: 20px; height: 20px;
-        colorize: ta.has-hover ? #ffffff : (root.active ? #ffffff : root.icon-color);
+        colorize: ta.has-hover ? Theme.text : (root.active ? Theme.text : root.icon-color);
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
     }
@@ -75,14 +129,14 @@ component AddonProgress inherits Rectangle {
     in property <float> value: 0.0;
     property <bool> indeterminate: root.value < 0.0;
     property <bool> anim-toggle: false;
-    height: 6px; border-radius: 3px; background: #2a2a2a;
+    height: 6px; border-radius: 3px; background: Theme.surface-hover;
     clip: true;
 
     // Determinate fill
     if !root.indeterminate: Rectangle {
         x: 0; y: 0; height: parent.height; border-radius: 3px;
         width: parent.width * max(0.0, min(1.0, root.value));
-        background: #e85d5d;
+        background: Theme.accent;
         animate width { duration: 120ms; easing: ease-out; }
     }
 
@@ -90,7 +144,7 @@ component AddonProgress inherits Rectangle {
     if root.indeterminate: Rectangle {
         y: 0; height: parent.height; border-radius: 3px;
         width: parent.width * 0.35;
-        background: #e85d5d;
+        background: Theme.accent;
         x: root.anim-toggle ? (parent.width - self.width) : 0px;
         animate x { duration: 900ms; easing: ease-in-out; }
     }
@@ -101,21 +155,56 @@ component AddonProgress inherits Rectangle {
     }
 }
 
+// Delayed, non-interactive label for the collapsed sidebar rail. A PopupWindow
+// lets it escape the sidebar scroll clip without moving or widening the layout.
+component RailTooltip inherits Rectangle {
+    in property <bool> enabled: false;
+    in property <string> label: "";
+    in property <string> detail: "";
+    width: 0px; height: 0px;
+    changed enabled => { if (!enabled) { tip.close(); } }
+    Timer {
+        interval: 1s;
+        running: root.enabled;
+        triggered => { if (root.enabled) { tip.show(); } }
+    }
+    tip := PopupWindow {
+        x: 58px; y: -4px; width: 210px;
+        Rectangle {
+            width: 210px;
+            height: root.detail == "" ? 38px : 54px;
+            border-radius: Theme.radius-sm;
+                background: Theme.glass-strong;
+            border-color: Theme.border; border-width: 1px;
+            drop-shadow-blur: 18px; drop-shadow-color: #00000070; drop-shadow-offset-y: 5px;
+            VerticalLayout {
+                padding-left: 12px; padding-right: 12px; padding-top: 7px; padding-bottom: 7px;
+                alignment: center; spacing: 2px;
+                Text { text: root.label; color: Theme.text; font-size: 13px; font-weight: 600; overflow: elide; }
+                if root.detail != "": Text { text: root.detail; color: Theme.text-muted; font-size: 11px; overflow: elide; }
+            }
+        }
+    }
+}
+
 component NavBtn inherits Rectangle {
     in property <string> label; in property <image> nav-icon; in property <bool> active;
+    in property <bool> expanded: true;
     callback clicked();
-    height: 44px; border-radius: 8px;
-    background: ta.has-hover ? #ffffff0c : (active ? #ffffff0a : transparent);
+    height: 44px; border-radius: Theme.radius-sm;
+    background: ta.has-hover ? Theme.hover-veil : (active ? Theme.accent-soft : transparent);
     animate background { duration: 100ms; }
     HorizontalLayout {
-        padding-left: 14px; padding-right: 14px; padding-top: 11px; padding-bottom: 11px; spacing: 14px; alignment: start;
+        padding-left: expanded ? 14px : 7px; padding-right: expanded ? 14px : 7px;
+        padding-top: 11px; padding-bottom: 11px; spacing: 14px; alignment: start;
         Image {
             source: root.nav-icon; width: 22px; height: 22px;
-            colorize: root.active ? #ffffff : #7a7a7a;
+            colorize: root.active ? Theme.accent : Theme.text-muted;
             vertical-alignment: center;
         }
-        Text { text: root.label; font-size: 15px; font-weight: root.active ? 700 : 500; color: root.active ? #ffffff : #b0b0b0; vertical-alignment: center; }
+        if root.expanded: Text { text: root.label; font-size: 15px; font-weight: root.active ? 700 : 500; color: root.active ? Theme.text : Theme.text-muted; vertical-alignment: center; }
     }
+    RailTooltip { enabled: !root.expanded && ta.has-hover; label: root.label; }
     ta := TouchArea { clicked => { root.clicked(); } }
 }
 
@@ -123,17 +212,37 @@ component TabPill inherits Rectangle {
     in property <string> label; in property <bool> active;
     callback clicked();
     height: 32px; border-radius: 16px;
-    background: active ? #ffffff14 : (ta.has-hover ? #ffffff08 : transparent);
-    border-color: active ? #ffffff20 : transparent; border-width: 1px;
+    background: active ? Theme.accent-soft : (ta.has-hover ? Theme.hover-veil : transparent);
+    border-color: active ? Theme.border : transparent; border-width: 1px;
     HorizontalLayout {
         padding-left: 14px; padding-right: 14px;
         Text {
             text: root.label; font-size: 13px; font-weight: root.active ? 700 : 500;
-            color: root.active ? #ffffff : #909090;
+            color: root.active ? Theme.text : Theme.text-muted;
             horizontal-alignment: center; vertical-alignment: center;
         }
     }
     ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+component ThemeChoice inherits Rectangle {
+    in property <string> theme-label;
+    in property <color> theme-color;
+    in property <bool> selected: false;
+    callback picked();
+    height: 38px; border-radius: Theme.radius-sm;
+    background: choice-ta.has-hover ? Theme.hover-veil : (selected ? Theme.accent-soft : transparent);
+    HorizontalLayout {
+        padding-left: 10px; padding-right: 10px; spacing: 10px; alignment: start;
+        Rectangle {
+            width: 18px; height: 18px; border-radius: 9px;
+            background: root.theme-color; border-color: Theme.border; border-width: 1px;
+            y: (parent.height - self.height) / 2;
+        }
+        Text { text: root.theme-label; font-size: 13px; color: Theme.text; vertical-alignment: center; horizontal-stretch: 1; }
+        if selected: Text { text: "✓"; font-size: 13px; color: Theme.accent; vertical-alignment: center; }
+    }
+    choice-ta := TouchArea { clicked => { root.picked(); } }
 }
 
 // ─── Context-menu row (consistent icon slot + label alignment) ────────────────
@@ -145,12 +254,12 @@ component CtxMenuItem inherits Rectangle {
     in property <bool> use-image: true;      // false → render `glyph` text instead
     in property <string> glyph: "";
     in property <length> glyph-size: 15px;
-    in property <color> icon-color: #b0b0b0;
-    in property <color> label-color: #e0e0e0;
+    in property <color> icon-color: Theme.text-muted;
+    in property <color> label-color: Theme.text;
     callback clicked;
     height: 40px;
-    border-radius: 4px;
-    background: mi-ta.has-hover ? #ffffff14 : transparent;
+    border-radius: Theme.radius-sm;
+    background: mi-ta.has-hover ? Theme.hover-veil : transparent;
     HorizontalLayout {
         padding-left: 14px; padding-right: 12px; spacing: 12px; alignment: start;
         // Fixed-width icon slot; every glyph/image is centered in the full row
@@ -183,25 +292,29 @@ component SongRow inherits Rectangle {
     in property <image> thumbnail;
     in property <bool> has-thumbnail: false;
     in property <bool> show-unlike: false;
+    in property <bool> show-remove: false;
     callback play-clicked(); callback queue-clicked(); callback play-next-clicked(); callback dislike-clicked(); callback unlike-clicked();
     callback song-radio-clicked();
+    callback artist-radio-clicked();
     callback go-to-artist-clicked();
     callback go-to-album-clicked();
-    height: 64px; border-radius: 8px;
-    background: ta.has-hover ? #ffffff0a : (is-current ? #ffffff08 : transparent);
+    callback add-to-playlist-clicked();
+    callback remove-clicked();
+    height: 64px; border-radius: Theme.radius-sm;
+    background: ta.has-hover ? Theme.hover-veil : (is-current ? Theme.accent-soft : transparent);
     animate background { duration: 80ms; }
     HorizontalLayout {
         padding-left: 12px; padding-right: 14px; spacing: 12px;
         // Thumbnail or letter avatar
         Rectangle {
             width: 48px; height: 48px; border-radius: 6px; clip: true;
-            background: #1a1a1a;
+            background: Theme.surface-hover;
             if has-thumbnail: Image {
                 source: thumbnail; width: parent.width; height: parent.height; image-fit: cover;
             }
             if !has-thumbnail: Text {
                 text: is-current ? "▶" : (avatar-letter == "" ? root.idx-str : avatar-letter);
-                color: is-current ? #e85d5d : #5a5a5a;
+                color: is-current ? Theme.accent : Theme.text-dim;
                 font-size: is-current ? 12px : 13px;
                 font-weight: 700; horizontal-alignment: center; vertical-alignment: center;
             }
@@ -218,13 +331,13 @@ component SongRow inherits Rectangle {
             Text {
                 text: root.song-title;
                 font-size: 14px; font-weight: 500;
-                color: is-current ? #e85d5d : #e0e0e0;
+                color: is-current ? Theme.accent : Theme.text;
                 overflow: elide;
             }
             Text {
                 text: root.song-album == "" ? root.song-artist
                     : root.song-artist + "  •  " + root.song-album;
-                font-size: 12px; color: #6a6a6a; overflow: elide;
+                font-size: 12px; color: Theme.text-muted; overflow: elide;
             }
         }
         // Duration / "+ Queue" on hover
@@ -232,13 +345,13 @@ component SongRow inherits Rectangle {
             width: 64px;
             if !ta.has-hover: Text {
                 text: root.song-duration;
-                font-size: 12px; color: #4a4a4a;
+                font-size: 12px; color: Theme.text-dim;
                 horizontal-alignment: right; vertical-alignment: center;
             }
             if ta.has-hover: Rectangle {
                 width: 56px; height: 28px; border-radius: 14px;
-                background: qa.has-hover ? #ffffff18 : #ffffff0c;
-                Text { text: "+ Queue"; color: #b0b0b0; font-size: 10px; font-weight: 600;
+                background: qa.has-hover ? Theme.surface-hover : Theme.hover-veil;
+                Text { text: "+ Queue"; color: Theme.text-muted; font-size: 10px; font-weight: 600;
                     horizontal-alignment: center; vertical-alignment: center; }
                 qa := TouchArea { clicked => { root.queue-clicked(); } }
             }
@@ -258,19 +371,22 @@ component SongRow inherits Rectangle {
         width: 220px;
         Rectangle {
             width: 220px;
-            border-radius: 8px; background: #282828;
+            border-radius: Theme.radius; background: Theme.glass-strong;
             drop-shadow-blur: 16px; drop-shadow-color: #00000080; drop-shadow-offset-y: 4px;
             VerticalLayout {
                 padding: 6px;
-                CtxMenuItem { use-image: false; glyph: "+"; glyph-size: 18px; label: "Add to queue"; clicked => { root.queue-clicked(); row-ctx-popup.close(); } }
+                CtxMenuItem { icon: @image-url("icons/plus.svg"); label: "Add to queue"; clicked => { root.queue-clicked(); row-ctx-popup.close(); } }
                 CtxMenuItem { icon: @image-url("icons/next.svg"); label: "Play next"; clicked => { root.play-next-clicked(); row-ctx-popup.close(); } }
                 CtxMenuItem { icon: @image-url("icons/play.svg"); label: "Play"; clicked => { root.play-clicked(); row-ctx-popup.close(); } }
                 CtxMenuItem { icon: @image-url("icons/radio.svg"); label: "Go to song radio"; clicked => { root.song-radio-clicked(); row-ctx-popup.close(); } }
-                CtxMenuItem { use-image: false; glyph: "👤"; label: "Go to artist"; clicked => { root.go-to-artist-clicked(); row-ctx-popup.close(); } }
+                CtxMenuItem { icon: @image-url("icons/radio.svg"); label: "Artist radio"; clicked => { root.artist-radio-clicked(); row-ctx-popup.close(); } }
+                CtxMenuItem { icon: @image-url("icons/artist.svg"); label: "Go to artist"; clicked => { root.go-to-artist-clicked(); row-ctx-popup.close(); } }
                 CtxMenuItem { icon: @image-url("icons/album.svg"); label: "Go to album"; clicked => { root.go-to-album-clicked(); row-ctx-popup.close(); } }
-                if root.show-unlike: CtxMenuItem { use-image: false; glyph: "\u{2764}"; icon-color: #e85d5d; label: "Remove from liked"; clicked => { root.unlike-clicked(); row-ctx-popup.close(); } }
+                CtxMenuItem { icon: @image-url("icons/plus.svg"); label: "Add to playlist"; clicked => { root.add-to-playlist-clicked(); row-ctx-popup.close(); } }
+                if root.show-remove: CtxMenuItem { icon: @image-url("icons/close.svg"); label: "Remove from playlist"; clicked => { root.remove-clicked(); row-ctx-popup.close(); } }
+                if root.show-unlike: CtxMenuItem { icon: @image-url("icons/heart-fill.svg"); icon-color: Theme.accent; label: "Remove from liked"; clicked => { root.unlike-clicked(); row-ctx-popup.close(); } }
                 Rectangle {
-                    height: 1px; background: #ffffff10;
+                    height: 1px; background: Theme.border;
                 }
                 CtxMenuItem { use-image: false; glyph: "\u{1F6AB}"; glyph-size: 13px; label: "Remove from taste profile"; clicked => { root.dislike-clicked(); row-ctx-popup.close(); } }
             }
@@ -306,17 +422,21 @@ component SongCard inherits Rectangle {
     callback play-next-clicked();
     callback pause-clicked();
     callback song-radio-clicked();
+    callback artist-radio-clicked();
     callback go-to-artist-clicked();
-    width: 200px; height: 260px; border-radius: 8px;
-    background: ta.has-hover ? #1a1a1a : #121212;
+    callback go-to-album-clicked();
+    callback add-to-playlist-clicked();
+    width: 200px; height: 260px; border-radius: Theme.radius;
+    background: ta.has-hover ? Theme.glass-hover : Theme.glass;
+    border-color: ta.has-hover ? Theme.border : Theme.border-soft; border-width: 1px;
     animate background { duration: 120ms; }
 
     VerticalLayout {
         padding: 12px; spacing: 12px;
         // Square thumbnail with play button overlay
         Rectangle {
-            width: 176px; height: 176px; border-radius: 8px; clip: true;
-            background: #1a1a1a;
+            width: 176px; height: 176px; border-radius: Theme.radius; clip: true;
+            background: Theme.surface-hover;
             if has-thumbnail: Image {
                 source: thumbnail; width: parent.width; height: parent.height; image-fit: cover;
             }
@@ -327,19 +447,20 @@ component SongCard inherits Rectangle {
                     : @linear-gradient(135deg, #1a1a2a 0%, #0f0f18 100%);
                 Text {
                     text: is-now-playing ? "▶" : (avatar-letter == "" ? "♪" : avatar-letter);
-                    color: is-now-playing ? #e85d5d : #4a4a5a;
+                    color: is-now-playing ? Theme.accent : Theme.text-dim;
                     font-size: 36px; font-weight: 700;
                     horizontal-alignment: center; vertical-alignment: center;
                 }
             }
-            // Play/Pause button on hover (Spotify-style, bottom-right)
-            if ta.has-hover || is-now-playing: Rectangle {
-                x: parent.width - 52px; y: parent.height - 52px;
-                width: 44px; height: 44px; border-radius: 22px;
-                background: play-ta.has-hover ? #1ed760 : #1db954;
-                drop-shadow-blur: 8px; drop-shadow-color: #00000080; drop-shadow-offset-y: 4px;
-                if !(is-now-playing && is-playing): Image { source: @image-url("icons/play.svg"); width: 20px; height: 20px; colorize: #000000; x: 13px; y: 12px; }
-                if is-now-playing && is-playing: Image { source: @image-url("icons/pause.svg"); width: 20px; height: 20px; colorize: #000000; x: 12px; y: 12px; }
+            // Play/Pause button on hover only
+            if ta.has-hover: Rectangle {
+                x: (parent.width - 46px) / 2; y: (parent.height - 46px) / 2;
+                width: 46px; height: 46px; border-radius: 23px;
+                background: play-ta.has-hover ? #000000b5 : #00000080;
+                border-color: #ffffff90; border-width: 1px;
+                drop-shadow-blur: 12px; drop-shadow-color: #00000090; drop-shadow-offset-y: 4px;
+                if !(is-now-playing && is-playing): Image { source: @image-url("icons/play.svg"); width: 20px; height: 20px; colorize: #ffffff; x: 14px; y: 13px; }
+                if is-now-playing && is-playing: Image { source: @image-url("icons/pause.svg"); width: 20px; height: 20px; colorize: #ffffff; x: 13px; y: 13px; }
                 play-ta := TouchArea {
                     clicked => {
                         if (root.is-now-playing && root.is-playing) {
@@ -353,13 +474,13 @@ component SongCard inherits Rectangle {
             // Now playing indicator bar
             if is-now-playing: Rectangle {
                 x: 0; y: parent.height - 3px; width: parent.width; height: 3px;
-                background: #1db954;
+                background: Theme.accent;
             }
         }
         VerticalLayout {
             spacing: 4px; padding-left: 2px;
-            Text { text: card-title; font-size: 14px; font-weight: 700; color: #e0e0e0; overflow: elide; }
-            Text { text: card-artist; font-size: 12px; font-weight: 500; color: #7a7a7a; overflow: elide; }
+            Text { text: card-title; font-size: 14px; font-weight: 700; color: Theme.text; overflow: elide; }
+            Text { text: card-artist; font-size: 12px; font-weight: 500; color: Theme.text-muted; overflow: elide; }
         }
     }
     ta := TouchArea {
@@ -376,16 +497,20 @@ component SongCard inherits Rectangle {
         x: 40px; y: 100px;
         width: 200px;
         Rectangle {
-            width: 200px; height: 220px;
-            border-radius: 8px; background: #282828;
-            drop-shadow-blur: 16px; drop-shadow-color: #00000080; drop-shadow-offset-y: 4px;
+            width: 200px; height: 340px;
+            border-radius: Theme.radius; background: Theme.glass-strong;
+            border-color: Theme.border; border-width: 1px;
+            drop-shadow-blur: 22px; drop-shadow-color: #00000080; drop-shadow-offset-y: 6px;
             VerticalLayout {
                 padding: 6px;
-                CtxMenuItem { use-image: false; glyph: "+"; glyph-size: 18px; label: "Add to queue"; clicked => { root.queue-clicked(); ctx-popup.close(); } }
+                CtxMenuItem { icon: @image-url("icons/plus.svg"); label: "Add to queue"; clicked => { root.queue-clicked(); ctx-popup.close(); } }
                 CtxMenuItem { icon: @image-url("icons/next.svg"); label: "Play next"; clicked => { root.play-next-clicked(); ctx-popup.close(); } }
-                CtxMenuItem { use-image: false; glyph: "▶"; glyph-size: 13px; label: "Play"; clicked => { root.clicked(); ctx-popup.close(); } }
+                CtxMenuItem { icon: @image-url("icons/play.svg"); label: "Play"; clicked => { root.clicked(); ctx-popup.close(); } }
                 CtxMenuItem { icon: @image-url("icons/radio.svg"); label: "Go to song radio"; clicked => { root.song-radio-clicked(); ctx-popup.close(); } }
-                CtxMenuItem { use-image: false; glyph: "👤"; label: "Go to artist"; clicked => { root.go-to-artist-clicked(); ctx-popup.close(); } }
+                CtxMenuItem { icon: @image-url("icons/radio.svg"); label: "Artist radio"; clicked => { root.artist-radio-clicked(); ctx-popup.close(); } }
+                CtxMenuItem { icon: @image-url("icons/artist.svg"); label: "Go to artist"; clicked => { root.go-to-artist-clicked(); ctx-popup.close(); } }
+                CtxMenuItem { icon: @image-url("icons/album.svg"); label: "Go to album"; clicked => { root.go-to-album-clicked(); ctx-popup.close(); } }
+                CtxMenuItem { icon: @image-url("icons/plus.svg"); label: "Add to playlist"; clicked => { root.add-to-playlist-clicked(); ctx-popup.close(); } }
             }
         }
     }
@@ -421,6 +546,11 @@ export component NativeShellWindow inherits Window {
     in-out property <[AlbumItem]> library-albums: [];
     in-out property <[ArtistItem]> library-artists: [];
     in-out property <[PlaylistItem]> library-playlists: [];
+    // Sidebar (left pane) shortcuts — your artists + your playlists.
+    in-out property <[ArtistItem]> sidebar-artists: [];
+    in-out property <[PlaylistItem]> sidebar-playlists: [];
+    // Albums from recently-listened songs (left-pane shortcut, like the artists).
+    in-out property <[AlbumItem]> sidebar-albums: [];
     in-out property <string> library-sort: "recent";
     callback load-library-data();
     callback sort-library(string);
@@ -436,6 +566,7 @@ export component NativeShellWindow inherits Window {
     callback play-autoplay-song(int);
     in-out property <[SongItem]> trending-songs: [];
     in-out property <[SongItem]> personalized-songs: [];
+    in-out property <[SongItem]> home-followed-songs: [];
 
     // Home screen enhancements
     in-out property <[AlbumItem]> home-new-releases: [];
@@ -472,6 +603,7 @@ export component NativeShellWindow inherits Window {
     in-out property <[SongItem]> radio-songs: [];
     callback play-radio();
     callback play-album();
+    callback shuffle-album();
 
     // Playlist view
     in-out property <string> playlist-view-title: "";
@@ -483,7 +615,24 @@ export component NativeShellWindow inherits Window {
     in-out property <[PlaylistItem]> playlist-view-similar: [];
     in-out property <bool> playlist-view-liked: false;
     callback play-playlist();
+    callback shuffle-playlist();
     callback toggle-like-playlist();
+    // Local (user-created) playlists
+    in-out property <bool> playlist-view-is-local: false;
+    in-out property <string> playlist-view-id: "";
+    callback new-playlist();
+    callback delete-local-playlist(string);
+    callback remove-from-local-playlist(string, string); // playlist-id, video-id
+    // Add-to-playlist modal
+    in-out property <bool> show-playlist-modal: false;
+    in-out property <string> pending-song-vid: "";
+    in-out property <string> pending-song-title: "";
+    in-out property <string> pending-song-artist: "";
+    in-out property <int> pending-song-dur: 0;
+    in-out property <[PlaylistItem]> modal-playlists: [];
+    callback open-add-to-playlist(string, string, string, int);
+    callback submit-new-playlist(string);
+    callback add-to-existing-playlist(string); // playlist-id
 
     // Album view
     in-out property <string> album-view-title: "";
@@ -536,11 +685,19 @@ export component NativeShellWindow inherits Window {
     callback navigate-to-artist(string);
     callback navigate-to-album(string);
     callback start-song-radio(string);
+    callback start-artist-radio(string, string);
+    callback move-queue-song-next(int);
+    callback open-artist-for(string, string); // video-id, artist-name → resolve by id else name
+    callback open-album-for(string);          // video-id → resolve album by id/name
     callback go-to-song-artist(string);
     callback go-to-song-album(string);
     callback nav-back();
     callback nav-forward();
     callback set-minimize-to-tray(bool);
+    in-out property <string> theme-name: "Default Blue";
+    in-out property <string> theme-mode: "System";
+    callback set-theme-name(string);
+    callback set-theme-mode(string);
     in-out property <bool> can-go-back: false;
     in-out property <bool> can-go-forward: false;
     in-out property <bool> minimize-to-tray: true;
@@ -586,7 +743,7 @@ export component NativeShellWindow inherits Window {
     icon: @image-url("../icons/icon.png");
     preferred-width: 1280px; preferred-height: 800px;
     min-width: 800px; min-height: 500px;
-    background: #000000;
+    background: Theme.bg;
     default-font-family: "Segoe UI Variable";
     default-font-size: 14px;
     default-font-weight: 500;
@@ -598,6 +755,13 @@ export component NativeShellWindow inherits Window {
 
     forward-focus: key-scope;
     key-scope := FocusScope {
+        // Empty, zero-size global key handler. `forward-focus` (above) routes the
+        // window's key events here regardless of size. The visible UI is a *direct
+        // child of the Window* below — wrapping it in the FocusScope made the content
+        // collapse to a preferred (short) height and clip, leaving black space below
+        // on a taller/maximized window. A layout placed directly in a Window fills it.
+        width: 0px;
+        height: 0px;
         key-pressed(e) => {
             if e.text == " "           { toggle-play-pause(); return accept; }
             if e.text == Key.LeftArrow { prev-track();         return accept; }
@@ -607,8 +771,12 @@ export component NativeShellWindow inherits Window {
             }
             reject
         }
+    }
 
-        VerticalLayout {
+    // Main UI — a direct Window child so it reliably fills the whole window.
+    VerticalLayout {
+        width: root.width;
+        height: root.height;
 
             // Width probe — an inner element whose width tracks the window. Its
             // `changed width` fires reliably during layout/resize (the Window's own
@@ -624,30 +792,32 @@ export component NativeShellWindow inherits Window {
                 vertical-stretch: 1;
 
                 // ── Left sidebar ──────────────────────────────────────────
-                // Auto-hides when the queue pane is open on a narrow window so
-                // the main content keeps enough room instead of being squeezed.
-                if sidebar-open && !(compact && queue-pane-open): Rectangle {
-                    width: 260px; background: #0a0a0a;
-                    Rectangle { x: parent.width - 1px; y: 0; width: 1px; height: parent.height; background: #1a1a1a; }
+                // Always remains functional: expanded at 260px, collapsed to a 72px
+                // icon rail. It only disappears temporarily when a queue pane needs
+                // the horizontal room on a compact window.
+                if !(compact && queue-pane-open): Rectangle {
+                    width: sidebar-open ? 260px : 72px; background: Theme.glass;
+                    animate width { duration: 180ms; easing: ease-out; }
+                    Rectangle { x: parent.width - 1px; y: 0; width: 1px; height: parent.height; background: Theme.border; }
 
                     VerticalLayout {
-                        padding-left: 18px; padding-right: 18px;
+                        padding-left: sidebar-open ? 18px : 12px; padding-right: sidebar-open ? 18px : 12px;
                         padding-top: 20px; padding-bottom: 16px;
 
                         // Logo
                         HorizontalLayout {
-                            height: 44px; spacing: 10px; alignment: start;
-                            Text { text: "▶"; color: #e85d5d; font-size: 22px; vertical-alignment: center; }
-                            Text { text: "Auricle"; color: #ffffff; font-size: 18px; font-weight: 700; vertical-alignment: center; }
+                            height: 44px; spacing: 10px; alignment: sidebar-open ? start : center;
+                            Text { text: "▶"; color: Theme.accent; font-size: 22px; vertical-alignment: center; }
+                            if sidebar-open: Text { text: "Auricle"; color: Theme.text; font-size: 18px; font-weight: 700; vertical-alignment: center; }
                         }
 
                         Rectangle { height: 20px; }
 
                         // Navigation
-                        NavBtn { label: "Home";     nav-icon: @image-url("icons/home.svg"); active: current-view == "Home";     clicked => { navigate("Home"); }     }
-                        NavBtn { label: "Explore";  nav-icon: @image-url("icons/explore.svg"); active: current-view == "Explore";  clicked => { navigate("Explore"); }  }
-                        NavBtn { label: "Library";  nav-icon: @image-url("icons/library.svg"); active: current-view == "Library";  clicked => { navigate("Library"); }  }
-                        NavBtn { label: "Settings"; nav-icon: @image-url("icons/settings.svg"); active: current-view == "Settings"; clicked => { navigate("Settings"); } }
+                        NavBtn { label: "Home";     expanded: sidebar-open; nav-icon: @image-url("icons/home.svg"); active: current-view == "Home";     clicked => { navigate("Home"); }     }
+                        NavBtn { label: "Explore";  expanded: sidebar-open; nav-icon: @image-url("icons/explore.svg"); active: current-view == "Explore";  clicked => { navigate("Explore"); }  }
+                        NavBtn { label: "Library";  expanded: sidebar-open; nav-icon: @image-url("icons/library.svg"); active: current-view == "Library";  clicked => { navigate("Library"); }  }
+                        NavBtn { label: "Settings"; expanded: sidebar-open; nav-icon: @image-url("icons/settings.svg"); active: current-view == "Settings"; clicked => { navigate("Settings"); } }
 
                         Rectangle { height: 24px; }
                         Rectangle { height: 1px; background: #1a1a1a; }
@@ -655,27 +825,116 @@ export component NativeShellWindow inherits Window {
 
                         // Liked Songs shortcut
                         Rectangle {
-                            height: 56px; border-radius: 8px;
-                            background: ls-ta.has-hover ? #ffffff0c : #ffffff06;
+                            height: 56px; border-radius: Theme.radius-sm;
+                            background: ls-ta.has-hover ? Theme.hover-veil : Theme.border-soft;
                             HorizontalLayout {
-                                padding-left: 12px; padding-right: 12px; padding-top: 10px; padding-bottom: 10px; spacing: 12px; alignment: start;
+                                padding-left: sidebar-open ? 12px : 6px; padding-right: sidebar-open ? 12px : 6px;
+                                padding-top: 10px; padding-bottom: 10px; spacing: 12px; alignment: sidebar-open ? start : center;
                                 Rectangle {
                                     width: 36px; height: 36px; border-radius: 4px;
-                                    background: @linear-gradient(135deg, #4a18a8 0%, #1a8a5a 100%);
-                                    Text { text: "♥"; color: #ffffff; font-size: 16px; horizontal-alignment: center; vertical-alignment: center; }
+                                    background: @linear-gradient(135deg, Theme.accent 0%, Theme.accent.darker(0.35) 100%);
+                                    Text { text: "♥"; color: Theme.on-accent; font-size: 16px; horizontal-alignment: center; vertical-alignment: center; }
                                 }
-                                VerticalLayout {
+                                if sidebar-open: VerticalLayout {
                                     alignment: center; spacing: 2px; horizontal-stretch: 1;
-                                    Text { text: "Liked Songs"; font-size: 13px; font-weight: 600; color: #e0e0e0; }
-                                    Text { text: "\{liked-songs.length} songs"; font-size: 11px; color: #5a5a5a; }
+                                    Text { text: "Liked Songs"; font-size: 13px; font-weight: 600; color: Theme.text; vertical-alignment: center; }
                                 }
                             }
+                            RailTooltip { enabled: !sidebar-open && ls-ta.has-hover; label: "Liked Songs"; detail: "Your liked tracks"; }
                             ls-ta := TouchArea { clicked => { library-tab = "Liked"; navigate("Library"); } }
                         }
 
+                        Rectangle { height: 14px; }
 
-
-                        Rectangle { vertical-stretch: 1; }
+                        // Your artists + albums + playlists — scrollable. Wrapped in a
+                        // clipping, vertical-stretch Rectangle (same pattern as the main
+                        // content area) so the sidebar's height is DECOUPLED from its content
+                        // length. Without this, the scroll content's height became the
+                        // sidebar's max-height and propagated up the layout tree, capping how
+                        // tall the whole window could be maximized/resized.
+                        Rectangle {
+                            vertical-stretch: 1; clip: true;
+                            Flickable {
+                                width: 100%; height: 100%;
+                                viewport-height: sb-col.preferred-height;
+                                sb-col := VerticalLayout {
+                                spacing: 2px;
+                                if sidebar-artists.length > 0: Rectangle { height: 1px; background: #1a1a1a; }
+                                if sidebar-artists.length > 0: Rectangle { height: 6px; }
+                                for a in sidebar-artists: Rectangle {
+                                    height: 46px; border-radius: 6px;
+                                    background: sba-ta.has-hover ? Theme.hover-veil : transparent;
+                                    HorizontalLayout {
+                                        padding-left: sidebar-open ? 8px : 7px; padding-right: sidebar-open ? 8px : 7px;
+                                        spacing: 10px; alignment: sidebar-open ? start : center;
+                                        Rectangle {
+                                            width: 34px; height: 34px; border-radius: 17px; clip: true;
+                                            background: Theme.surface-hover; y: (parent.height - self.height) / 2;
+                                            if a.has-thumbnail: Image { source: a.thumbnail; width: parent.width; height: parent.height; image-fit: cover; }
+                                            if !a.has-thumbnail: Image { source: @image-url("icons/artist.svg"); width: 16px; height: 16px; colorize: Theme.text-muted; x: 9px; y: 9px; }
+                                        }
+                                        if sidebar-open: VerticalLayout { alignment: center; spacing: 1px; horizontal-stretch: 1;
+                                            Text { text: a.name; font-size: 13px; font-weight: 500; color: Theme.text; overflow: elide; }
+                                            Text { text: "Artist"; font-size: 10px; color: Theme.text-muted; }
+                                        }
+                                    }
+                                    RailTooltip { enabled: !sidebar-open && sba-ta.has-hover; label: a.name; detail: "Artist"; }
+                                    sba-ta := TouchArea { clicked => {
+                                        if (a.browse-id != "") { navigate-to-artist(a.browse-id); } else { go-to-song-artist(a.name); }
+                                    } }
+                                }
+                                // Recently-listened albums.
+                                if sidebar-albums.length > 0: Rectangle { height: 8px; }
+                                if sidebar-albums.length > 0: Rectangle { height: 1px; background: #1a1a1a; }
+                                if sidebar-albums.length > 0: Rectangle { height: 6px; }
+                                for al in sidebar-albums: Rectangle {
+                                    height: 46px; border-radius: 6px;
+                                    background: sbal-ta.has-hover ? Theme.hover-veil : transparent;
+                                    HorizontalLayout {
+                                        padding-left: sidebar-open ? 8px : 7px; padding-right: sidebar-open ? 8px : 7px;
+                                        spacing: 10px; alignment: sidebar-open ? start : center;
+                                        Rectangle {
+                                            width: 34px; height: 34px; border-radius: 6px; clip: true;
+                                            background: Theme.surface-hover;
+                                            y: (parent.height - self.height) / 2;
+                                            if al.has-thumbnail: Image { source: al.thumbnail; width: parent.width; height: parent.height; image-fit: cover; }
+                                            if !al.has-thumbnail: Image { source: @image-url("icons/album.svg"); width: 16px; height: 16px; colorize: Theme.text-muted; x: 9px; y: 9px; }
+                                        }
+                                        if sidebar-open: VerticalLayout { alignment: center; spacing: 1px; horizontal-stretch: 1;
+                                            Text { text: al.title; font-size: 13px; font-weight: 500; color: Theme.text; overflow: elide; }
+                                            Text { text: al.artist; font-size: 10px; color: Theme.text-muted; overflow: elide; }
+                                        }
+                                    }
+                                    RailTooltip { enabled: !sidebar-open && sbal-ta.has-hover; label: al.title; detail: al.artist; }
+                                    sbal-ta := TouchArea { clicked => { navigate-to-album(al.browse-id); } }
+                                }
+                                if sidebar-playlists.length > 0: Rectangle { height: 8px; }
+                                if sidebar-playlists.length > 0: Rectangle { height: 1px; background: #1a1a1a; }
+                                if sidebar-playlists.length > 0: Rectangle { height: 6px; }
+                                for p in sidebar-playlists: Rectangle {
+                                    height: 42px; border-radius: 6px;
+                                    background: sbp-ta.has-hover ? Theme.hover-veil : transparent;
+                                    HorizontalLayout {
+                                        padding-left: sidebar-open ? 8px : 7px; padding-right: sidebar-open ? 8px : 7px;
+                                        spacing: 10px; alignment: sidebar-open ? start : center;
+                                        Rectangle {
+                                            width: 34px; height: 34px; border-radius: 6px; clip: true;
+                                            background: Theme.surface-hover;
+                                            y: (parent.height - self.height) / 2;
+                                            if p.has-thumbnail: Image { source: p.thumbnail; width: parent.width; height: parent.height; image-fit: cover; }
+                                            if !p.has-thumbnail: Image { source: @image-url("icons/library.svg"); width: 16px; height: 16px; colorize: Theme.text-muted; x: 9px; y: 9px; }
+                                        }
+                                        if sidebar-open: VerticalLayout { alignment: center; spacing: 1px; horizontal-stretch: 1;
+                                            Text { text: p.title; font-size: 13px; font-weight: 500; color: Theme.text; overflow: elide; }
+                                            Text { text: p.count-text; font-size: 10px; color: Theme.text-muted; }
+                                        }
+                                    }
+                                    RailTooltip { enabled: !sidebar-open && sbp-ta.has-hover; label: p.title; detail: p.count-text; }
+                                    sbp-ta := TouchArea { clicked => { navigate-to-playlist(p.playlist-id); } }
+                                }
+                            }
+                        }
+                        } // scroll-clip Rectangle (decouples sidebar height from content)
                     }
                 }
 
@@ -685,49 +944,54 @@ export component NativeShellWindow inherits Window {
 
                     // Header bar
                     Rectangle {
-                        height: 60px; background: #000000;
-                        Rectangle { y: parent.height - 1px; height: 1px; width: parent.width; background: #1a1a1a; }
+                        height: 60px; background: Theme.glass;
+                        Rectangle { y: parent.height - 1px; height: 1px; width: parent.width; background: Theme.border-soft; }
                         HorizontalLayout {
-                            padding-left: 20px; padding-right: 20px; spacing: 12px;
+                            padding-left: 20px; padding-right: 20px; spacing: 8px;
 
-                            IconBtn { svg-icon: @image-url("icons/menu.svg"); use-svg: true; icon-color: #808080; clicked => { toggle-sidebar(); } }
+                            // Fixed-width left controls + an equal right spacer keep the
+                            // search box centered in the content area at every width.
+                            HorizontalLayout {
+                                width: 124px; spacing: 4px;
+                                IconBtn { svg-icon: @image-url("icons/menu.svg"); use-svg: true; icon-color: Theme.text-muted; clicked => { toggle-sidebar(); } }
 
-                            // Back / Forward
-                            Rectangle {
-                                width: 36px; height: 36px; border-radius: 18px;
-                                background: can-go-back && nav-back-ta.has-hover ? #ffffff14 : transparent;
-                                Text { text: "←"; font-size: 18px; color: can-go-back ? #ffffff : #3a3a3a; horizontal-alignment: center; vertical-alignment: center; }
-                                nav-back-ta := TouchArea { enabled: can-go-back; clicked => { nav-back(); } }
+                                // Back / Forward
+                                Rectangle {
+                                    width: 36px; height: 36px; border-radius: 18px;
+                                    background: can-go-back && nav-back-ta.has-hover ? Theme.hover-veil : transparent;
+                                    Text { text: "←"; font-size: 18px; color: can-go-back ? Theme.text : Theme.text-dim; horizontal-alignment: center; vertical-alignment: center; }
+                                    nav-back-ta := TouchArea { enabled: can-go-back; clicked => { nav-back(); } }
+                                }
+                                Rectangle {
+                                    width: 36px; height: 36px; border-radius: 18px;
+                                    background: can-go-forward && nav-fwd-ta.has-hover ? Theme.hover-veil : transparent;
+                                    Text { text: "→"; font-size: 18px; color: can-go-forward ? Theme.text : Theme.text-dim; horizontal-alignment: center; vertical-alignment: center; }
+                                    nav-fwd-ta := TouchArea { enabled: can-go-forward; clicked => { nav-forward(); } }
+                                }
                             }
-                            Rectangle {
-                                width: 36px; height: 36px; border-radius: 18px;
-                                background: can-go-forward && nav-fwd-ta.has-hover ? #ffffff14 : transparent;
-                                Text { text: "→"; font-size: 18px; color: can-go-forward ? #ffffff : #3a3a3a; horizontal-alignment: center; vertical-alignment: center; }
-                                nav-fwd-ta := TouchArea { enabled: can-go-forward; clicked => { nav-forward(); } }
-                            }
 
-                            // Search bar — stretchy so the header (and the whole center
-                            // column) can shrink instead of forcing a large min-width
-                            // that pushes the queue pane off-screen on narrow windows.
+                            Rectangle { horizontal-stretch: 1; }
+
+                            // Centered search bar.
                             search-bar-rect := Rectangle {
-                                horizontal-stretch: 1; min-width: 150px; max-width: 420px;
+                                horizontal-stretch: 10; min-width: 150px; max-width: 420px;
                                 height: 40px; border-radius: 20px;
-                                background: #1a1a1a;
-                                border-color: search-inp.has-focus ? #ffffff30 : #ffffff10;
+                                background: search-inp.has-focus ? Theme.glass-hover : Theme.glass;
+                                border-color: search-inp.has-focus ? Theme.accent : Theme.border;
                                 border-width: 1px;
                                 HorizontalLayout {
                                     padding-left: 14px; padding-right: 40px; padding-top: 10px; padding-bottom: 10px; spacing: 10px; alignment: start;
-                                    Image { source: @image-url("icons/search.svg"); width: 18px; height: 18px; colorize: search-inp.has-focus ? #ffffff : #5a5a5a; vertical-alignment: center; }
+                                    Image { source: @image-url("icons/search.svg"); width: 18px; height: 18px; colorize: search-inp.has-focus ? Theme.accent : Theme.text-muted; vertical-alignment: center; }
                                     search-inp := TextInput {
                                         horizontal-stretch: 1;
-                                        font-size: 14px; color: #e0e0e0;
+                                        font-size: 14px; color: Theme.text;
                                         vertical-alignment: center;
                                         accepted => { do-search(self.text); search-dropdown-open = false; }
                                         edited => { live-search(self.text); search-dropdown-open = true; }
                                     }
                                     if search-inp.text == "": Text {
                                         text: "Search songs, albums, artists...";
-                                        font-size: 14px; color: #4a4a4a;
+                                        font-size: 14px; color: Theme.text-dim;
                                         vertical-alignment: center;
                                     }
                                 }
@@ -737,27 +1001,21 @@ export component NativeShellWindow inherits Window {
                                 if search-inp.text != "": Rectangle {
                                     x: parent.width - 36px; y: 5px;
                                     width: 30px; height: 30px; border-radius: 15px;
-                                    background: clr-btn.has-hover ? #ffffff14 : transparent;
-                                    Image { source: @image-url("icons/close.svg"); width: 14px; height: 14px; colorize: #b0b0b0; x: 8px; y: 8px; }
+                                    background: clr-btn.has-hover ? Theme.hover-veil : transparent;
+                                    Image { source: @image-url("icons/close.svg"); width: 14px; height: 14px; colorize: Theme.text-muted; x: 8px; y: 8px; }
                                     clr-btn := TouchArea { clicked => { search-inp.text = ""; search-inp.focus(); live-search(""); } }
                                 }
                             }
 
-                            // Nav pills — hidden on compact widths (nav is still
-                            // available via the sidebar) so the header can shrink.
-                            if !compact: HorizontalLayout {
-                                spacing: 4px;
-                                TabPill { label: "Home";    active: current-view == "Home";    clicked => { navigate("Home"); }    }
-                                TabPill { label: "Explore"; active: current-view == "Explore"; clicked => { navigate("Explore"); } }
-                                TabPill { label: "Library"; active: current-view == "Library"; clicked => { navigate("Library"); } }
-                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            Rectangle { width: 124px; }
                         }
 
                     }
 
                     // View area
                     Rectangle {
-                        vertical-stretch: 1; background: #000000; clip: true;
+                        vertical-stretch: 1; background: Theme.bg; clip: true;
 
                         // Loading
                         if is-loading: VerticalLayout {
@@ -772,23 +1030,63 @@ export component NativeShellWindow inherits Window {
                             home-col := VerticalLayout {
                                 padding: 32px; padding-top: 28px; spacing: 0px;
 
-                                // ── Hero banner (Apple Music style) ──────────────────────────
+                                // ── Featured listening hero ──────────────────────────────────
                                 Rectangle {
-                                    height: 140px; border-radius: 14px;
-                                    background: @linear-gradient(135deg, #2a1525 0%, #1a1a3a 50%, #152530 100%);
-                                    border-color: #ffffff10; border-width: 1px;
+                                    height: 190px; border-radius: Theme.radius-lg; clip: true;
+                                    background: @linear-gradient(120deg, Theme.accent-soft 0%, Theme.glass-hover 38%, Theme.glass 100%);
+                                    border-color: Theme.border; border-width: 1px;
+                                    drop-shadow-blur: 28px; drop-shadow-color: #00000045; drop-shadow-offset-y: 10px;
 
                                     HorizontalLayout {
-                                        padding-left: 32px; padding-right: 28px; alignment: start;
+                                        padding-left: 42px; padding-right: 42px; padding-top: 24px; padding-bottom: 24px;
+                                        spacing: 34px; alignment: start;
+
+                                        // Featured artwork (current track) with a centered hover play control.
+                                        Rectangle {
+                                            width: 142px; height: 142px; border-radius: Theme.radius; clip: true;
+                                            background: Theme.surface-hover;
+                                            drop-shadow-blur: 26px; drop-shadow-color: #00000070; drop-shadow-offset-y: 8px;
+                                            if has-album-art: Image { source: album-art; width: parent.width; height: parent.height; image-fit: cover; }
+                                            if !has-album-art: Rectangle {
+                                                width: parent.width; height: parent.height;
+                                                background: @linear-gradient(135deg, Theme.accent 0%, Theme.accent.darker(0.4) 100%);
+                                                Text { text: track-initial; color: Theme.on-accent; font-size: 44px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
+                                            }
+                                            if hero-art-ta.has-hover: Rectangle {
+                                                x: (parent.width - 42px) / 2; y: (parent.height - 42px) / 2;
+                                                width: 42px; height: 42px; border-radius: 21px;
+                                                background: #00000099; border-color: #ffffff70; border-width: 1px;
+                                                Image { source: is-playing ? @image-url("icons/pause.svg") : @image-url("icons/play.svg"); width: 18px; height: 18px; colorize: #ffffff; x: is-playing ? 12px : 13px; y: 12px; }
+                                            }
+                                            hero-art-ta := TouchArea { clicked => { if (now-playing-video-id != "") { toggle-play-pause(); } else { navigate("Explore"); } } }
+                                        }
+
                                         VerticalLayout {
-                                            alignment: center; spacing: 8px;
-                                            Text { text: "Good listening"; font-size: 32px; font-weight: 800; color: #ffffff; }
+                                            alignment: center; spacing: 8px; horizontal-stretch: 1;
                                             Text {
-                                                text: now-playing-video-id != ""
-                                                    ? "▶  " + track-title + "  •  " + track-artist
-                                                    : (queue.length > 0 ? "\{queue.length} songs in queue" : "Search or explore to get started");
-                                                font-size: 13px; color: now-playing-video-id != "" ? #e85d5d : #8a8a8a;
-                                                font-weight: now-playing-video-id != "" ? 500 : 400;
+                                                text: now-playing-video-id != "" ? "FEATURED NOW" : "DISCOVER SOMETHING NEW";
+                                                font-size: 11px; font-weight: 700; color: Theme.accent;
+                                            }
+                                            Text {
+                                                text: now-playing-video-id != "" ? track-title : "Find your next favorite";
+                                                font-size: 26px; font-weight: 750; color: Theme.text; overflow: elide;
+                                            }
+                                            Text {
+                                                text: now-playing-video-id != "" ? track-artist
+                                                    : (queue.length > 0 ? "\{queue.length} songs waiting in your queue" : "Search artists, albums, and songs");
+                                                font-size: 14px; color: Theme.text-muted; overflow: elide;
+                                            }
+                                            Rectangle { height: 5px; }
+                                            Rectangle {
+                                                width: hero-listen-text.preferred-width + 36px; height: 36px; border-radius: 18px;
+                                                background: hero-listen-ta.has-hover ? Theme.accent-strong : Theme.accent;
+                                                border-color: Theme.accent-strong; border-width: 1px;
+                                                hero-listen-text := Text {
+                                                    text: now-playing-video-id != "" ? (is-playing ? "Pause" : "Listen Now") : "Explore Music";
+                                                    color: Theme.on-accent; font-size: 13px; font-weight: 650;
+                                                    horizontal-alignment: center; vertical-alignment: center;
+                                                }
+                                                hero-listen-ta := TouchArea { clicked => { if (now-playing-video-id != "") { toggle-play-pause(); } else { navigate("Explore"); } } }
                                             }
                                         }
                                     }
@@ -801,7 +1099,7 @@ export component NativeShellWindow inherits Window {
                                     padding-top: 44px; spacing: 16px;
                                     HorizontalLayout {
                                         height: 28px; alignment: space-between;
-                                        Text { text: "Trending Now"; font-size: 22px; font-weight: 700; color: #ffffff; vertical-alignment: center; }
+                                        Text { text: "Trending Now"; font-size: 22px; font-weight: 700; color: Theme.text; vertical-alignment: center; }
                                         Text { text: "🔥"; font-size: 18px; vertical-alignment: center; }
                                     }
                                     Rectangle {
@@ -812,6 +1110,9 @@ export component NativeShellWindow inherits Window {
                                             trend-row := HorizontalLayout {
                                                 spacing: 16px;
                                                 for item[i] in trending-songs: SongCard {
+                                                    go-to-album-clicked => { open-album-for(item.video-id); }
+                                                    artist-radio-clicked => { start-artist-radio(item.video-id, item.artist); }
+                                                    add-to-playlist-clicked => { open-add-to-playlist(item.video-id, item.title, item.artist, item.duration-secs); }
                                                     card-title: item.title; card-artist: item.artist;
                                                     avatar-letter: item.avatar-letter;
                                                     thumbnail: item.thumbnail; has-thumbnail: item.has-thumbnail;
@@ -831,11 +1132,48 @@ export component NativeShellWindow inherits Window {
                                 }
 
                                 // ── Based on your listening ──────────────────────────────────
+                                // ── From artists you follow ──────────────────────────────────
+                                if home-followed-songs.length > 0: VerticalLayout {
+                                    padding-top: 44px; spacing: 16px;
+                                    HorizontalLayout {
+                                        height: 28px; alignment: space-between;
+                                        Text { text: "From artists you follow"; font-size: 22px; font-weight: 700; color: Theme.text; vertical-alignment: center; }
+                                        Text { text: "♥"; font-size: 18px; color: Theme.accent; vertical-alignment: center; }
+                                    }
+                                    Rectangle {
+                                        height: 270px; clip: true;
+                                        Flickable {
+                                            width: parent.width; height: parent.height;
+                                            viewport-width: foll-row.preferred-width + 16px;
+                                            foll-row := HorizontalLayout {
+                                                spacing: 16px;
+                                                for item[i] in home-followed-songs: SongCard {
+                                                    go-to-album-clicked => { open-album-for(item.video-id); }
+                                                    artist-radio-clicked => { start-artist-radio(item.video-id, item.artist); }
+                                                    add-to-playlist-clicked => { open-add-to-playlist(item.video-id, item.title, item.artist, item.duration-secs); }
+                                                    card-title: item.title; card-artist: item.artist;
+                                                    avatar-letter: item.avatar-letter;
+                                                    thumbnail: item.thumbnail; has-thumbnail: item.has-thumbnail;
+                                                    is-now-playing: item.video-id == now-playing-video-id;
+                                                    is-playing: root.is-playing && item.video-id == now-playing-video-id;
+                                                    video-id: item.video-id;
+                                                    clicked => { play-song(item.video-id, item.title, item.artist, item.duration-secs); }
+                                                    queue-clicked => { queue-song(item.video-id, item.title, item.artist); }
+                                                    play-next-clicked => { play-next-song(item.video-id, item.title, item.artist, item.duration-secs); }
+                                                    pause-clicked => { toggle-play-pause(); }
+                                                    song-radio-clicked => { start-song-radio(item.video-id); }
+                                                    go-to-artist-clicked => { go-to-song-artist(item.artist); }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
                                 if personalized-songs.length > 0: VerticalLayout {
                                     padding-top: 44px; spacing: 16px;
                                     HorizontalLayout {
                                         height: 28px; alignment: space-between;
-                                        Text { text: "Based on your listening"; font-size: 22px; font-weight: 700; color: #ffffff; vertical-alignment: center; }
+                                        Text { text: "Based on your listening"; font-size: 22px; font-weight: 700; color: Theme.text; vertical-alignment: center; }
                                         Text { text: "✨"; font-size: 18px; vertical-alignment: center; }
                                     }
                                     Rectangle {
@@ -846,6 +1184,9 @@ export component NativeShellWindow inherits Window {
                                             pers-row := HorizontalLayout {
                                                 spacing: 16px;
                                                 for item[i] in personalized-songs: SongCard {
+                                                    go-to-album-clicked => { open-album-for(item.video-id); }
+                                                    artist-radio-clicked => { start-artist-radio(item.video-id, item.artist); }
+                                                    add-to-playlist-clicked => { open-add-to-playlist(item.video-id, item.title, item.artist, item.duration-secs); }
                                                     card-title: item.title; card-artist: item.artist;
                                                     avatar-letter: item.avatar-letter;
                                                     thumbnail: item.thumbnail; has-thumbnail: item.has-thumbnail;
@@ -869,37 +1210,47 @@ export component NativeShellWindow inherits Window {
                                     padding-top: 44px; spacing: 16px;
                                     HorizontalLayout {
                                         height: 28px; alignment: space-between;
-                                        Text { text: "New releases for you"; font-size: 22px; font-weight: 700; color: #ffffff; vertical-alignment: center; }
+                                        Text { text: "New releases for you"; font-size: 22px; font-weight: 700; color: Theme.text; vertical-alignment: center; }
                                         Text { text: "💿"; font-size: 18px; vertical-alignment: center; }
                                     }
                                     Rectangle {
-                                        height: 230px; clip: true;
+                                        height: 272px; clip: true;
                                         Flickable {
                                             width: parent.width; height: parent.height;
                                             viewport-width: nr-row.preferred-width + 16px;
                                             nr-row := HorizontalLayout {
                                                 spacing: 16px;
                                                 for alb[i] in home-new-releases: Rectangle {
-                                                    width: 176px; height: 220px; border-radius: 8px;
-                                                    background: nr-ta.has-hover ? #1a1a1a : #121212;
+                                                    width: 200px; height: 260px; border-radius: Theme.radius;
+                                                    background: nr-ta.has-hover ? Theme.glass-hover : Theme.glass;
+                                                    border-color: nr-ta.has-hover ? Theme.border : Theme.border-soft; border-width: 1px;
                                                     animate background { duration: 120ms; }
                                                     VerticalLayout {
-                                                        padding: 8px; spacing: 8px;
+                                                        padding: 12px; spacing: 12px;
                                                         Rectangle {
-                                                            width: 160px; height: 160px; border-radius: 8px; clip: true;
-                                                            background: #1a1a1a;
+                                                            width: 176px; height: 176px; border-radius: Theme.radius-sm; clip: true;
+                                                            background: Theme.surface-hover;
                                                             if alb.has-thumbnail: Image {
                                                                 source: alb.thumbnail; width: parent.width; height: parent.height; image-fit: cover;
                                                             }
-                                                            if !alb.has-thumbnail: Text {
-                                                                text: "💿"; font-size: 40px;
-                                                                horizontal-alignment: center; vertical-alignment: center;
+                                                            if !alb.has-thumbnail: Image {
+                                                                source: @image-url("icons/album.svg"); width: 42px; height: 42px; colorize: Theme.text-dim;
+                                                                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                                                            }
+                                                            if nr-ta.has-hover: Rectangle {
+                                                                x: (parent.width - 44px) / 2; y: (parent.height - 44px) / 2;
+                                                                width: 44px; height: 44px; border-radius: 22px;
+                                                                background: nr-play-ta.has-hover ? #000000b5 : #00000080;
+                                                                border-color: #ffffff90; border-width: 1px;
+                                                                drop-shadow-blur: 10px; drop-shadow-color: #00000090;
+                                                                Image { source: @image-url("icons/play.svg"); width: 18px; height: 18px; colorize: #ffffff; x: 14px; y: 13px; }
+                                                                nr-play-ta := TouchArea { clicked => { navigate-to-album(alb.browse-id); } }
                                                             }
                                                         }
                                                         VerticalLayout {
                                                             spacing: 2px; padding-left: 4px;
-                                                            Text { text: alb.title; font-size: 13px; font-weight: 600; color: #e0e0e0; overflow: elide; }
-                                                            Text { text: alb.artist + (alb.year != "" ? "  •  " + alb.year : ""); font-size: 12px; color: #6a6a6a; overflow: elide; }
+                                                            Text { text: alb.title; font-size: 13px; font-weight: 600; color: Theme.text; overflow: elide; }
+                                                            Text { text: alb.artist + (alb.year != "" ? "  •  " + alb.year : ""); font-size: 12px; color: Theme.text-muted; overflow: elide; }
                                                         }
                                                     }
                                                     nr-ta := TouchArea { clicked => { navigate-to-album(alb.browse-id); } }
@@ -909,8 +1260,8 @@ export component NativeShellWindow inherits Window {
                                     }
                                 }
 
-                                // ── Mixed for you ────────────────────────────────────────────
-                                if home-mix-1.length > 0: VerticalLayout {
+                                // ── Mixed for you (hidden for now) ───────────────────────────
+                                if false && home-mix-1.length > 0: VerticalLayout {
                                     padding-top: 44px; spacing: 16px;
                                     HorizontalLayout {
                                         height: 28px; alignment: space-between;
@@ -995,8 +1346,8 @@ export component NativeShellWindow inherits Window {
                                     }
                                 }
 
-                                // ── Genre Mix ────────────────────────────────────────────────
-                                if home-genre-mix.length > 0: VerticalLayout {
+                                // ── Genre Mix (hidden for now) ───────────────────────────────
+                                if false && home-genre-mix.length > 0: VerticalLayout {
                                     padding-top: 44px; spacing: 16px;
                                     HorizontalLayout {
                                         height: 28px; alignment: space-between;
@@ -1011,6 +1362,9 @@ export component NativeShellWindow inherits Window {
                                             genre-mix-row := HorizontalLayout {
                                                 spacing: 16px;
                                                 for item[i] in home-genre-mix: SongCard {
+                                                    go-to-album-clicked => { open-album-for(item.video-id); }
+                                                    artist-radio-clicked => { start-artist-radio(item.video-id, item.artist); }
+                                                    add-to-playlist-clicked => { open-add-to-playlist(item.video-id, item.title, item.artist, item.duration-secs); }
                                                     card-title: item.title; card-artist: item.artist;
                                                     avatar-letter: item.avatar-letter;
                                                     thumbnail: item.thumbnail; has-thumbnail: item.has-thumbnail;
@@ -1045,6 +1399,9 @@ export component NativeShellWindow inherits Window {
                                             lang-row := HorizontalLayout {
                                                 spacing: 16px;
                                                 for item[i] in home-language-section: SongCard {
+                                                    go-to-album-clicked => { open-album-for(item.video-id); }
+                                                    artist-radio-clicked => { start-artist-radio(item.video-id, item.artist); }
+                                                    add-to-playlist-clicked => { open-add-to-playlist(item.video-id, item.title, item.artist, item.duration-secs); }
                                                     card-title: item.title; card-artist: item.artist;
                                                     avatar-letter: item.avatar-letter;
                                                     thumbnail: item.thumbnail; has-thumbnail: item.has-thumbnail;
@@ -1068,7 +1425,7 @@ export component NativeShellWindow inherits Window {
                                     padding-top: 44px; spacing: 16px;
                                     HorizontalLayout {
                                         height: 28px; alignment: space-between;
-                                        Text { text: "Recently Liked"; font-size: 22px; font-weight: 700; color: #ffffff; vertical-alignment: center; }
+                                        Text { text: "Recently Liked"; font-size: 22px; font-weight: 700; color: Theme.text; vertical-alignment: center; }
                                         rl-all := TouchArea {
                                             width: 60px; height: 24px;
                                             Text { text: "See all"; font-size: 12px; color: rl-all.has-hover ? #ffffff : #6a6a6a; vertical-alignment: center; horizontal-alignment: right; }
@@ -1083,6 +1440,9 @@ export component NativeShellWindow inherits Window {
                                             rl-row := HorizontalLayout {
                                                 spacing: 16px;
                                                 for item[i] in liked-songs: SongCard {
+                                                    go-to-album-clicked => { open-album-for(item.video-id); }
+                                                    artist-radio-clicked => { start-artist-radio(item.video-id, item.artist); }
+                                                    add-to-playlist-clicked => { open-add-to-playlist(item.video-id, item.title, item.artist, item.duration-secs); }
                                                     card-title: item.title; card-artist: item.artist;
                                                     avatar-letter: item.avatar-letter;
                                                     thumbnail: item.thumbnail; has-thumbnail: item.has-thumbnail;
@@ -1251,7 +1611,7 @@ export component NativeShellWindow inherits Window {
                                             }
                                             Rectangle {
                                                 width: 48px; height: 48px; border-radius: 24px;
-                                                background: tr-play.has-hover ? #1ed760 : #1db954;
+                                                background: tr-play.has-hover ? Theme.accent-strong : Theme.accent;
                                                 Image { source: @image-url("icons/play.svg"); width: 20px; height: 20px; colorize: #000000; x: 15px; y: 14px; }
                                                 tr-play := TouchArea { clicked => { play-song(search-results[0].video-id, search-results[0].title, search-results[0].artist, search-results[0].duration-secs); } }
                                             }
@@ -1263,6 +1623,8 @@ export component NativeShellWindow inherits Window {
                                         Text { text: "Songs"; font-size: 18px; font-weight: 700; color: #ffffff; vertical-alignment: center; }
                                     }
                                     for item[i] in search-results: SongRow {
+                                        artist-radio-clicked => { start-artist-radio(item.video-id, item.artist); }
+                                        add-to-playlist-clicked => { open-add-to-playlist(item.video-id, item.title, item.artist, item.duration-secs); }
                                         song-title: item.title; song-artist: item.artist;
                                         song-album: item.album; song-duration: item.duration-str;
                                         idx-str: "\{i + 1}"; avatar-letter: item.avatar-letter;
@@ -1327,23 +1689,46 @@ export component NativeShellWindow inherits Window {
                                                 Rectangle {
                                                     width: artist-view-subscribed ? 130px : 110px; height: 36px; border-radius: 18px;
                                                     background: artist-view-subscribed ? #ffffff14 : (artist-follow-ta.has-hover ? #ffffff20 : #ffffff14);
-                                                    border-color: artist-view-subscribed ? #1db954 : #ffffff30; border-width: 1px;
+                                                    border-color: artist-view-subscribed ? Theme.accent : Theme.border; border-width: 1px;
                                                     HorizontalLayout {
                                                         alignment: center; spacing: 6px;
-                                                        Image {
-                                                            source: @image-url("icons/heart.svg");
-                                                            width: 16px; height: 16px;
-                                                            colorize: artist-view-subscribed ? #1db954 : #b0b0b0;
-                                                            vertical-alignment: center;
+                                                        // Wrap the icon so it is vertically centered against the
+                                                        // taller text box (a fixed-height Image in a HorizontalLayout
+                                                        // otherwise top-aligns, making the heart sit too high).
+                                                        VerticalLayout {
+                                                            alignment: center;
+                                                            Image {
+                                                                source: artist-view-subscribed ? @image-url("icons/heart-fill.svg") : @image-url("icons/heart.svg");
+                                                                width: 16px; height: 16px;
+                                                                colorize: artist-view-subscribed ? Theme.accent : Theme.text-muted;
+                                                            }
                                                         }
                                                         Text {
                                                             text: artist-view-subscribed ? "Following" : "Follow";
                                                             font-size: 13px; font-weight: 600;
-                                                            color: artist-view-subscribed ? #1db954 : #e0e0e0;
+                                                            color: artist-view-subscribed ? Theme.accent : Theme.text;
                                                             vertical-alignment: center;
                                                         }
                                                     }
                                                     artist-follow-ta := TouchArea { clicked => { toggle-subscribe-artist(); } }
+                                                }
+                                                // Artist radio button
+                                                Rectangle {
+                                                    width: 134px; height: 36px; border-radius: 18px;
+                                                    background: artist-radio-ta.has-hover ? #ffffff20 : #ffffff14;
+                                                    border-color: #ffffff30; border-width: 1px;
+                                                    HorizontalLayout {
+                                                        alignment: center; spacing: 6px;
+                                                        VerticalLayout {
+                                                            alignment: center;
+                                                            Image { source: @image-url("icons/radio.svg"); width: 16px; height: 16px; colorize: #b0b0b0; }
+                                                        }
+                                                        Text {
+                                                            text: "Artist radio"; font-size: 13px; font-weight: 600;
+                                                            color: #e0e0e0; vertical-alignment: center;
+                                                        }
+                                                    }
+                                                    artist-radio-ta := TouchArea { clicked => { start-artist-radio("", artist-view-name); } }
                                                 }
                                             }
                                         }
@@ -1409,6 +1794,8 @@ export component NativeShellWindow inherits Window {
                                     Text { text: "Popular"; font-size: 22px; font-weight: 700; color: #ffffff; }
                                     Rectangle { height: 8px; }
                                     for item[i] in artist-view-songs: SongRow {
+                                        artist-radio-clicked => { start-artist-radio(item.video-id, item.artist); }
+                                        add-to-playlist-clicked => { open-add-to-playlist(item.video-id, item.title, item.artist, item.duration-secs); }
                                         song-title: item.title; song-artist: item.artist;
                                         song-album: item.album; song-duration: item.duration-str;
                                         idx-str: "\{i + 1}"; avatar-letter: item.avatar-letter;
@@ -1647,23 +2034,35 @@ export component NativeShellWindow inherits Window {
                                                 spacing: 12px; alignment: start;
                                                 Rectangle {
                                                     width: 120px; height: 44px; border-radius: 22px;
-                                                    background: album-play-ta.has-hover ? #1ed760 : #1db954;
+                                                    background: album-play-ta.has-hover ? Theme.accent-strong : Theme.accent;
                                                     HorizontalLayout {
                                                         alignment: center; spacing: 8px;
-                                                        Image { source: @image-url("icons/play.svg"); width: 20px; height: 20px; colorize: #000000; vertical-alignment: center; }
+                                                        VerticalLayout { alignment: center; Image { source: @image-url("icons/play.svg"); width: 20px; height: 20px; colorize: #000000; } }
                                                         Text { text: "Play"; font-size: 15px; font-weight: 700; color: #000000; vertical-alignment: center; }
                                                     }
                                                     album-play-ta := TouchArea { clicked => { play-album(); } }
+                                                }
+                                                // Shuffle button
+                                                Rectangle {
+                                                    width: 118px; height: 44px; border-radius: 22px;
+                                                    background: album-shuf-ta.has-hover ? #ffffff20 : #ffffff14;
+                                                    border-color: #ffffff20; border-width: 1px;
+                                                    HorizontalLayout {
+                                                        alignment: center; spacing: 8px;
+                                                        Text { text: "🔀"; font-size: 15px; vertical-alignment: center; }
+                                                        Text { text: "Shuffle"; font-size: 14px; font-weight: 600; color: #e0e0e0; vertical-alignment: center; }
+                                                    }
+                                                    album-shuf-ta := TouchArea { clicked => { shuffle-album(); } }
                                                 }
                                                 // Like album button
                                                 Rectangle {
                                                     width: 44px; height: 44px; border-radius: 22px;
                                                     background: album-like-ta.has-hover ? #ffffff14 : transparent;
                                                     Image {
-                                                        source: @image-url("icons/heart.svg");
+                                                        source: album-view-liked ? @image-url("icons/heart-fill.svg") : @image-url("icons/heart.svg");
                                                         width: album-view-liked ? 22px : 20px;
                                                         height: album-view-liked ? 22px : 20px;
-                                                        colorize: album-view-liked ? #e85d5d : #8a8a8a;
+                                                        colorize: album-view-liked ? Theme.accent : Theme.text-muted;
                                                         x: (parent.width - self.width) / 2;
                                                         y: (parent.height - self.height) / 2;
                                                         animate colorize { duration: 200ms; }
@@ -1678,6 +2077,8 @@ export component NativeShellWindow inherits Window {
                                 VerticalLayout {
                                     padding-left: 32px; padding-right: 32px; padding-top: 24px; spacing: 2px;
                                     for item[i] in album-view-songs: SongRow {
+                                        artist-radio-clicked => { start-artist-radio(item.video-id, item.artist); }
+                                        add-to-playlist-clicked => { open-add-to-playlist(item.video-id, item.title, item.artist, item.duration-secs); }
                                         song-title: item.title; song-artist: item.artist;
                                         song-album: ""; song-duration: item.duration-str;
                                         idx-str: "\{i + 1}"; avatar-letter: item.avatar-letter;
@@ -1797,7 +2198,7 @@ export component NativeShellWindow inherits Window {
                                 // Hero banner
                                 Rectangle {
                                     height: 200px;
-                                    background: @linear-gradient(135deg, #1db954 0%, #191414 100%);
+                                    background: @linear-gradient(135deg, Theme.accent 0%, Theme.bg 100%);
                                     VerticalLayout {
                                         padding-left: 32px; padding-top: 40px; spacing: 12px;
                                         Text { text: radio-title; font-size: 28px; font-weight: 700; color: #ffffff; }
@@ -1805,10 +2206,10 @@ export component NativeShellWindow inherits Window {
                                         Rectangle { height: 12px; }
                                         Rectangle {
                                             width: 120px; height: 44px; border-radius: 22px;
-                                            background: radio-play-ta.has-hover ? #1ed760 : #1db954;
+                                            background: radio-play-ta.has-hover ? Theme.accent-strong : Theme.accent;
                                             HorizontalLayout {
                                                 alignment: center; spacing: 8px;
-                                                Image { source: @image-url("icons/play.svg"); width: 20px; height: 20px; colorize: #000000; vertical-alignment: center; }
+                                                VerticalLayout { alignment: center; Image { source: @image-url("icons/play.svg"); width: 20px; height: 20px; colorize: #000000; } }
                                                 Text { text: "Play"; font-size: 15px; font-weight: 700; color: #000000; vertical-alignment: center; }
                                             }
                                             radio-play-ta := TouchArea { clicked => { play-radio(); } }
@@ -1819,6 +2220,8 @@ export component NativeShellWindow inherits Window {
                                 VerticalLayout {
                                     padding-left: 16px; padding-right: 16px; padding-top: 16px; spacing: 2px;
                                     for item[i] in radio-songs: SongRow {
+                                        artist-radio-clicked => { start-artist-radio(item.video-id, item.artist); }
+                                        add-to-playlist-clicked => { open-add-to-playlist(item.video-id, item.title, item.artist, item.duration-secs); }
                                         song-title: item.title; song-artist: item.artist;
                                         song-album: ""; song-duration: item.duration-str;
                                         idx-str: "\{i + 1}"; avatar-letter: item.avatar-letter;
@@ -1867,36 +2270,56 @@ export component NativeShellWindow inherits Window {
                                             alignment: center; spacing: 6px;
                                             Text { text: "Playlist"; font-size: 12px; font-weight: 600; color: #a0a0a0; }
                                             Text { text: playlist-view-title; font-size: 28px; font-weight: 800; color: #ffffff; overflow: elide; }
-                                            Text { text: playlist-view-count + " songs \u{2022} " + playlist-view-duration; font-size: 13px; color: #6a6a6a; }
+                                            Text { text: playlist-view-count + " songs" + (playlist-view-duration != "" ? "  \u{2022}  " + playlist-view-duration : ""); font-size: 13px; color: #6a6a6a; }
                                             Rectangle { height: 12px; }
                                             HorizontalLayout {
                                                 spacing: 12px; alignment: start;
                                                 // Play button
                                                 Rectangle {
                                                     width: 120px; height: 44px; border-radius: 22px;
-                                                    background: playlist-play-ta.has-hover ? #1ed760 : #1db954;
+                                                    background: playlist-play-ta.has-hover ? Theme.accent-strong : Theme.accent;
                                                     HorizontalLayout {
                                                         alignment: center; spacing: 8px;
-                                                        Image { source: @image-url("icons/play.svg"); width: 20px; height: 20px; colorize: #000000; vertical-alignment: center; }
+                                                        VerticalLayout { alignment: center; Image { source: @image-url("icons/play.svg"); width: 20px; height: 20px; colorize: #000000; } }
                                                         Text { text: "Play"; font-size: 15px; font-weight: 700; color: #000000; vertical-alignment: center; }
                                                     }
                                                     playlist-play-ta := TouchArea { clicked => { play-playlist(); } }
                                                 }
-                                                // Like playlist button
+                                                // Shuffle button
                                                 Rectangle {
+                                                    width: 118px; height: 44px; border-radius: 22px;
+                                                    background: pl-shuf-ta.has-hover ? #ffffff20 : #ffffff14;
+                                                    border-color: #ffffff20; border-width: 1px;
+                                                    HorizontalLayout {
+                                                        alignment: center; spacing: 8px;
+                                                        Text { text: "🔀"; font-size: 15px; vertical-alignment: center; }
+                                                        Text { text: "Shuffle"; font-size: 14px; font-weight: 600; color: #e0e0e0; vertical-alignment: center; }
+                                                    }
+                                                    pl-shuf-ta := TouchArea { clicked => { shuffle-playlist(); } }
+                                                }
+                                                // Save playlist button (remote playlists only)
+                                                if !playlist-view-is-local: Rectangle {
                                                     width: 44px; height: 44px; border-radius: 22px;
                                                     background: pl-like-ta.has-hover ? #ffffff14 : transparent;
                                                     Image {
-                                                        source: @image-url("icons/heart.svg");
+                                                        source: playlist-view-liked ? @image-url("icons/heart-fill.svg") : @image-url("icons/heart.svg");
                                                         width: playlist-view-liked ? 22px : 20px;
                                                         height: playlist-view-liked ? 22px : 20px;
-                                                        colorize: playlist-view-liked ? #e85d5d : #8a8a8a;
+                                                        colorize: playlist-view-liked ? Theme.accent : Theme.text-muted;
                                                         x: (parent.width - self.width) / 2;
                                                         y: (parent.height - self.height) / 2;
                                                         animate colorize { duration: 200ms; }
                                                         animate width, height { duration: 150ms; easing: ease-out-back; }
                                                     }
                                                     pl-like-ta := TouchArea { clicked => { toggle-like-playlist(); } }
+                                                }
+                                                // Delete button (local playlists only)
+                                                if playlist-view-is-local: Rectangle {
+                                                    width: 92px; height: 44px; border-radius: 22px;
+                                                    background: pl-del-ta.has-hover ? #3a1a1a : #1a1a1a;
+                                                    border-color: #3a2020; border-width: 1px;
+                                                    Text { text: "Delete"; color: pl-del-ta.has-hover ? Theme.accent : Theme.text-muted; font-size: 13px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                                                    pl-del-ta := TouchArea { clicked => { delete-local-playlist(playlist-view-id); } }
                                                 }
                                             }
                                         }
@@ -1906,6 +2329,10 @@ export component NativeShellWindow inherits Window {
                                 VerticalLayout {
                                     padding-left: 32px; padding-right: 32px; padding-top: 24px; spacing: 2px;
                                     for item[i] in playlist-view-songs: SongRow {
+                                        show-remove: playlist-view-is-local;
+                                        remove-clicked => { remove-from-local-playlist(playlist-view-id, item.video-id); }
+                                        artist-radio-clicked => { start-artist-radio(item.video-id, item.artist); }
+                                        add-to-playlist-clicked => { open-add-to-playlist(item.video-id, item.title, item.artist, item.duration-secs); }
                                         song-title: item.title; song-artist: item.artist;
                                         song-album: item.album; song-duration: item.duration-str;
                                         idx-str: "\{i + 1}"; avatar-letter: item.avatar-letter;
@@ -1970,14 +2397,14 @@ export component NativeShellWindow inherits Window {
                             viewport-height: explore-col.preferred-height + 40px;
                             explore-col := VerticalLayout {
                                 padding: 32px; spacing: 20px;
-                                Text { text: "Explore"; font-size: 28px; font-weight: 700; color: #ffffff; }
+                                Text { text: "Explore"; font-size: 28px; font-weight: 700; color: Theme.text; }
                                 Text { text: "Pick a vibe — we'll build your queue"; font-size: 14px; color: #6a6a6a; }
 
                                 // ── Moods & Genres (dynamic from API) ──
                                 if explore-moods.length > 0: VerticalLayout {
                                     spacing: 12px;
                                     Rectangle { height: 8px; }
-                                    Text { text: "Moods & Genres"; font-size: 18px; font-weight: 600; color: #e0e0e0; }
+                                    Text { text: "Moods & Genres"; font-size: 18px; font-weight: 600; color: Theme.text; }
                                     VerticalLayout {
                                         spacing: 10px;
                                         for mood[i] in explore-moods: Rectangle {
@@ -2008,7 +2435,7 @@ export component NativeShellWindow inherits Window {
 
                                 // ── Quick Genres ──
                                 Rectangle { height: 8px; }
-                                Text { text: "Quick Genres"; font-size: 18px; font-weight: 600; color: #e0e0e0; }
+                                Text { text: "Quick Genres"; font-size: 18px; font-weight: 600; color: Theme.text; }
                                 GridLayout {
                                     spacing: 14px;
                                     Row {
@@ -2033,13 +2460,15 @@ export component NativeShellWindow inherits Window {
                                 if explore-new-releases.length > 0: VerticalLayout {
                                     spacing: 12px;
                                     Rectangle { height: 8px; }
-                                    Text { text: "New Releases"; font-size: 18px; font-weight: 600; color: #e0e0e0; }
+                                    Text { text: "New Releases"; font-size: 18px; font-weight: 600; color: Theme.text; }
                                     Flickable {
                                         height: 280px;
                                         viewport-width: explore-new-releases.length * 214px;
                                         HorizontalLayout {
                                             spacing: 14px;
                                             for item in explore-new-releases: SongCard {
+                                                artist-radio-clicked => { start-artist-radio(item.video-id, item.artist); }
+                                                add-to-playlist-clicked => { open-add-to-playlist(item.video-id, item.title, item.artist, item.duration-secs); }
                                                 card-title: item.title;
                                                 card-artist: item.artist;
                                                 avatar-letter: item.avatar-letter;
@@ -2060,7 +2489,7 @@ export component NativeShellWindow inherits Window {
 
                                 // ── Charts ──
                                 Rectangle { height: 8px; }
-                                Text { text: "Charts"; font-size: 18px; font-weight: 600; color: #e0e0e0; }
+                                Text { text: "Charts"; font-size: 18px; font-weight: 600; color: Theme.text; }
                                 GridLayout {
                                     spacing: 14px;
                                     Row {
@@ -2081,7 +2510,7 @@ export component NativeShellWindow inherits Window {
                             viewport-height: lib-col.preferred-height + 40px;
                             lib-col := VerticalLayout {
                                 padding: 32px; spacing: 10px;
-                                Text { text: "Your Library"; font-size: 28px; font-weight: 700; color: #ffffff; }
+                                Text { text: "Your Library"; font-size: 28px; font-weight: 700; color: Theme.text; }
                                 HorizontalLayout {
                                     height: 40px; spacing: 8px; alignment: start;
                                     TabPill { label: "Liked Songs (\{liked-songs.length})"; active: library-tab == "Liked"; clicked => { library-tab = "Liked"; } }
@@ -2102,6 +2531,8 @@ export component NativeShellWindow inherits Window {
                                 if library-tab == "Liked": VerticalLayout {
                                     spacing: 2px;
                                     for item[i] in liked-songs: SongRow {
+                                        artist-radio-clicked => { start-artist-radio(item.video-id, item.artist); }
+                                        add-to-playlist-clicked => { open-add-to-playlist(item.video-id, item.title, item.artist, item.duration-secs); }
                                         song-title: item.title; song-artist: item.artist;
                                         song-album: item.album; song-duration: item.duration-str;
                                         idx-str: "\{i + 1}"; avatar-letter: item.avatar-letter;
@@ -2134,7 +2565,7 @@ export component NativeShellWindow inherits Window {
                                         VerticalLayout { alignment: center; spacing: 12px;
                                             Text { text: "💿"; font-size: 44px; color: #2a2a2a; horizontal-alignment: center; }
                                             Text { text: "No albums yet"; font-size: 18px; color: #5a5a5a; horizontal-alignment: center; }
-                                            Text { text: "Albums from your liked songs appear here"; font-size: 13px; color: #3a3a3a; horizontal-alignment: center; }
+                                            Text { text: "Albums you save appear here"; font-size: 13px; color: #3a3a3a; horizontal-alignment: center; }
                                         }
                                     }
                                     for alb[i] in library-albums: Rectangle {
@@ -2178,7 +2609,7 @@ export component NativeShellWindow inherits Window {
                                         VerticalLayout { alignment: center; spacing: 12px;
                                             Text { text: "🎤"; font-size: 44px; color: #2a2a2a; horizontal-alignment: center; }
                                             Text { text: "No artists yet"; font-size: 18px; color: #5a5a5a; horizontal-alignment: center; }
-                                            Text { text: "Artists from your liked songs appear here"; font-size: 13px; color: #3a3a3a; horizontal-alignment: center; }
+                                            Text { text: "Artists you follow appear here"; font-size: 13px; color: #3a3a3a; horizontal-alignment: center; }
                                         }
                                     }
                                     for art[i] in library-artists: Rectangle {
@@ -2196,7 +2627,7 @@ export component NativeShellWindow inherits Window {
                                                     width: parent.width; height: parent.height; image-fit: cover;
                                                 }
                                                 if !art.has-thumbnail: Text {
-                                                    text: art.name.character-count > 0 ? art.name : "?"; font-size: 18px; color: #4a4a4a;
+                                                    text: "👤"; font-size: 20px; color: #5a5a5a;
                                                     horizontal-alignment: center; vertical-alignment: center;
                                                 }
                                             }
@@ -2212,12 +2643,24 @@ export component NativeShellWindow inherits Window {
                                 // ── Playlists tab ──
                                 if library-tab == "Playlists": VerticalLayout {
                                     spacing: 12px;
+                                    // Create a new local playlist
+                                    HorizontalLayout { alignment: start;
+                                        Rectangle {
+                                            width: 156px; height: 40px; border-radius: 8px;
+                                            background: new-pl-ta.has-hover ? Theme.accent-strong : Theme.accent;
+                                            HorizontalLayout { alignment: center; spacing: 8px;
+                                                Text { text: "＋"; color: #ffffff; font-size: 17px; font-weight: 700; vertical-alignment: center; }
+                                                Text { text: "New playlist"; color: #ffffff; font-size: 13px; font-weight: 600; vertical-alignment: center; }
+                                            }
+                                            new-pl-ta := TouchArea { clicked => { new-playlist(); } }
+                                        }
+                                    }
                                     if library-playlists.length == 0: Rectangle {
                                         height: 200px;
                                         VerticalLayout { alignment: center; spacing: 12px;
                                             Text { text: "🎶"; font-size: 44px; color: #2a2a2a; horizontal-alignment: center; }
                                             Text { text: "No playlists yet"; font-size: 18px; color: #5a5a5a; horizontal-alignment: center; }
-                                            Text { text: "Your playlists will appear here"; font-size: 13px; color: #3a3a3a; horizontal-alignment: center; }
+                                            Text { text: "Create one above, or save a playlist you find"; font-size: 13px; color: #3a3a3a; horizontal-alignment: center; }
                                         }
                                     }
                                     for pl[i] in library-playlists: Rectangle {
@@ -2261,33 +2704,90 @@ export component NativeShellWindow inherits Window {
                             viewport-height: set-col.preferred-height + 40px;
                             set-col := VerticalLayout {
                                 padding: 32px; spacing: 24px;
-                                Text { text: "Settings"; font-size: 28px; font-weight: 700; color: #ffffff; }
+                                Text { text: "Settings"; font-size: 28px; font-weight: 700; color: Theme.text; }
                                 // About
                                 Rectangle {
                                     height: 72px; border-radius: 12px;
-                                    background: #0f0f0f; border-color: #1a1a1a; border-width: 1px;
+                                    background: Theme.surface; border-color: Theme.border; border-width: 1px;
                                     HorizontalLayout {
                                         padding: 20px; spacing: 14px; alignment: start;
-                                        Text { text: "▶"; color: #e85d5d; font-size: 26px; vertical-alignment: center; }
+                                        Text { text: "▶"; color: Theme.accent; font-size: 26px; vertical-alignment: center; }
                                         VerticalLayout { alignment: center; spacing: 4px;
-                                            Text { text: "Auricle"; font-size: 16px; font-weight: 600; color: #ffffff; }
-                                            Text { text: "Native • Rust + Slint"; font-size: 12px; color: #5a5a5a; }
+                                            Text { text: "Auricle"; font-size: 16px; font-weight: 600; color: Theme.text; }
+                                            Text { text: "Native • Rust + Slint"; font-size: 12px; color: Theme.text-muted; }
+                                        }
+                                    }
+                                }
+                                // Appearance
+                                Text { text: "Appearance"; font-size: 14px; font-weight: 600; color: Theme.text-muted; }
+                                Rectangle {
+                                    height: 148px; border-radius: Theme.radius;
+                                    background: Theme.surface; border-color: Theme.border; border-width: 1px;
+                                    VerticalLayout { padding: 18px; spacing: 14px;
+                                        HorizontalLayout { alignment: space-between; spacing: 16px;
+                                            VerticalLayout { alignment: center; spacing: 3px; horizontal-stretch: 1;
+                                                Text { text: "Color theme"; font-size: 14px; color: Theme.text; }
+                                                Text { text: "Accent and complementary surfaces"; font-size: 12px; color: Theme.text-muted; }
+                                            }
+                                            theme-picker := Rectangle {
+                                                width: 190px; height: 36px; border-radius: Theme.radius-sm;
+                                                background: theme-picker-ta.has-hover ? Theme.surface-hover : Theme.surface-2;
+                                                border-color: Theme.border; border-width: 1px;
+                                                HorizontalLayout { padding-left: 10px; padding-right: 10px; spacing: 9px;
+                                                    Rectangle { width: 16px; height: 16px; border-radius: 8px; background: Theme.accent; }
+                                                    Text { text: theme-name; font-size: 13px; color: Theme.text; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                                                    Text { text: "⌄"; font-size: 14px; color: Theme.text-muted; vertical-alignment: center; }
+                                                }
+                                                theme-picker-ta := TouchArea { clicked => { theme-menu.show(); } }
+                                                theme-menu := PopupWindow {
+                                                    x: 0px; y: 40px; width: 220px; height: 406px;
+                                                    Rectangle {
+                                                        width: 220px; height: 406px; border-radius: Theme.radius;
+                                                        background: Theme.glass-strong; border-color: Theme.border; border-width: 1px;
+                                                        drop-shadow-blur: 24px; drop-shadow-color: #00000080; drop-shadow-offset-y: 7px;
+                                                        VerticalLayout { padding: 8px; spacing: 1px;
+                                                            ThemeChoice { theme-label: "Default Blue"; theme-color: #6486b0; selected: theme-name == "Default Blue"; picked => { set-theme-name("Default Blue"); theme-menu.close(); } }
+                                                            ThemeChoice { theme-label: "Solar Red"; theme-color: #e2503f; selected: theme-name == "Solar Red"; picked => { set-theme-name("Solar Red"); theme-menu.close(); } }
+                                                            ThemeChoice { theme-label: "Ember"; theme-color: #f2703a; selected: theme-name == "Ember"; picked => { set-theme-name("Ember"); theme-menu.close(); } }
+                                                            ThemeChoice { theme-label: "Earth"; theme-color: #b06a43; selected: theme-name == "Earth"; picked => { set-theme-name("Earth"); theme-menu.close(); } }
+                                                            ThemeChoice { theme-label: "Forest"; theme-color: #3fa96a; selected: theme-name == "Forest"; picked => { set-theme-name("Forest"); theme-menu.close(); } }
+                                                            ThemeChoice { theme-label: "Ocean"; theme-color: #1699a8; selected: theme-name == "Ocean"; picked => { set-theme-name("Ocean"); theme-menu.close(); } }
+                                                            ThemeChoice { theme-label: "Sky"; theme-color: #46a6e6; selected: theme-name == "Sky"; picked => { set-theme-name("Sky"); theme-menu.close(); } }
+                                                            ThemeChoice { theme-label: "Twilight"; theme-color: #8b5cf6; selected: theme-name == "Twilight"; picked => { set-theme-name("Twilight"); theme-menu.close(); } }
+                                                            ThemeChoice { theme-label: "Rose"; theme-color: #e26aa0; selected: theme-name == "Rose"; picked => { set-theme-name("Rose"); theme-menu.close(); } }
+                                                            ThemeChoice { theme-label: "Mono"; theme-color: #6b7280; selected: theme-name == "Mono"; picked => { set-theme-name("Mono"); theme-menu.close(); } }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Rectangle { height: 1px; background: Theme.border-soft; }
+                                        HorizontalLayout { alignment: space-between; spacing: 16px;
+                                            VerticalLayout { alignment: center; spacing: 3px; horizontal-stretch: 1;
+                                                Text { text: "App mode"; font-size: 14px; color: Theme.text; }
+                                                Text { text: "System follows Windows"; font-size: 12px; color: Theme.text-muted; }
+                                            }
+                                            HorizontalLayout { spacing: 4px;
+                                                TabPill { label: "System"; active: theme-mode == "System"; clicked => { set-theme-mode("System"); } }
+                                                TabPill { label: "Dark"; active: theme-mode == "Dark"; clicked => { set-theme-mode("Dark"); } }
+                                                TabPill { label: "Light"; active: theme-mode == "Light"; clicked => { set-theme-mode("Light"); } }
+                                            }
                                         }
                                     }
                                 }
                                 // Updates (portable build only)
-                                if self-update-enabled: Text { text: "Updates"; font-size: 14px; font-weight: 600; color: #808080; }
+                                if self-update-enabled: Text { text: "Updates"; font-size: 14px; font-weight: 600; color: Theme.text-muted; }
                                 if self-update-enabled: Rectangle {
-                                    border-radius: 12px; background: #0f0f0f; border-color: #1a1a1a; border-width: 1px;
+                                    border-radius: Theme.radius; background: Theme.surface; border-color: Theme.border; border-width: 1px;
                                     VerticalLayout { padding: 18px; spacing: 14px;
                                         HorizontalLayout { spacing: 12px;
                                             VerticalLayout { alignment: center; spacing: 2px; horizontal-stretch: 1;
-                                                Text { text: "Current version"; font-size: 14px; color: #c0c0c0; }
-                                                Text { text: "v\{app-version}"; font-size: 12px; color: #5a5a5a; }
+                                                Text { text: "Current version"; font-size: 14px; color: Theme.text; }
+                                                Text { text: "v\{app-version}"; font-size: 12px; color: Theme.text-muted; }
                                             }
                                             if update-available: Rectangle {
                                                 width: 110px; height: 32px; border-radius: 8px;
-                                                background: update-busy ? #181818 : (upd-ta.has-hover ? #f06a6a : #e85d5d);
+                                                background: update-busy ? Theme.surface-hover : (upd-ta.has-hover ? Theme.accent-strong : Theme.accent);
                                                 animate background { duration: 100ms; }
                                                 Text { text: "Update now"; font-size: 13px; color: update-busy ? #5a5a5a : #ffffff; horizontal-alignment: center; vertical-alignment: center; }
                                                 upd-ta := TouchArea { clicked => { if !update-busy { apply-update(); } } }
@@ -2304,9 +2804,9 @@ export component NativeShellWindow inherits Window {
                                     }
                                 }
                                 // Essential add-ons
-                                Text { text: "Essential add-ons"; font-size: 14px; font-weight: 600; color: #808080; }
+                                Text { text: "Essential add-ons"; font-size: 14px; font-weight: 600; color: Theme.text-muted; }
                                 Rectangle {
-                                    border-radius: 12px; background: #0f0f0f; border-color: #1a1a1a; border-width: 1px;
+                                    border-radius: Theme.radius; background: Theme.surface; border-color: Theme.border; border-width: 1px;
                                     VerticalLayout { padding: 18px; spacing: 14px;
                                         Text {
                                             text: "These optional third-party tools are not bundled with Auricle. Installing them is at your own discretion and choice; Auricle is not affiliated with them. You may also install them manually onto your PATH.";
@@ -2316,7 +2816,7 @@ export component NativeShellWindow inherits Window {
                                         VerticalLayout { spacing: 10px;
                                             HorizontalLayout { spacing: 12px;
                                                 VerticalLayout { alignment: center; spacing: 2px; horizontal-stretch: 1;
-                                                    Text { text: "yt-dlp"; font-size: 14px; color: #c0c0c0; }
+                                                    Text { text: "yt-dlp"; font-size: 14px; color: Theme.text; }
                                                     Text { text: "Required for audio streaming and downloads."; font-size: 12px; color: #5a5a5a; }
                                                 }
                                                 if ytdlp-installed && addon-installing != "ytdlp" && addon-installing != "ytdlp-update": HorizontalLayout { spacing: 8px; alignment: end;
@@ -2340,7 +2840,7 @@ export component NativeShellWindow inherits Window {
                                                 }
                                                 if !ytdlp-installed && addon-installing != "ytdlp": Rectangle {
                                                     width: 92px; height: 32px; border-radius: 8px;
-                                                    background: addon-busy ? #181818 : (yt-ins-ta.has-hover ? #f06a6a : #e85d5d);
+                                                    background: addon-busy ? Theme.surface-hover : (yt-ins-ta.has-hover ? Theme.accent-strong : Theme.accent);
                                                     animate background { duration: 100ms; }
                                                     Text { text: "Install"; font-size: 13px; color: addon-busy ? #5a5a5a : #ffffff; horizontal-alignment: center; vertical-alignment: center; }
                                                     yt-ins-ta := TouchArea { clicked => { if !addon-busy { install-ytdlp(); } } }
@@ -2363,7 +2863,7 @@ export component NativeShellWindow inherits Window {
                                         VerticalLayout { spacing: 10px;
                                             HorizontalLayout { spacing: 12px;
                                                 VerticalLayout { alignment: center; spacing: 2px; horizontal-stretch: 1;
-                                                    Text { text: "ffmpeg"; font-size: 14px; color: #c0c0c0; }
+                                                    Text { text: "ffmpeg"; font-size: 14px; color: Theme.text; }
                                                     Text { text: "Optional. Improves format handling for downloads."; font-size: 12px; color: #5a5a5a; }
                                                 }
                                                 if ffmpeg-installed && addon-installing != "ffmpeg": HorizontalLayout { spacing: 10px; alignment: end;
@@ -2401,7 +2901,7 @@ export component NativeShellWindow inherits Window {
                                         VerticalLayout { spacing: 10px;
                                             HorizontalLayout { spacing: 12px;
                                                 VerticalLayout { alignment: center; spacing: 2px; horizontal-stretch: 1;
-                                                    Text { text: "Deno"; font-size: 14px; color: #c0c0c0; }
+                                                    Text { text: "Deno"; font-size: 14px; color: Theme.text; }
                                                     Text { text: "JavaScript runtime used by yt-dlp for YouTube. Fixes 403 errors on some videos."; font-size: 12px; color: #5a5a5a; wrap: word-wrap; }
                                                 }
                                                 if deno-installed && addon-installing != "deno": HorizontalLayout { spacing: 10px; alignment: end;
@@ -2434,65 +2934,65 @@ export component NativeShellWindow inherits Window {
                                     }
                                 }
                                 // Audio
-                                Text { text: "Audio"; font-size: 14px; font-weight: 600; color: #808080; }
+                                Text { text: "Audio"; font-size: 14px; font-weight: 600; color: Theme.text-muted; }
                                 Rectangle {
-                                    border-radius: 12px; background: #0f0f0f; border-color: #1a1a1a; border-width: 1px;
+                                    border-radius: Theme.radius; background: Theme.surface; border-color: Theme.border; border-width: 1px;
                                     VerticalLayout { padding: 18px; spacing: 14px;
                                         HorizontalLayout { alignment: space-between;
-                                            Text { text: "Audio quality"; font-size: 14px; color: #c0c0c0; vertical-alignment: center; }
+                                            Text { text: "Audio quality"; font-size: 14px; color: Theme.text; vertical-alignment: center; }
                                             Text { text: "Best available (AAC)"; font-size: 13px; color: #5a5a5a; vertical-alignment: center; }
                                         }
                                         Rectangle { height: 1px; background: #1a1a1a; }
                                         HorizontalLayout { alignment: space-between;
-                                            Text { text: "Cookie auth"; font-size: 14px; color: #c0c0c0; vertical-alignment: center; }
+                                            Text { text: "Cookie auth"; font-size: 14px; color: Theme.text; vertical-alignment: center; }
                                             Text { text: "Auto: Edge → Chrome → Firefox"; font-size: 13px; color: #5a5a5a; vertical-alignment: center; }
                                         }
                                     }
                                 }
                                 // Library
-                                Text { text: "Library"; font-size: 14px; font-weight: 600; color: #808080; }
+                                Text { text: "Library"; font-size: 14px; font-weight: 600; color: Theme.text-muted; }
                                 Rectangle {
-                                    border-radius: 12px; background: #0f0f0f; border-color: #1a1a1a; border-width: 1px;
+                                    border-radius: Theme.radius; background: Theme.surface; border-color: Theme.border; border-width: 1px;
                                     VerticalLayout { padding: 18px; spacing: 14px;
                                         HorizontalLayout { alignment: space-between;
-                                            Text { text: "Liked songs"; font-size: 14px; color: #c0c0c0; vertical-alignment: center; }
+                                            Text { text: "Liked songs"; font-size: 14px; color: Theme.text; vertical-alignment: center; }
                                             Text { text: "\{liked-songs.length} songs"; font-size: 13px; color: #5a5a5a; vertical-alignment: center; }
                                         }
 
                                         Rectangle { height: 1px; background: #1a1a1a; }
                                         HorizontalLayout { alignment: space-between;
-                                            Text { text: "Queue length"; font-size: 14px; color: #c0c0c0; vertical-alignment: center; }
+                                            Text { text: "Queue length"; font-size: 14px; color: Theme.text; vertical-alignment: center; }
                                             Text { text: "\{queue.length} songs"; font-size: 13px; color: #5a5a5a; vertical-alignment: center; }
                                         }
                                     }
                                 }
                                 // Cache
-                                Text { text: "Cache"; font-size: 14px; font-weight: 600; color: #808080; }
+                                Text { text: "Cache"; font-size: 14px; font-weight: 600; color: Theme.text-muted; }
                                 Rectangle {
-                                    border-radius: 12px; background: #0f0f0f; border-color: #1a1a1a; border-width: 1px;
+                                    border-radius: Theme.radius; background: Theme.surface; border-color: Theme.border; border-width: 1px;
                                     VerticalLayout { padding: 18px; spacing: 14px;
                                         HorizontalLayout { alignment: space-between;
-                                            Text { text: "Cached songs"; font-size: 14px; color: #c0c0c0; vertical-alignment: center; }
+                                            Text { text: "Cached songs"; font-size: 14px; color: Theme.text; vertical-alignment: center; }
                                             Text { text: "\{cache-song-count} songs • \{cache-used-mb} MB"; font-size: 13px; color: #5a5a5a; vertical-alignment: center; }
                                         }
                                         Rectangle { height: 1px; background: #1a1a1a; }
                                         VerticalLayout { spacing: 8px;
                                             HorizontalLayout { alignment: space-between;
-                                                Text { text: "Storage limit"; font-size: 14px; color: #c0c0c0; vertical-alignment: center; }
-                                                Text { text: "\{cache-limit-mb} MB"; font-size: 13px; color: #e85d5d; vertical-alignment: center; font-weight: 600; }
+                                                Text { text: "Storage limit"; font-size: 14px; color: Theme.text; vertical-alignment: center; }
+                                                Text { text: "\{cache-limit-mb} MB"; font-size: 13px; color: Theme.accent; vertical-alignment: center; font-weight: 600; }
                                             }
                                             Rectangle { height: 4px; border-radius: 2px; background: #1a1a1a;
                                                 Rectangle {
                                                     x: 0; y: 0; border-radius: 2px;
                                                     width: max(4px, min(parent.width, parent.width * (cache-used-mb / max(1, cache-limit-mb))));
-                                                    background: cache-used-mb > cache-limit-mb * 9 / 10 ? #e85d5d : #4a4a4a;
+                                                    background: cache-used-mb > cache-limit-mb * 9 / 10 ? Theme.accent : Theme.text-dim;
                                                 }
                                             }
                                         }
                                         HorizontalLayout { spacing: 8px; alignment: start;
                                             for mb in [250, 500, 1000, 2000]: Rectangle {
                                                 width: 72px; height: 32px; border-radius: 16px;
-                                                background: cache-limit-mb == mb ? #e85d5d : #1a1a1a;
+                                                background: cache-limit-mb == mb ? Theme.accent : Theme.surface-hover;
                                                 Text {
                                                     text: mb >= 1000 ? (mb / 1000) + " GB" : mb + " MB";
                                                     color: cache-limit-mb == mb ? #ffffff : #6a6a6a;
@@ -2514,19 +3014,19 @@ export component NativeShellWindow inherits Window {
                                     }
                                 }
                                 // Behavior
-                                Text { text: "Behavior"; font-size: 14px; font-weight: 600; color: #808080; }
+                                Text { text: "Behavior"; font-size: 14px; font-weight: 600; color: Theme.text-muted; }
                                 Rectangle {
-                                    border-radius: 12px; background: #0f0f0f; border-color: #1a1a1a; border-width: 1px;
+                                    border-radius: Theme.radius; background: Theme.surface; border-color: Theme.border; border-width: 1px;
                                     VerticalLayout { padding: 18px; spacing: 14px;
                                         HorizontalLayout { alignment: space-between;
                                             VerticalLayout { spacing: 4px; vertical-stretch: 1;
-                                                Text { text: "Minimize to tray"; font-size: 14px; color: #c0c0c0; vertical-alignment: center; }
-                                                Text { text: "Close button minimizes to system tray instead of quitting"; font-size: 12px; color: #4a4a4a; }
+                                                Text { text: "Minimize to tray"; font-size: 14px; color: Theme.text; vertical-alignment: center; }
+                                                Text { text: "Close button minimizes to system tray instead of quitting"; font-size: 12px; color: Theme.text-muted; }
                                             }
                                             // Toggle switch
                                             Rectangle {
                                                 width: 44px; height: 24px; border-radius: 12px;
-                                                background: minimize-to-tray ? #1db954 : #3a3a3a;
+                                                background: minimize-to-tray ? Theme.accent : Theme.surface-hover;
                                                 animate background { duration: 150ms; }
                                                 Rectangle {
                                                     x: minimize-to-tray ? parent.width - self.width - 2px : 2px;
@@ -2541,13 +3041,13 @@ export component NativeShellWindow inherits Window {
                                         // Prefetch depth
                                         VerticalLayout { spacing: 10px;
                                             VerticalLayout { spacing: 4px;
-                                                Text { text: "Prefetch ahead"; font-size: 14px; color: #c0c0c0; }
-                                                Text { text: "How many upcoming songs to fully cache in advance. Higher makes rapid skipping smoother but uses more data."; font-size: 12px; color: #4a4a4a; wrap: word-wrap; }
+                                                Text { text: "Prefetch ahead"; font-size: 14px; color: Theme.text; }
+                                                Text { text: "How many upcoming songs to fully cache in advance. Higher makes rapid skipping smoother but uses more data."; font-size: 12px; color: Theme.text-muted; wrap: word-wrap; }
                                             }
                                             HorizontalLayout { spacing: 8px; alignment: start;
                                                 for n in [1, 2, 3]: Rectangle {
                                                     width: 84px; height: 32px; border-radius: 16px;
-                                                    background: prefetch-depth == n ? #e85d5d : #1a1a1a;
+                                                    background: prefetch-depth == n ? Theme.accent : Theme.surface-hover;
                                                     Text {
                                                         text: n == 1 ? "1 song" : (n + " songs");
                                                         color: prefetch-depth == n ? #ffffff : #6a6a6a;
@@ -2568,14 +3068,15 @@ export component NativeShellWindow inherits Window {
                 // ── Right queue pane (Spotify-style) ─────────────────────────
                 if queue-pane-open: Rectangle {
                     width: compact ? 288px : 320px;
-                    background: #121212;
-                    Rectangle { x: 0; y: 0; width: 1px; height: parent.height; background: #1a1a1a; }
+                    background: Theme.frost;
+                    // Left glass-edge highlight for a premium frosted look.
+                    Rectangle { x: 0; y: 0; width: 1px; height: parent.height; background: Theme.frost-hi; }
                     VerticalLayout {
                         padding: 12px; padding-left: 12px; padding-right: 12px; spacing: 0px;
                         // Header
                         HorizontalLayout {
                             height: 40px; alignment: space-between;
-                            Text { text: "Queue"; font-size: 16px; font-weight: 700; color: #ffffff; vertical-alignment: center; }
+                            Text { text: "Queue"; font-size: 16px; font-weight: 700; color: Theme.text; vertical-alignment: center; }
                             HorizontalLayout { spacing: 4px; alignment: center;
                                 Text { text: "\{queue.length} songs"; font-size: 12px; color: #5a5a5a; vertical-alignment: center; }
                                 IconBtn { svg-icon: @image-url("icons/close.svg"); use-svg: true; icon-color: #5a5a5a; clicked => { toggle-queue-pane(); } }
@@ -2592,7 +3093,7 @@ export component NativeShellWindow inherits Window {
                                 // ── Now Playing ──
                                 if now-playing-video-id != "": VerticalLayout {
                                     spacing: 8px;
-                                    Text { text: "Now playing"; font-size: 14px; font-weight: 700; color: #ffffff; }
+                                    Text { text: "Now playing"; font-size: 14px; font-weight: 700; color: Theme.text; }
                                     Rectangle {
                                         height: 68px; border-radius: 8px;
                                         background: #ffffff0c;
@@ -2605,14 +3106,38 @@ export component NativeShellWindow inherits Window {
                                                     source: album-art; width: parent.width; height: parent.height; image-fit: cover;
                                                 }
                                                 if !has-album-art: Text {
-                                                    text: track-initial; color: #e85d5d; font-size: 16px; font-weight: 700;
+                                                    text: track-initial; color: Theme.accent; font-size: 16px; font-weight: 700;
                                                     horizontal-alignment: center; vertical-alignment: center;
                                                 }
                                             }
                                             VerticalLayout {
                                                 alignment: center; spacing: 3px; horizontal-stretch: 1;
-                                                Text { text: track-title; font-size: 14px; font-weight: 600; color: #1db954; overflow: elide; }
+                                                Text { text: track-title; font-size: 14px; font-weight: 600; color: Theme.accent; overflow: elide; }
                                                 Text { text: track-artist; font-size: 12px; color: #a0a0a0; overflow: elide; }
+                                            }
+                                        }
+                                        np-ta := TouchArea {
+                                            pointer-event(e) => {
+                                                if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                                                    np-ctx.show();
+                                                }
+                                            }
+                                        }
+                                        np-ctx := PopupWindow {
+                                            x: 20px; y: 44px; width: 220px; height: 216px;
+                                            Rectangle {
+                                                width: 220px; height: 216px;
+                                                border-radius: Theme.radius; background: Theme.glass-strong;
+                                                border-color: Theme.border; border-width: 1px;
+                                                drop-shadow-blur: 22px; drop-shadow-color: #00000080; drop-shadow-offset-y: 6px;
+                                                VerticalLayout {
+                                                    padding: 6px;
+                                                    CtxMenuItem { icon: @image-url("icons/radio.svg"); label: "Go to song radio"; clicked => { start-song-radio(now-playing-video-id); np-ctx.close(); } }
+                                                    CtxMenuItem { icon: @image-url("icons/radio.svg"); label: "Artist radio"; clicked => { start-artist-radio(now-playing-video-id, track-artist); np-ctx.close(); } }
+                                                    CtxMenuItem { icon: @image-url("icons/artist.svg"); label: "Go to artist"; clicked => { open-artist-for(now-playing-video-id, track-artist); np-ctx.close(); } }
+                                                    CtxMenuItem { icon: @image-url("icons/album.svg"); label: "Go to album"; clicked => { open-album-for(now-playing-video-id); np-ctx.close(); } }
+                                                    CtxMenuItem { icon: @image-url("icons/plus.svg"); label: "Add to playlist"; clicked => { open-add-to-playlist(now-playing-video-id, track-title, track-artist, 0); np-ctx.close(); } }
+                                                }
                                             }
                                         }
                                     }
@@ -2620,32 +3145,32 @@ export component NativeShellWindow inherits Window {
                                 }
 
                                 // ── Next in queue ──
-                                Text { text: "Next in queue"; font-size: 14px; font-weight: 700; color: #ffffff; }
+                                Text { text: "Next in queue"; font-size: 14px; font-weight: 700; color: Theme.text; }
                                 Rectangle { height: 8px; }
 
                                 for item[i] in queue: Rectangle {
                                     height: 64px;
-                                    border-radius: 6px;
-                                    background: item.video-id == now-playing-video-id ? #ffffff06 : (qrow-ta.has-hover ? #ffffff0a : transparent);
+                                    border-radius: Theme.radius-sm;
+                                    background: item.video-id == now-playing-video-id ? Theme.accent-soft : (qrow-ta.has-hover ? Theme.hover-veil : transparent);
                                     HorizontalLayout {
-                                        padding-left: 4px; padding-right: 48px; padding-top: 8px; padding-bottom: 8px; spacing: 10px; alignment: start;
+                                        padding-left: 6px; padding-right: 48px; padding-top: 8px; padding-bottom: 8px; spacing: 12px; alignment: start;
                                         Rectangle {
-                                            width: 48px; height: 48px; border-radius: 4px; clip: true;
-                                            background: #2a2a2a;
+                                            width: 48px; height: 48px; border-radius: 6px; clip: true;
+                                            background: Theme.surface-hover;
                                             if item.has-thumbnail: Image {
                                                 source: item.thumbnail; width: parent.width; height: parent.height; image-fit: cover;
                                             }
                                             if !item.has-thumbnail: Text {
                                                 text: item.avatar-letter;
-                                                color: item.video-id == now-playing-video-id ? #1db954 : #6a6a6a;
+                                                color: item.video-id == now-playing-video-id ? Theme.accent : Theme.text-muted;
                                                 font-size: 14px; font-weight: 700;
                                                 horizontal-alignment: center; vertical-alignment: center;
                                             }
                                         }
                                         VerticalLayout {
                                             alignment: center; spacing: 3px; horizontal-stretch: 1;
-                                            Text { text: item.title; font-size: 14px; font-weight: 500; color: item.video-id == now-playing-video-id ? #1db954 : #e0e0e0; overflow: elide; }
-                                            Text { text: item.artist; font-size: 12px; color: #6a6a6a; overflow: elide; }
+                                            Text { text: item.title; font-size: 14px; font-weight: 500; color: item.video-id == now-playing-video-id ? Theme.accent : Theme.text; overflow: elide; }
+                                            Text { text: item.artist; font-size: 12px; color: Theme.text-muted; overflow: elide; }
                                         }
                                     }
                                     qrow-ta := TouchArea {
@@ -2667,45 +3192,53 @@ export component NativeShellWindow inherits Window {
                                         Rectangle {
                                             width: 30px; height: 30px; border-radius: 15px;
                                             x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-                                            background: rm-ta.has-hover ? #ffffff20 : #ffffff0a;
-                                            Image { source: @image-url("icons/close.svg"); width: 14px; height: 14px; colorize: rm-ta.has-hover ? #ffffff : #a0a0a0; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
+                                            background: rm-ta.has-hover ? Theme.surface-hover : Theme.hover-veil;
+                                            Image { source: @image-url("icons/close.svg"); width: 14px; height: 14px; colorize: rm-ta.has-hover ? Theme.text : Theme.text-muted; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
                                         }
                                         rm-ta := TouchArea { clicked => { remove-from-queue(i); } }
                                     }
                                     qrow-ctx := PopupWindow {
-                                        x: 60px; y: 10px; width: 220px; height: 100px;
+                                        x: 60px; y: 10px; width: 220px; height: 348px;
                                         Rectangle {
-                                            width: 220px; height: 100px;
-                                            border-radius: 8px; background: #282828;
-                                            drop-shadow-blur: 16px; drop-shadow-color: #00000080; drop-shadow-offset-y: 4px;
+                                            width: 220px; height: 348px;
+                                            border-radius: Theme.radius; background: Theme.glass-strong;
+                                            border-color: Theme.border; border-width: 1px;
+                                            drop-shadow-blur: 22px; drop-shadow-color: #00000080; drop-shadow-offset-y: 6px;
                                             VerticalLayout {
                                                 padding: 6px;
-                                                CtxMenuItem { use-image: false; glyph: "✕"; label: "Remove from queue"; clicked => { remove-from-queue(i); qrow-ctx.close(); } }
                                                 CtxMenuItem { icon: @image-url("icons/play.svg"); label: "Play"; clicked => { play-song(item.video-id, item.title, item.artist, item.duration-secs); qrow-ctx.close(); } }
+                                                CtxMenuItem { icon: @image-url("icons/next.svg"); label: "Play next"; clicked => { move-queue-song-next(i); qrow-ctx.close(); } }
+                                                CtxMenuItem { icon: @image-url("icons/radio.svg"); label: "Go to song radio"; clicked => { start-song-radio(item.video-id); qrow-ctx.close(); } }
+                                                CtxMenuItem { icon: @image-url("icons/radio.svg"); label: "Artist radio"; clicked => { start-artist-radio(item.video-id, item.artist); qrow-ctx.close(); } }
+                                                CtxMenuItem { icon: @image-url("icons/artist.svg"); label: "Go to artist"; clicked => { open-artist-for(item.video-id, item.artist); qrow-ctx.close(); } }
+                                                CtxMenuItem { icon: @image-url("icons/album.svg"); label: "Go to album"; clicked => { open-album-for(item.video-id); qrow-ctx.close(); } }
+                                                CtxMenuItem { icon: @image-url("icons/plus.svg"); label: "Add to playlist"; clicked => { open-add-to-playlist(item.video-id, item.title, item.artist, item.duration-secs); qrow-ctx.close(); } }
+                                                Rectangle { height: 1px; background: Theme.border; }
+                                                CtxMenuItem { icon: @image-url("icons/close.svg"); label: "Remove from queue"; clicked => { remove-from-queue(i); qrow-ctx.close(); } }
                                             }
                                         }
                                     }
                                 }
                                 if queue.length == 0: Rectangle {
                                     height: 100px;
-                                    Text { text: "Queue is empty"; font-size: 14px; color: #4a4a4a; horizontal-alignment: center; vertical-alignment: center; }
+                                    Text { text: "Queue is empty"; font-size: 14px; color: Theme.text-dim; horizontal-alignment: center; vertical-alignment: center; }
                                 }
 
                                 // ── Autoplay section ──
                                 Rectangle { height: 16px; }
-                                Rectangle { height: 1px; background: #1a1a1a; }
+                                Rectangle { height: 1px; background: Theme.border; }
                                 HorizontalLayout {
-                                    height: 44px; padding-left: 4px; padding-right: 4px;
+                                    height: 44px; padding-left: 6px; padding-right: 6px;
                                     Text {
                                         text: "Autoplay";
                                         font-size: 15px; font-weight: 600;
-                                        color: #b0b0b0;
+                                        color: Theme.text;
                                         vertical-alignment: center;
                                         horizontal-stretch: 1;
                                     }
                                     Rectangle {
                                         width: 44px; height: 24px; border-radius: 12px;
-                                        background: autoplay-enabled ? #1db954 : #3a3a3a;
+                                        background: autoplay-enabled ? Theme.accent : Theme.surface-hover;
                                         animate background { duration: 200ms; }
                                         Rectangle {
                                             x: autoplay-enabled ? parent.width - self.width - 3px : 3px;
@@ -2721,32 +3254,32 @@ export component NativeShellWindow inherits Window {
                                     spacing: 0px;
                                     for item[i] in autoplay-queue: Rectangle {
                                         height: 64px;
-                                        border-radius: 6px;
-                                        background: ap-row-ta.has-hover ? #ffffff0a : transparent;
+                                        border-radius: Theme.radius-sm;
+                                        background: ap-row-ta.has-hover ? Theme.hover-veil : transparent;
                                         HorizontalLayout {
-                                            padding-left: 4px; padding-right: 4px; padding-top: 8px; padding-bottom: 8px; spacing: 10px; alignment: start;
+                                            padding-left: 6px; padding-right: 6px; padding-top: 8px; padding-bottom: 8px; spacing: 12px; alignment: start;
                                             Rectangle {
-                                                width: 48px; height: 48px; border-radius: 4px; clip: true;
-                                                background: #2a2a2a;
+                                                width: 48px; height: 48px; border-radius: 6px; clip: true;
+                                                background: Theme.surface-hover;
                                                 if item.has-thumbnail: Image {
                                                     source: item.thumbnail; width: parent.width; height: parent.height; image-fit: cover;
                                                 }
                                                 if !item.has-thumbnail: Text {
                                                     text: item.avatar-letter;
-                                                    color: #6a6a6a;
+                                                    color: Theme.text-muted;
                                                     font-size: 14px; font-weight: 700;
                                                     horizontal-alignment: center; vertical-alignment: center;
                                                 }
                                             }
                                             VerticalLayout {
                                                 alignment: center; spacing: 3px; horizontal-stretch: 1;
-                                                Text { text: item.title; font-size: 14px; font-weight: 500; color: #e0e0e0; overflow: elide; }
-                                                Text { text: item.artist; font-size: 12px; color: #6a6a6a; overflow: elide; }
+                                                Text { text: item.title; font-size: 14px; font-weight: 500; color: Theme.text; overflow: elide; }
+                                                Text { text: item.artist; font-size: 12px; color: Theme.text-muted; overflow: elide; }
                                             }
                                             if ap-row-ta.has-hover: Rectangle {
-                                                width: 28px; height: 28px; border-radius: 14px;
-                                                background: ap-rm-ta.has-hover ? #ffffff14 : transparent;
-                                                Text { text: "✕"; color: #6a6a6a; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+                                                width: 30px; height: 30px; border-radius: 15px;
+                                                background: ap-rm-ta.has-hover ? Theme.surface-hover : Theme.hover-veil;
+                                                Image { source: @image-url("icons/close.svg"); width: 14px; height: 14px; colorize: ap-rm-ta.has-hover ? Theme.text : Theme.text-muted; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
                                                 ap-rm-ta := TouchArea { clicked => { remove-from-autoplay(i); } }
                                             }
                                         }
@@ -2759,17 +3292,25 @@ export component NativeShellWindow inherits Window {
                                             }
                                         }
                                         ap-ctx := PopupWindow {
-                                            x: 60px; y: 10px; width: 220px;
+                                            x: 60px; y: 10px; width: 220px; height: 392px;
                                             Rectangle {
-                                                width: 220px; height: 156px;
-                                                border-radius: 8px; background: #282828;
-                                                drop-shadow-blur: 16px; drop-shadow-color: #00000080; drop-shadow-offset-y: 4px;
+                                                width: 220px; height: 392px;
+                                                border-radius: Theme.radius; background: Theme.glass-strong;
+                                                border-color: Theme.border; border-width: 1px;
+                                                drop-shadow-blur: 22px; drop-shadow-color: #00000080; drop-shadow-offset-y: 6px;
                                                 VerticalLayout {
                                                     padding: 6px;
                                                     CtxMenuItem { icon: @image-url("icons/play.svg"); label: "Play"; clicked => { play-autoplay-song(i); ap-ctx.close(); } }
-                                                    CtxMenuItem { use-image: false; glyph: "+"; glyph-size: 18px; label: "Add to queue"; clicked => { queue-song(item.video-id, item.title, item.artist); ap-ctx.close(); } }
                                                     CtxMenuItem { icon: @image-url("icons/next.svg"); label: "Play next"; clicked => { play-next-song(item.video-id, item.title, item.artist, item.duration-secs); ap-ctx.close(); } }
-                                                    CtxMenuItem { use-image: false; glyph: "✕"; label: "Remove"; clicked => { remove-from-autoplay(i); ap-ctx.close(); } }
+                                                    CtxMenuItem { icon: @image-url("icons/plus.svg"); label: "Add to queue"; clicked => { queue-song(item.video-id, item.title, item.artist); remove-from-autoplay(i); ap-ctx.close(); } }
+                                                    Rectangle { height: 1px; background: Theme.border; }
+                                                    CtxMenuItem { icon: @image-url("icons/radio.svg"); label: "Go to song radio"; clicked => { start-song-radio(item.video-id); ap-ctx.close(); } }
+                                                    CtxMenuItem { icon: @image-url("icons/radio.svg"); label: "Artist radio"; clicked => { start-artist-radio(item.video-id, item.artist); ap-ctx.close(); } }
+                                                    CtxMenuItem { icon: @image-url("icons/artist.svg"); label: "Go to artist"; clicked => { open-artist-for(item.video-id, item.artist); ap-ctx.close(); } }
+                                                    CtxMenuItem { icon: @image-url("icons/album.svg"); label: "Go to album"; clicked => { open-album-for(item.video-id); ap-ctx.close(); } }
+                                                    CtxMenuItem { icon: @image-url("icons/plus.svg"); label: "Add to playlist"; clicked => { open-add-to-playlist(item.video-id, item.title, item.artist, item.duration-secs); ap-ctx.close(); } }
+                                                    Rectangle { height: 1px; background: Theme.border; }
+                                                    CtxMenuItem { icon: @image-url("icons/close.svg"); label: "Remove"; clicked => { remove-from-autoplay(i); ap-ctx.close(); } }
                                                 }
                                             }
                                         }
@@ -2783,26 +3324,29 @@ export component NativeShellWindow inherits Window {
 
             // ── Player bar ────────────────────────────────────────────────
             Rectangle {
-                height: 90px;
-                background: #0a0a0a;
-                Rectangle { x: 0; y: 0; height: 1px; width: parent.width; background: #1a1a1a; }
+                height: 86px;
+                border-radius: Theme.radius; border-color: Theme.border; border-width: 1px;
+                background: Theme.frost;
+                drop-shadow-blur: 24px; drop-shadow-color: #00000045; drop-shadow-offset-y: -6px;
+                // Top glass-edge highlight for a premium frosted look.
+                Rectangle { x: 0; y: 0; height: 1px; width: parent.width; background: Theme.frost-hi; }
 
                 HorizontalLayout {
-                    padding-left: 20px; padding-right: 20px; padding-top: 15px; padding-bottom: 15px;
+                    padding-left: 16px; padding-right: 16px; padding-top: 12px; padding-bottom: 12px;
 
                     // Now playing info (left)
                     HorizontalLayout {
                         width: compact ? 210px : 300px; spacing: 12px; alignment: start;
 
                         if has-album-art: Rectangle {
-                            width: 60px; height: 60px; border-radius: 8px; clip: true;
+                            width: 60px; height: 60px; border-radius: 12px; clip: true;
                             Image { source: album-art; width: parent.width; height: parent.height; image-fit: cover; }
                         }
                         if !has-album-art: Rectangle {
-                            width: 60px; height: 60px; border-radius: 8px;
-                            background: #1a1a1a;
+                            width: 60px; height: 60px; border-radius: 12px;
+                            background: Theme.surface-hover;
                             Text {
-                                text: track-initial; color: is-playing ? #e85d5d : #4a4a4a;
+                                text: track-initial; color: is-playing ? Theme.accent : Theme.text-dim;
                                 font-size: 20px; font-weight: 700;
                                 horizontal-alignment: center; vertical-alignment: center;
                             }
@@ -2810,18 +3354,53 @@ export component NativeShellWindow inherits Window {
 
                         VerticalLayout {
                             alignment: center; spacing: 4px; horizontal-stretch: 1;
-                            Text { text: track-title; font-size: 14px; font-weight: 600; color: #ffffff; overflow: elide; }
-                            Text { text: track-artist; font-size: 12px; color: #6a6a6a; overflow: elide; }
+                            Rectangle {
+                                height: 18px;
+                                Text { text: track-title; font-size: 14px; font-weight: 600; color: Theme.text; overflow: elide;
+                                    width: parent.width; vertical-alignment: center; }
+                                TouchArea {
+                                    pointer-event(e) => {
+                                        if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                                            pb-ctx.show();
+                                        }
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                height: 16px;
+                                Text { text: track-artist; font-size: 12px; color: pb-artist-ta.has-hover ? Theme.text : Theme.text-muted; overflow: elide;
+                                    width: parent.width; vertical-alignment: center; }
+                                pb-artist-ta := TouchArea {
+                                    clicked => { open-artist-for(now-playing-video-id, track-artist); }
+                                }
+                            }
+                            pb-ctx := PopupWindow {
+                                x: 0; y: -224px; width: 220px; height: 216px;
+                                Rectangle {
+                                    width: 220px; height: 216px;
+                                    border-radius: Theme.radius; background: Theme.glass-strong;
+                                    border-color: Theme.border; border-width: 1px;
+                                    drop-shadow-blur: 22px; drop-shadow-color: #00000080; drop-shadow-offset-y: 6px;
+                                    VerticalLayout {
+                                        padding: 6px;
+                                        CtxMenuItem { icon: @image-url("icons/radio.svg"); label: "Go to song radio"; clicked => { start-song-radio(now-playing-video-id); pb-ctx.close(); } }
+                                        CtxMenuItem { icon: @image-url("icons/radio.svg"); label: "Artist radio"; clicked => { start-artist-radio(now-playing-video-id, track-artist); pb-ctx.close(); } }
+                                        CtxMenuItem { icon: @image-url("icons/artist.svg"); label: "Go to artist"; clicked => { open-artist-for(now-playing-video-id, track-artist); pb-ctx.close(); } }
+                                        CtxMenuItem { icon: @image-url("icons/album.svg"); label: "Go to album"; clicked => { open-album-for(now-playing-video-id); pb-ctx.close(); } }
+                                        CtxMenuItem { icon: @image-url("icons/plus.svg"); label: "Add to playlist"; clicked => { open-add-to-playlist(now-playing-video-id, track-title, track-artist, 0); pb-ctx.close(); } }
+                                    }
+                                }
+                            }
                         }
 
                         Rectangle {
                             width: 36px; height: 36px;
                             property <bool> like-bounce: false;
                             like-heart := Image {
-                                source: @image-url("icons/heart.svg");
+                                source: is-liked ? @image-url("icons/heart-fill.svg") : @image-url("icons/heart.svg");
                                 width: like-bounce ? 28px : (is-liked ? 22px : 20px);
                                 height: like-bounce ? 28px : (is-liked ? 22px : 20px);
-                                colorize: is-liked ? #e85d5d : #4a4a4a;
+                                colorize: is-liked ? Theme.accent : Theme.text-dim;
                                 x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
                                 animate colorize { duration: 200ms; }
                                 animate width, height { duration: 150ms; easing: ease-out-back; }
@@ -2838,33 +3417,34 @@ export component NativeShellWindow inherits Window {
                             alignment: center; spacing: 16px;
                             Rectangle {
                                 width: 32px; height: 32px; border-radius: 16px;
-                                background: shuf-ta.has-hover ? #ffffff0c : transparent;
-                                Image { source: @image-url("icons/shuffle.svg"); width: 16px; height: 16px; colorize: shuf-ta.has-hover ? #ffffff : #4a4a4a; x: 8px; y: 8px; }
+                                background: shuf-ta.has-hover ? Theme.hover-veil : transparent;
+                                Image { source: @image-url("icons/shuffle.svg"); width: 16px; height: 16px; colorize: shuf-ta.has-hover ? Theme.text : Theme.text-dim; x: 8px; y: 8px; }
                                 shuf-ta := TouchArea { }
                             }
                             Rectangle {
                                 width: 36px; height: 36px; border-radius: 18px;
-                                background: prev-ta.has-hover ? #ffffff0c : transparent;
-                                Image { source: @image-url("icons/prev.svg"); width: 20px; height: 20px; colorize: prev-ta.has-hover ? #ffffff : #b0b0b0; x: 8px; y: 8px; }
+                                background: prev-ta.has-hover ? Theme.hover-veil : transparent;
+                                Image { source: @image-url("icons/prev.svg"); width: 20px; height: 20px; colorize: prev-ta.has-hover ? Theme.text : Theme.text-muted; x: 8px; y: 8px; }
                                 prev-ta := TouchArea { clicked => { prev-track(); } }
                             }
                             Rectangle {
                                 width: 44px; height: 44px; border-radius: 22px;
-                                background: #ffffff;
-                                if is-playing: Image { source: @image-url("icons/pause.svg"); width: 20px; height: 20px; colorize: #000000; x: 12px; y: 12px; }
-                                if !is-playing: Image { source: @image-url("icons/play.svg"); width: 20px; height: 20px; colorize: #000000; x: 13px; y: 12px; }
+                                background: Theme.accent;
+                                drop-shadow-blur: 12px; drop-shadow-color: Theme.accent-soft;
+                                if is-playing: Image { source: @image-url("icons/pause.svg"); width: 20px; height: 20px; colorize: Theme.on-accent; x: 12px; y: 12px; }
+                                if !is-playing: Image { source: @image-url("icons/play.svg"); width: 20px; height: 20px; colorize: Theme.on-accent; x: 13px; y: 12px; }
                                 TouchArea { clicked => { toggle-play-pause(); } }
                             }
                             Rectangle {
                                 width: 36px; height: 36px; border-radius: 18px;
-                                background: next-ta.has-hover ? #ffffff0c : transparent;
-                                Image { source: @image-url("icons/next.svg"); width: 20px; height: 20px; colorize: next-ta.has-hover ? #ffffff : #b0b0b0; x: 8px; y: 8px; }
+                                background: next-ta.has-hover ? Theme.hover-veil : transparent;
+                                Image { source: @image-url("icons/next.svg"); width: 20px; height: 20px; colorize: next-ta.has-hover ? Theme.text : Theme.text-muted; x: 8px; y: 8px; }
                                 next-ta := TouchArea { clicked => { next-track(); } }
                             }
                             Rectangle {
                                 width: 32px; height: 32px; border-radius: 16px;
-                                background: rep-ta.has-hover ? #ffffff0c : transparent;
-                                Image { source: @image-url("icons/repeat.svg"); width: 16px; height: 16px; colorize: rep-ta.has-hover ? #ffffff : #4a4a4a; x: 8px; y: 8px; }
+                                background: rep-ta.has-hover ? Theme.hover-veil : transparent;
+                                Image { source: @image-url("icons/repeat.svg"); width: 16px; height: 16px; colorize: rep-ta.has-hover ? Theme.text : Theme.text-dim; x: 8px; y: 8px; }
                                 rep-ta := TouchArea { }
                             }
                         }
@@ -2874,7 +3454,7 @@ export component NativeShellWindow inherits Window {
                             spacing: 10px;
                             padding-left: 16px; padding-right: 16px;
 
-                            Text { text: current-time; font-size: 11px; font-weight: 500; color: #6a6a6a; width: 36px; horizontal-alignment: right; }
+                            Text { text: current-time; font-size: 11px; font-weight: 500; color: Theme.text-muted; width: 36px; horizontal-alignment: right; }
 
                             prog-ta := TouchArea {
                                 horizontal-stretch: 1; height: 14px;
@@ -2884,12 +3464,12 @@ export component NativeShellWindow inherits Window {
                                     x: 0; y: (parent.height - self.height) / 2;
                                     height: prog-ta.has-hover ? 5px : 3px;
                                     width: parent.width; border-radius: 2px;
-                                    background: #2a2a2a;
+                                    background: Theme.surface-hover;
                                     Rectangle {
                                         x: 0; y: 0;
                                         width: parent.width * progress;
                                         height: parent.height; border-radius: 2px;
-                                        background: prog-ta.has-hover ? #e85d5d : #ffffff;
+                                        background: prog-ta.has-hover ? Theme.accent-strong : Theme.accent;
                                     }
                                 }
                                 if prog-ta.has-hover: Rectangle {
@@ -2900,7 +3480,7 @@ export component NativeShellWindow inherits Window {
                                 }
                             }
 
-                            Text { text: total-time; font-size: 11px; font-weight: 500; color: #6a6a6a; width: 36px; }
+                            Text { text: total-time; font-size: 11px; font-weight: 500; color: Theme.text-muted; width: 36px; }
                         }
                     }
 
@@ -2908,11 +3488,11 @@ export component NativeShellWindow inherits Window {
                     HorizontalLayout {
                         width: compact ? 52px : 220px; spacing: 10px; alignment: end;
 
-                        IconBtn { svg-icon: @image-url("icons/queue.svg"); use-svg: true; active: queue-pane-open; icon-color: queue-pane-open ? #ffffff : #4a4a4a; clicked => { toggle-queue-pane(); } }
+                        IconBtn { svg-icon: @image-url("icons/queue.svg"); use-svg: true; active: queue-pane-open; icon-color: queue-pane-open ? Theme.accent : Theme.text-dim; clicked => { toggle-queue-pane(); } }
 
                         if !compact: HorizontalLayout {
                             spacing: 8px; alignment: center;
-                            Image { source: @image-url("icons/volume.svg"); width: 18px; height: 18px; colorize: #5a5a5a; vertical-alignment: center; }
+                            Image { source: @image-url("icons/volume.svg"); width: 18px; height: 18px; colorize: Theme.text-muted; vertical-alignment: center; }
 
                             vol-ta := TouchArea {
                                 width: 80px; height: 16px;
@@ -2923,7 +3503,7 @@ export component NativeShellWindow inherits Window {
                                     y: (parent.height - self.height) / 2;
                                     height: vol-ta.has-hover ? 5px : 3px;
                                     width: parent.width; border-radius: 2px;
-                                    background: #2a2a2a;
+                                    background: Theme.surface-hover;
                                     Rectangle {
                                         x: 0; y: 0;
                                         width: parent.width * volume;
@@ -2935,7 +3515,7 @@ export component NativeShellWindow inherits Window {
                                     x: parent.width * volume - 5px;
                                     y: parent.height / 2 - 5px;
                                     width: 10px; height: 10px; border-radius: 5px;
-                                    background: #ffffff;
+                                        background: Theme.accent;
                                 }
                             }
                         }
@@ -2943,8 +3523,7 @@ export component NativeShellWindow inherits Window {
                 }
             }
 
-        } // VerticalLayout
-    } // FocusScope
+    } // main UI VerticalLayout (direct Window child)
 
     // Dismiss overlay (covers entire window, behind dropdown)
     if search-dropdown-open && search-suggestions.length > 0: Rectangle {
@@ -2991,14 +3570,86 @@ export component NativeShellWindow inherits Window {
                 }
                 sug-ctx := PopupWindow {
                     x: sug-ta.mouse-x; y: sug-ta.mouse-y;
-                    width: 180px;
+                    width: 200px;
                     Rectangle {
-                        background: #2a2a2a; border-radius: 8px; border-color: #ffffff15; border-width: 1px;
-                        drop-shadow-blur: 12px; drop-shadow-color: #00000080;
+                        background: Theme.glass-strong; border-radius: Theme.radius; border-color: Theme.border; border-width: 1px;
+                        drop-shadow-blur: 22px; drop-shadow-color: #00000080; drop-shadow-offset-y: 6px;
                         VerticalLayout {
                             padding: 6px; spacing: 2px;
-                            CtxMenuItem { use-image: false; glyph: "\u{25B6}"; glyph-size: 13px; label: "Play"; clicked => { play-song(item.video-id, item.title, item.artist, item.duration-secs); search-dropdown-open = false; search-inp.text = ""; live-search(""); } }
-                            CtxMenuItem { use-image: false; glyph: "\u{2795}"; glyph-size: 13px; label: "Add to queue"; clicked => { queue-song(item.video-id, item.title, item.artist); } }
+                            CtxMenuItem { icon: @image-url("icons/play.svg"); label: "Play"; clicked => { play-song(item.video-id, item.title, item.artist, item.duration-secs); search-dropdown-open = false; search-inp.text = ""; live-search(""); } }
+                            CtxMenuItem { icon: @image-url("icons/next.svg"); label: "Play next"; clicked => { play-next-song(item.video-id, item.title, item.artist, item.duration-secs); } }
+                            CtxMenuItem { icon: @image-url("icons/plus.svg"); label: "Add to queue"; clicked => { queue-song(item.video-id, item.title, item.artist); } }
+                            CtxMenuItem { icon: @image-url("icons/radio.svg"); label: "Go to song radio"; clicked => { start-song-radio(item.video-id); search-dropdown-open = false; } }
+                            CtxMenuItem { icon: @image-url("icons/radio.svg"); label: "Artist radio"; clicked => { start-artist-radio(item.video-id, item.artist); search-dropdown-open = false; } }
+                            CtxMenuItem { icon: @image-url("icons/artist.svg"); label: "Go to artist"; clicked => { open-artist-for(item.video-id, item.artist); search-dropdown-open = false; } }
+                            CtxMenuItem { icon: @image-url("icons/plus.svg"); label: "Add to playlist"; clicked => { open-add-to-playlist(item.video-id, item.title, item.artist, item.duration-secs); } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Add-to-playlist / New-playlist modal ──────────────────────────────────
+    if show-playlist-modal: Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height;
+        background: #000000a0;
+        TouchArea { clicked => { show-playlist-modal = false; } }
+        Rectangle {
+            width: min(420px, root.width - 48px);
+            height: pl-modal-col.preferred-height + 36px;
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            border-radius: 16px; background: #161616;
+            border-color: #262626; border-width: 1px;
+            drop-shadow-blur: 40px; drop-shadow-color: #000000c0; drop-shadow-offset-y: 12px;
+            TouchArea { }
+            pl-modal-col := VerticalLayout {
+                padding: 20px; spacing: 14px;
+                HorizontalLayout {
+                    Text {
+                        text: pending-song-vid == "" ? "New playlist" : "Add to playlist";
+                        font-size: 18px; font-weight: 700; color: #ffffff;
+                        horizontal-stretch: 1; vertical-alignment: center;
+                    }
+                    IconBtn { svg-icon: @image-url("icons/close.svg"); use-svg: true; icon-color: #8a8a8a; clicked => { show-playlist-modal = false; } }
+                }
+                if pending-song-vid != "": Text {
+                    text: pending-song-title + "  •  " + pending-song-artist;
+                    font-size: 12px; color: #7a7a7a; overflow: elide;
+                }
+                HorizontalLayout { spacing: 8px;
+                    new-pl-name := LineEdit { placeholder-text: "New playlist name…"; horizontal-stretch: 1; }
+                    Rectangle {
+                        width: 84px; height: 36px; border-radius: 8px;
+                        background: create-ta.has-hover ? Theme.accent-strong : Theme.accent;
+                        Text { text: "Create"; color: #ffffff; font-size: 13px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                        create-ta := TouchArea { clicked => { if new-pl-name.text != "" { submit-new-playlist(new-pl-name.text); new-pl-name.text = ""; } } }
+                    }
+                }
+                if modal-playlists.length > 0: Rectangle { height: 1px; background: #262626; }
+                if modal-playlists.length > 0: Text { text: "Your playlists"; font-size: 12px; color: #7a7a7a; }
+                if modal-playlists.length > 0: Flickable {
+                    height: min(240px, modal-list.preferred-height);
+                    viewport-height: modal-list.preferred-height;
+                    modal-list := VerticalLayout {
+                        spacing: 2px;
+                        for pl in modal-playlists: Rectangle {
+                            height: 44px; border-radius: 8px;
+                            background: pl-item-ta.has-hover ? #ffffff10 : transparent;
+                            HorizontalLayout {
+                                padding-left: 10px; padding-right: 10px; spacing: 10px; alignment: start;
+                                Rectangle {
+                                    width: 32px; height: 32px; border-radius: 6px; background: #2a2a2a;
+                                    y: (parent.height - self.height) / 2;
+                                    Text { text: "♪"; color: #6a6a6a; font-size: 15px; horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                                VerticalLayout { alignment: center; horizontal-stretch: 1;
+                                    Text { text: pl.title; font-size: 13px; font-weight: 500; color: #e0e0e0; overflow: elide; }
+                                    Text { text: pl.count-text; font-size: 11px; color: #6a6a6a; }
+                                }
+                            }
+                            pl-item-ta := TouchArea { clicked => { add-to-existing-playlist(pl.playlist-id); } }
                         }
                     }
                 }
@@ -3030,8 +3681,8 @@ export component NativeShellWindow inherits Window {
                 HorizontalLayout {
                     spacing: 14px; alignment: start;
                     Rectangle {
-                        width: 46px; height: 46px; border-radius: 12px; background: #e85d5d1a;
-                        Text { text: "\u{25B6}"; color: #e85d5d; font-size: 22px; horizontal-alignment: center; vertical-alignment: center; }
+                        width: 46px; height: 46px; border-radius: 12px; background: Theme.accent-soft;
+                        Text { text: "\u{25B6}"; color: Theme.accent; font-size: 22px; horizontal-alignment: center; vertical-alignment: center; }
                     }
                     VerticalLayout {
                         alignment: center; spacing: 3px; horizontal-stretch: 1;
@@ -3060,7 +3711,7 @@ export component NativeShellWindow inherits Window {
                             if ytdlp-installed && addon-installing != "ytdlp": Text { text: "\u{2713} Installed"; font-size: 13px; color: #4a9d5a; vertical-alignment: center; }
                             if !ytdlp-installed && addon-installing != "ytdlp": Rectangle {
                                 width: 100px; height: 34px; border-radius: 8px;
-                                background: addon-busy ? #181818 : (ob-yt-ta.has-hover ? #f06a6a : #e85d5d);
+                                background: addon-busy ? Theme.surface-hover : (ob-yt-ta.has-hover ? Theme.accent-strong : Theme.accent);
                                 animate background { duration: 100ms; }
                                 Text { text: "Install"; font-size: 13px; font-weight: 600; color: addon-busy ? #5a5a5a : #ffffff; horizontal-alignment: center; vertical-alignment: center; }
                                 ob-yt-ta := TouchArea { clicked => { if !addon-busy { install-ytdlp(); } } }

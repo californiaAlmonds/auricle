@@ -45,23 +45,32 @@ pub struct Song {
 }
 
 fn map_search_results(results: Vec<ytmapi_rs::parse::SearchResultSong>) -> Vec<Song> {
-    results.into_iter().map(|r| Song {
-        video_id: r.video_id.get_raw().to_string(),
-        name: r.title,
-        artist: ArtistRef {
-            name: r.artist.clone(),
-            browse_id: String::new(),
-        },
-        album: r.album.map(|a| AlbumRef {
-            name: a.name,
-            browse_id: a.id.get_raw().to_string(),
-        }),
-        duration: parse_duration(&r.duration),
-        thumbnails: r.thumbnails.into_iter().map(|t| Thumbnail {
-            url: t.url,
-            width: t.width as u64,
-            height: t.height as u64,
-        }).collect(),
+    results.into_iter().map(|r| {
+        let song = Song {
+            video_id: r.video_id.get_raw().to_string(),
+            name: r.title,
+            artist: ArtistRef {
+                name: r.artist.clone(),
+                browse_id: String::new(),
+            },
+            album: r.album.map(|a| AlbumRef {
+                name: a.name,
+                browse_id: a.id.get_raw().to_string(),
+            }),
+            duration: parse_duration(&r.duration),
+            thumbnails: r.thumbnails.into_iter().map(|t| Thumbnail {
+                url: t.url,
+                width: t.width as u64,
+                height: t.height as u64,
+            }).collect(),
+        };
+        // Cache album/artist ids so playback + context menus can resolve
+        // "go to album/artist" for this video later, by id.
+        let (album_name, album_id) = song.album.as_ref()
+            .map(|a| (a.name.as_str(), a.browse_id.as_str()))
+            .unwrap_or(("", ""));
+        crate::core::playback::register_song_meta(&song.video_id, album_name, album_id, &song.artist.browse_id);
+        song
     }).collect()
 }
 
@@ -69,7 +78,7 @@ fn map_playlist_items(results: Vec<ytmapi_rs::parse::PlaylistItem>) -> Vec<Song>
     results.into_iter().filter_map(|p| {
         match p {
             ytmapi_rs::parse::PlaylistItem::Video(v) => {
-                  Some(Song {
+                  let song = Song {
                     video_id: v.video_id.get_raw().to_string(),
                     name: v.title,
                     artist: ArtistRef {
@@ -83,7 +92,9 @@ fn map_playlist_items(results: Vec<ytmapi_rs::parse::PlaylistItem>) -> Vec<Song>
                         width: t.width as u64,
                         height: t.height as u64,
                     }).collect(),
-                })
+                };
+                  crate::core::playback::register_song_meta(&song.video_id, "", "", &song.artist.browse_id);
+                  Some(song)
             },
             _ => None
         }
@@ -128,13 +139,424 @@ fn make_song_item(t: &core::playback::NowPlaying) -> SongItem {
         video_id: SharedString::from(t.video_id.as_str()),
         title: SharedString::from(t.title.as_str()),
         artist: SharedString::from(t.artist.as_str()),
-        album: SharedString::from(""),
+        album: SharedString::from(t.album.as_str()),
         duration_str: SharedString::from(dur_str.as_str()),
         avatar_letter: SharedString::from(avatar.as_str()),
         duration_secs: t.duration_secs as i32,
         thumbnail,
         has_thumbnail,
     }
+}
+
+/// Build a `StoredSong` from the scalar fields carried by a context-menu action,
+/// backfilling album/browse-ids from the session metadata registry.
+fn stored_song_from_parts(vid: &str, title: &str, artist: &str, dur: u32) -> core::persistence::StoredSong {
+    let meta = core::playback::get_song_meta(vid).unwrap_or_default();
+    core::persistence::StoredSong {
+        video_id: vid.to_string(),
+        title: title.to_string(),
+        artist: artist.to_string(),
+        duration_secs: dur,
+        album: meta.album,
+        album_id: meta.album_id,
+        artist_id: meta.artist_id,
+    }
+}
+
+/// In-place Fisher-Yates shuffle using a time-seeded LCG (no extra crate needed).
+fn shuffle_vec<T>(v: &mut [T]) {
+    let mut seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(1)
+        | 1;
+    let n = v.len();
+    for i in (1..n).rev() {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let j = ((seed >> 33) as usize) % (i + 1);
+        v.swap(i, j);
+    }
+}
+
+/// Push the current local playlists into the add-to-playlist modal's list.
+fn refresh_modal_playlists(ui: &NativeShellWindow) {
+    let items: Vec<PlaylistItem> = core::library::local_playlists().into_iter().map(|p| {
+        let n = p.songs.len();
+        PlaylistItem {
+            title: SharedString::from(p.name.as_str()),
+            playlist_id: SharedString::from(p.id.as_str()),
+            thumbnail: Default::default(),
+            has_thumbnail: false,
+            count_text: SharedString::from(format!("{} song{}", n, if n == 1 { "" } else { "s" }).as_str()),
+        }
+    }).collect();
+    ui.set_modal_playlists(ModelRc::new(VecModel::from(items)));
+}
+
+/// Compute the "your artists" list for the sidebar: followed artists first, then
+/// the most-listened artists from your liked songs (dedup by name).
+fn compute_sidebar_artists() -> Vec<ArtistItem> {
+    use std::collections::{HashMap, HashSet};
+    let mut out: Vec<ArtistItem> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for a in core::library::followed_artists() {
+        if !a.name.is_empty() && seen.insert(a.name.to_lowercase()) {
+            out.push(ArtistItem {
+                name: SharedString::from(a.name.as_str()),
+                browse_id: SharedString::from(a.browse_id.as_str()),
+                thumbnail: Default::default(),
+                has_thumbnail: false,
+                subscriber_count: SharedString::default(),
+            });
+        }
+    }
+    let liked = crate::core::bridge::playback_core().get_liked_songs();
+    let mut counts: HashMap<String, (usize, String, String)> = HashMap::new();
+    for s in &liked {
+        if s.artist.is_empty() { continue; }
+        let e = counts.entry(s.artist.to_lowercase()).or_insert((0, s.artist.clone(), String::new()));
+        e.0 += 1;
+        if e.2.is_empty() && !s.artist_id.is_empty() { e.2 = s.artist_id.clone(); }
+    }
+    let mut ranked: Vec<(usize, String, String)> = counts.into_values().collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, name, aid) in ranked {
+        if out.len() >= 8 { break; }
+        if seen.insert(name.to_lowercase()) {
+            out.push(ArtistItem {
+                name: SharedString::from(name.as_str()),
+                browse_id: SharedString::from(aid.as_str()),
+                thumbnail: Default::default(),
+                has_thumbnail: false,
+                subscriber_count: SharedString::default(),
+            });
+        }
+    }
+    out
+}
+
+/// Refresh the sidebar "your artists" + "your playlists" shortcut lists.
+fn refresh_sidebar(ui: &NativeShellWindow) {
+    ui.set_sidebar_artists(ModelRc::new(VecModel::from(compute_sidebar_artists())));
+    let pls: Vec<PlaylistItem> = core::library::local_playlists().into_iter().map(|p| {
+        let n = p.songs.len();
+        // Use the first song's cached thumbnail as the playlist cover.
+        let (thumb, has) = p.songs.first()
+            .map(|s| load_cached_thumb(&std::env::temp_dir().join(format!("ytm_thumb_{}.jpg", s.video_id))))
+            .unwrap_or_else(|| (Default::default(), false));
+        PlaylistItem {
+            title: SharedString::from(p.name.as_str()),
+            playlist_id: SharedString::from(p.id.as_str()),
+            thumbnail: thumb,
+            has_thumbnail: has,
+            count_text: SharedString::from(format!("{} song{}", n, if n == 1 { "" } else { "s" }).as_str()),
+        }
+    }).collect();
+    ui.set_sidebar_playlists(ModelRc::new(VecModel::from(pls)));
+    ui.set_sidebar_albums(ModelRc::new(VecModel::from(compute_sidebar_albums())));
+    // Load artist + album images for the sidebar rows in the background.
+    spawn_sidebar_artist_thumbs(ui.as_weak());
+    spawn_sidebar_album_thumbs(ui.as_weak());
+}
+
+/// Background: fetch artist images for the sidebar "your artists" rows, cache
+/// them, and fill the rows. Followed artists carry a channel id; artists derived
+/// from liked songs often do not, so we resolve those by name via search (whose
+/// result already carries a usable thumbnail). Rows are matched by name so the
+/// name-only artists get their image too.
+fn spawn_sidebar_artist_thumbs(ui_weak: slint::Weak<NativeShellWindow>) {
+    // (name, browse_id) — ArtistItem holds a non-Send Image, so extract plain data.
+    let seeds: Vec<(String, String)> = compute_sidebar_artists().iter()
+        .map(|a| (a.name.to_string(), a.browse_id.to_string()))
+        .filter(|(n, _)| !n.is_empty())
+        .collect();
+    if seeds.is_empty() { return; }
+    std::thread::spawn(move || {
+        let Some(http) = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(8)).build().ok() else { return };
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok();
+        for (name, bid) in seeds {
+            // Cache key: channel id when known, else the (lowercased) name.
+            let key = if bid.is_empty() { format!("name_{}", name.to_lowercase()) } else { bid.clone() };
+            let path = library_thumb_path("artist", &key);
+            if !path.exists() {
+                let mut url = String::new();
+                if let Some(ref rt) = rt {
+                    let name_q = name.clone();
+                    let bid_q = bid.clone();
+                    url = rt.block_on(async {
+                        use ytmapi_rs::YtMusic;
+                        use ytmapi_rs::common::ArtistChannelID;
+                        use ytmapi_rs::query::{SearchQuery, search::ArtistsFilter};
+                        let api = YtMusic::new_unauthenticated().await.ok()?;
+                        // Have a channel id → fetch the artist page thumbnail.
+                        if !bid_q.is_empty() {
+                            if let Ok(art) = api.get_artist(ArtistChannelID::from_raw(&bid_q)).await {
+                                return art.thumbnails.last().map(|t| t.url.clone());
+                            }
+                        }
+                        // Otherwise resolve by name; the search result carries a thumbnail.
+                        let res = api.query(SearchQuery::new(name_q).with_filter(ArtistsFilter)).await.ok()?;
+                        let first = res.into_iter().next()?;
+                        if let Some(t) = first.thumbnails.last() { return Some(t.url.clone()); }
+                        let art = api.get_artist(first.browse_id).await.ok()?;
+                        art.thumbnails.last().map(|t| t.url.clone())
+                    }).unwrap_or_default();
+                }
+                if url.is_empty() { continue; }
+                if let Ok(resp) = http.get(&url).send() {
+                    if let Ok(bytes) = resp.bytes() { let _ = std::fs::write(&path, &bytes); }
+                }
+            }
+            if path.exists() {
+                let name_key = name.to_lowercase();
+                let uiw = ui_weak.clone();
+                let p = path.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = uiw.upgrade() {
+                        if let Ok(img) = slint::Image::load_from_path(&p) {
+                            let sb = ui.get_sidebar_artists();
+                            for i in 0..sb.row_count() {
+                                if let Some(mut row) = sb.row_data(i) {
+                                    if row.name.as_str().to_lowercase() == name_key {
+                                        row.thumbnail = img;
+                                        row.has_thumbnail = true;
+                                        sb.set_row_data(i, row);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }).ok();
+            }
+        }
+    });
+}
+
+/// Albums from recently-listened songs (currently playing first, then history),
+/// de-duplicated and newest-first, for the sidebar "recently listened" shortcut.
+fn compute_sidebar_albums() -> Vec<AlbumItem> {
+    use std::collections::HashSet;
+    let pb = crate::core::bridge::playback_core();
+    let mut entries: Vec<core::playback::NowPlaying> = Vec::new();
+    let np = pb.now_playing();
+    if !np.album_id.is_empty() && !np.album.is_empty() { entries.push(np); }
+    entries.extend(pb.get_history());
+    let mut out: Vec<AlbumItem> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for e in entries {
+        if e.album_id.is_empty() || e.album.is_empty() { continue; }
+        if !seen.insert(e.album_id.clone()) { continue; }
+        let (thumb, has) = load_cached_thumb(&library_thumb_path("album", &e.album_id));
+        out.push(AlbumItem {
+            title: SharedString::from(e.album.as_str()),
+            browse_id: SharedString::from(e.album_id.as_str()),
+            artist: SharedString::from(e.artist.as_str()),
+            year: SharedString::default(),
+            thumbnail: thumb,
+            has_thumbnail: has,
+        });
+        if out.len() >= 8 { break; }
+    }
+    out
+}
+
+/// Background: fetch album art for the sidebar "recently listened" albums.
+fn spawn_sidebar_album_thumbs(ui_weak: slint::Weak<NativeShellWindow>) {
+    let ids: Vec<String> = compute_sidebar_albums().iter()
+        .filter(|a| !a.has_thumbnail)
+        .map(|a| a.browse_id.to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if ids.is_empty() { return; }
+    std::thread::spawn(move || {
+        let Some(http) = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(8)).build().ok() else { return };
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok();
+        for id in ids {
+            let path = library_thumb_path("album", &id);
+            if !path.exists() {
+                let mut url = String::new();
+                if let Some(ref rt) = rt {
+                    let id_q = id.clone();
+                    url = rt.block_on(async {
+                        use ytmapi_rs::YtMusic;
+                        use ytmapi_rs::common::AlbumID;
+                        let api = YtMusic::new_unauthenticated().await.ok()?;
+                        let alb = api.get_album(AlbumID::from_raw(&id_q)).await.ok()?;
+                        alb.thumbnails.last().map(|t| t.url.clone())
+                    }).unwrap_or_default();
+                }
+                if url.is_empty() { continue; }
+                if let Ok(resp) = http.get(&url).send() {
+                    if let Ok(bytes) = resp.bytes() { let _ = std::fs::write(&path, &bytes); }
+                }
+            }
+            if path.exists() {
+                let id2 = id.clone();
+                let uiw = ui_weak.clone();
+                let p = path.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = uiw.upgrade() {
+                        if let Ok(img) = slint::Image::load_from_path(&p) {
+                            let sb = ui.get_sidebar_albums();
+                            for i in 0..sb.row_count() {
+                                if let Some(mut row) = sb.row_data(i) {
+                                    if row.browse_id == id2 {
+                                        row.thumbnail = img;
+                                        row.has_thumbnail = true;
+                                        sb.set_row_data(i, row);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }).ok();
+            }
+        }
+    });
+}
+
+/// Temp-cache path for a library artist/album thumbnail.
+fn library_thumb_path(kind: &str, id: &str) -> std::path::PathBuf {
+    let safe: String = id.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    std::env::temp_dir().join(format!("ytm_lib_{}_{}.jpg", kind, safe))
+}
+
+/// Load a cached thumbnail image if it exists on disk.
+fn load_cached_thumb(path: &std::path::Path) -> (slint::Image, bool) {
+    if path.exists() {
+        if let Ok(img) = slint::Image::load_from_path(path) {
+            return (img, true);
+        }
+    }
+    (Default::default(), false)
+}
+
+/// Background: fetch missing album-art for the saved-albums list (from the stored
+/// thumbnail URL, or via the API if none), cache it, and update the model rows.
+fn spawn_album_thumb_loader(ui_weak: slint::Weak<NativeShellWindow>) {
+    std::thread::spawn(move || {
+        let albums = core::library::saved_albums();
+        let Some(http) = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(8)).build().ok() else { return };
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok();
+        for a in albums {
+            if a.browse_id.is_empty() { continue; }
+            let path = library_thumb_path("album", &a.browse_id);
+            if !path.exists() {
+                let mut url = a.thumbnail_url.clone();
+                if url.is_empty() {
+                    if let Some(ref rt) = rt {
+                        url = rt.block_on(async {
+                            use ytmapi_rs::YtMusic;
+                            use ytmapi_rs::common::AlbumID;
+                            let api = YtMusic::new_unauthenticated().await.ok()?;
+                            let alb = api.get_album(AlbumID::from_raw(&a.browse_id)).await.ok()?;
+                            alb.thumbnails.last().map(|t| t.url.clone())
+                        }).unwrap_or_default();
+                        if !url.is_empty() { core::library::set_album_thumbnail(&a.browse_id, &url); }
+                    }
+                }
+                if url.is_empty() { continue; }
+                if let Ok(resp) = http.get(&url).send() {
+                    if let Ok(bytes) = resp.bytes() { let _ = std::fs::write(&path, &bytes); }
+                }
+            }
+            if path.exists() {
+                let bid = a.browse_id.clone();
+                let uiw = ui_weak.clone();
+                let p = path.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = uiw.upgrade() {
+                        if let Ok(img) = slint::Image::load_from_path(&p) {
+                            let model = ui.get_library_albums();
+                            for i in 0..model.row_count() {
+                                if let Some(mut row) = model.row_data(i) {
+                                    if row.browse_id == bid {
+                                        row.thumbnail = img;
+                                        row.has_thumbnail = true;
+                                        model.set_row_data(i, row);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }).ok();
+            }
+        }
+    });
+}
+
+/// Background: fetch missing artist images for the followed-artists list, cache
+/// them, and update the model rows (and the sidebar).
+fn spawn_artist_thumb_loader(ui_weak: slint::Weak<NativeShellWindow>) {
+    std::thread::spawn(move || {
+        let artists = core::library::followed_artists();
+        let Some(http) = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(8)).build().ok() else { return };
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok();
+        for a in artists {
+            if a.browse_id.is_empty() { continue; }
+            let path = library_thumb_path("artist", &a.browse_id);
+            if !path.exists() {
+                let mut url = a.thumbnail_url.clone();
+                if url.is_empty() {
+                    if let Some(ref rt) = rt {
+                        url = rt.block_on(async {
+                            use ytmapi_rs::YtMusic;
+                            use ytmapi_rs::common::ArtistChannelID;
+                            let api = YtMusic::new_unauthenticated().await.ok()?;
+                            let art = api.get_artist(ArtistChannelID::from_raw(&a.browse_id)).await.ok()?;
+                            art.thumbnails.last().map(|t| t.url.clone())
+                        }).unwrap_or_default();
+                        if !url.is_empty() { core::library::set_artist_thumbnail(&a.browse_id, &url); }
+                    }
+                }
+                if url.is_empty() { continue; }
+                if let Ok(resp) = http.get(&url).send() {
+                    if let Ok(bytes) = resp.bytes() { let _ = std::fs::write(&path, &bytes); }
+                }
+            }
+            if path.exists() {
+                let bid = a.browse_id.clone();
+                let uiw = ui_weak.clone();
+                let p = path.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = uiw.upgrade() {
+                        if let Ok(img) = slint::Image::load_from_path(&p) {
+                            let model = ui.get_library_artists();
+                            for i in 0..model.row_count() {
+                                if let Some(mut row) = model.row_data(i) {
+                                    if row.browse_id == bid {
+                                        row.thumbnail = img.clone();
+                                        row.has_thumbnail = true;
+                                        model.set_row_data(i, row);
+                                        break;
+                                    }
+                                }
+                            }
+                            // Also update the sidebar artists row if present.
+                            let sb = ui.get_sidebar_artists();
+                            for i in 0..sb.row_count() {
+                                if let Some(mut row) = sb.row_data(i) {
+                                    if row.browse_id == bid {
+                                        row.thumbnail = img.clone();
+                                        row.has_thumbnail = true;
+                                        sb.set_row_data(i, row);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }).ok();
+            }
+        }
+    });
 }
 
 fn fetch_autoplay_queue(
@@ -171,6 +593,7 @@ fn fetch_autoplay_queue(
                 title: r.title,
                 artist: r.author,
                 duration_secs: dur,
+                ..Default::default()
             }
         }).collect::<Vec<_>>()
     });
@@ -187,6 +610,30 @@ fn fetch_autoplay_queue(
         recent.insert(pb.now_playing().video_id);
         let deduped: Vec<_> = songs.iter().filter(|s| !recent.contains(&s.video_id)).cloned().collect();
         if deduped.is_empty() { songs } else { deduped }
+    };
+
+    // Gently bias the radio toward the user's taste profile (followed artists,
+    // liked-song artists, saved-album artists) WITHOUT replacing YouTube's
+    // ordering: a familiar artist only nudges a song a few spots earlier, while
+    // most of the queue stays whatever radio returned — so unfamiliar music keeps
+    // coming through and discovery is preserved. `BIAS` is the one subtlety knob.
+    let songs: Vec<core::playback::NowPlaying> = {
+        let taste = TasteAffinity::build();
+        if taste.is_empty() {
+            songs
+        } else {
+            const BIAS: f32 = 2.5; // max spots a full-taste match can climb
+            let mut ranked: Vec<(f32, usize, core::playback::NowPlaying)> = songs
+                .into_iter()
+                .enumerate()
+                .map(|(i, s)| (i as f32 - BIAS * taste.score(&s.artist), i, s))
+                .collect();
+            ranked.sort_by(|a, b| a.0
+                .partial_cmp(&b.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.1.cmp(&b.1)));
+            ranked.into_iter().map(|(_, _, s)| s).collect()
+        }
     };
 
     if songs.is_empty() {
@@ -488,6 +935,164 @@ fn fetch_trending_songs(ui_weak: slint::Weak<NativeShellWindow>) {
     });
 }
 
+/// Ranked "taste profile" artist names, combining followed artists (strong
+/// signal) + liked-song artists (by frequency) + saved-album artists. This is the
+/// shared taste signal Home uses to bias what it surfaces. (H4)
+fn taste_profile_top_artists(limit: usize) -> Vec<String> {
+    use std::collections::HashMap;
+    let mut scores: HashMap<String, (f32, String)> = HashMap::new();
+    for a in core::library::followed_artists() {
+        let n = a.name.trim();
+        if !n.is_empty() { scores.entry(n.to_lowercase()).or_insert((0.0, n.to_string())).0 += 5.0; }
+    }
+    for s in crate::core::bridge::playback_core().get_liked_songs() {
+        let n = s.artist.trim();
+        if !n.is_empty() { scores.entry(n.to_lowercase()).or_insert((0.0, n.to_string())).0 += 1.0; }
+    }
+    for al in core::library::saved_albums() {
+        let n = al.artist.trim();
+        if !n.is_empty() { scores.entry(n.to_lowercase()).or_insert((0.0, n.to_string())).0 += 2.0; }
+    }
+    let mut ranked: Vec<(f32, String)> = scores.into_values().collect();
+    ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.into_iter().take(limit).map(|(_, n)| n).collect()
+}
+
+/// Lightweight taste-affinity lookup by artist name, blending followed artists,
+/// liked-song artists (by frequency), and saved-album artists. Used to *gently
+/// bias* (never replace) the autoplay radio toward the user's taste.
+struct TasteAffinity {
+    followed: std::collections::HashSet<String>,
+    liked_counts: std::collections::HashMap<String, u32>,
+    saved_artists: std::collections::HashSet<String>,
+    max_liked: u32,
+}
+
+impl TasteAffinity {
+    fn build() -> Self {
+        use std::collections::{HashMap, HashSet};
+        let mut followed = HashSet::new();
+        for a in core::library::followed_artists() {
+            let n = a.name.trim().to_lowercase();
+            if !n.is_empty() { followed.insert(n); }
+        }
+        let mut saved_artists = HashSet::new();
+        for al in core::library::saved_albums() {
+            let n = al.artist.trim().to_lowercase();
+            if !n.is_empty() { saved_artists.insert(n); }
+        }
+        let mut liked_counts: HashMap<String, u32> = HashMap::new();
+        for s in crate::core::bridge::playback_core().get_liked_songs() {
+            let n = s.artist.trim().to_lowercase();
+            if !n.is_empty() { *liked_counts.entry(n).or_insert(0) += 1; }
+        }
+        let max_liked = liked_counts.values().copied().max().unwrap_or(1).max(1);
+        TasteAffinity { followed, liked_counts, saved_artists, max_liked }
+    }
+
+    /// 0.0 (unfamiliar) .. ~1.5 (strongly in taste). Weights: followed 1.0,
+    /// liked-frequency up to 0.6, saved-album artist 0.4.
+    fn score(&self, artist: &str) -> f32 {
+        let n = artist.trim().to_lowercase();
+        if n.is_empty() { return 0.0; }
+        let mut w = 0.0f32;
+        if self.followed.contains(&n) { w += 1.0; }
+        if let Some(&c) = self.liked_counts.get(&n) {
+            w += 0.6 * (c as f32 / self.max_liked as f32);
+        }
+        if self.saved_artists.contains(&n) { w += 0.4; }
+        w.min(1.5)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.followed.is_empty() && self.liked_counts.is_empty() && self.saved_artists.is_empty()
+    }
+}
+
+/// H1: "From artists you follow" — top songs from each followed artist.
+fn fetch_followed_songs(ui_weak: slint::Weak<NativeShellWindow>) {
+    let followed = core::library::followed_artists();
+    if followed.is_empty() { return; }
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let raw: Vec<(String, String, String, u32, String)> = rt.block_on(async {
+            use ytmapi_rs::YtMusic;
+            use ytmapi_rs::query::{SearchQuery, search::SongsFilter};
+            let api = match YtMusic::new_unauthenticated().await { Ok(a) => a, Err(_) => return Vec::new() };
+            let mut out: Vec<(String, String, String, u32, String)> = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for a in followed.iter().take(8) {
+                if a.name.trim().is_empty() { continue; }
+                if let Ok(res) = api.query(SearchQuery::new(a.name.clone()).with_filter(SongsFilter)).await {
+                    let songs = map_search_results(res);
+                    for s in songs.into_iter().take(3) {
+                        if seen.insert(s.video_id.clone()) {
+                            let thumb = s.thumbnails.last().map(|t| t.url.clone()).unwrap_or_default();
+                            out.push((s.video_id, s.name, s.artist.name, s.duration.unwrap_or(0), thumb));
+                        }
+                    }
+                }
+            }
+            out.truncate(20);
+            out
+        });
+        if raw.is_empty() { return; }
+        let thumb_urls: Vec<(usize, String)> = raw.iter().enumerate()
+            .filter(|(_, (_, _, _, _, url))| !url.is_empty())
+            .map(|(i, (_, _, _, _, url))| (i, url.clone()))
+            .collect();
+        let ui_weak2 = ui_weak.clone();
+        slint::invoke_from_event_loop(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let items: Vec<SongItem> = raw.iter().map(|(vid, title, artist, dur, _)| {
+                    let avatar = title.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "?".to_string());
+                    SongItem {
+                        video_id: SharedString::from(vid.as_str()),
+                        title: SharedString::from(title.as_str()),
+                        artist: SharedString::from(artist.as_str()),
+                        album: SharedString::default(),
+                        duration_str: SharedString::from(format_duration_secs(*dur).as_str()),
+                        avatar_letter: SharedString::from(avatar.as_str()),
+                        duration_secs: *dur as i32,
+                        thumbnail: slint::Image::default(),
+                        has_thumbnail: false,
+                    }
+                }).collect();
+                ui.set_home_followed_songs(ModelRc::new(VecModel::from(items)));
+            }
+        }).ok();
+        if !thumb_urls.is_empty() {
+            std::thread::spawn(move || {
+                let Some(http) = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(8)).build().ok() else { return };
+                for (idx, url) in thumb_urls {
+                    if let Ok(resp) = http.get(&url).send() {
+                        if let Ok(bytes) = resp.bytes() {
+                            if let Ok(img) = image::load_from_memory(&bytes) {
+                                let rgba = img.to_rgba8();
+                                let (w, h) = (rgba.width(), rgba.height());
+                                let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(rgba.as_raw(), w, h);
+                                let ui_w = ui_weak2.clone();
+                                slint::invoke_from_event_loop(move || {
+                                    if let Some(ui) = ui_w.upgrade() {
+                                        let slint_img = slint::Image::from_rgba8(buf);
+                                        let model = ui.get_home_followed_songs();
+                                        if let Some(row) = model.row_data(idx) {
+                                            let mut updated = row;
+                                            updated.thumbnail = slint_img;
+                                            updated.has_thumbnail = true;
+                                            model.set_row_data(idx, updated);
+                                        }
+                                    }
+                                }).ok();
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+}
+
 fn fetch_personalized_songs(ui_weak: slint::Weak<NativeShellWindow>) {
     let playback = crate::core::bridge::playback_core();
     let liked = playback.get_liked_songs();
@@ -616,24 +1221,29 @@ fn detect_language_from_text(text: &str) -> Option<&'static str> {
 
 /// Fetches enhanced home screen data: new releases, mixes, genre mix, and language section.
 /// Runs entirely in background threads to avoid blocking the UI.
+/// Current calendar year, derived from the system clock without pulling in a
+/// date crate. Uses the mean tropical-year length, which is accurate to the year
+/// for our purposes (filtering "recent" releases).
+fn current_year_approx() -> i32 {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    1970 + (secs / 31_556_952) as i32
+}
+
 fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
     let playback = crate::core::bridge::playback_core();
     let liked = playback.get_liked_songs();
-    if liked.is_empty() {
+
+    // Top artists for personalization — blends followed artists (strong signal),
+    // liked-song artists (by frequency), and saved-album artists. New Releases and
+    // the (hidden) mixes are seeded from this, so following an artist surfaces
+    // their new music too. (H2 + H4)
+    let top_artists: Vec<String> = taste_profile_top_artists(5);
+    if top_artists.is_empty() {
         return;
     }
-
-    // Collect unique artists from liked songs (up to top 5 by frequency)
-    let mut artist_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for song in &liked {
-        let artist = song.artist.trim().to_string();
-        if !artist.is_empty() {
-            *artist_counts.entry(artist).or_insert(0) += 1;
-        }
-    }
-    let mut sorted_artists: Vec<(String, usize)> = artist_counts.into_iter().collect();
-    sorted_artists.sort_by(|a, b| b.1.cmp(&a.1));
-    let top_artists: Vec<String> = sorted_artists.iter().take(5).map(|(name, _)| name.clone()).collect();
 
     // Detect language from liked songs
     let detected_language = {
@@ -668,40 +1278,86 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
 
     let top_artists_clone = top_artists.clone();
 
-    // ── Thread 1: New releases (search latest albums from top artists) ────────
+    // Seed artists for New Releases: followed artists carry real channel ids (so we
+    // can pull their actual discography); taste names fill in behind them.
+    let new_release_seeds: Vec<(String, String)> = {
+        let mut seeds: Vec<(String, String)> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for a in core::library::followed_artists() {
+            let key = a.name.trim().to_lowercase();
+            if key.is_empty() || !seen.insert(key) { continue; }
+            seeds.push((a.name, a.browse_id));
+        }
+        for name in &top_artists {
+            let key = name.trim().to_lowercase();
+            if key.is_empty() || !seen.insert(key) { continue; }
+            seeds.push((name.clone(), String::new()));
+        }
+        seeds
+    };
+
+    // ── Thread 1: New releases — genuinely recent releases from each seed artist's
+    // own discography (get_artist → albums + singles), sorted newest-first and
+    // filtered to the last ~2 years. Replaces the old "{artist} new album" search
+    // that returned popularity-ranked (often decades-old) catalog entries. ───────
     {
         let ui_weak = ui_weak.clone();
-        let artists = top_artists.clone();
+        let seeds = new_release_seeds;
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             let albums = rt.block_on(async {
                 use ytmapi_rs::YtMusic;
-                use ytmapi_rs::query::{SearchQuery, search::AlbumsFilter};
+                use ytmapi_rs::common::ArtistChannelID;
+                use ytmapi_rs::query::{SearchQuery, search::ArtistsFilter};
                 let api = match YtMusic::new_unauthenticated().await {
                     Ok(a) => a,
                     Err(_) => return Vec::new(),
                 };
-                let mut all_albums: Vec<(String, String, String, String, String)> = Vec::new(); // (title, browse_id, artist, year, thumb_url)
-                for artist in artists.iter().take(3) {
-                    let query = format!("{} new album", artist);
-                    if let Ok(results) = api.query(SearchQuery::new(query).with_filter(AlbumsFilter)).await {
-                        for alb in results.into_iter().take(3) {
-                            let thumb_url = alb.thumbnails.last().map(|t| t.url.clone()).unwrap_or_default();
-                            all_albums.push((
-                                alb.title,
-                                alb.album_id.get_raw().to_string(),
-                                alb.artist,
-                                alb.year,
-                                thumb_url,
-                            ));
+                let current_year = current_year_approx();
+                // (title, browse_id, artist, year_i32, thumb_url)
+                let mut cand: Vec<(String, String, String, i32, String)> = Vec::new();
+                for (name, bid) in seeds.iter().take(6) {
+                    // Resolve the artist's channel id (followed artists already have one).
+                    let channel = if !bid.is_empty() {
+                        bid.clone()
+                    } else {
+                        match api.query(SearchQuery::new(name.clone()).with_filter(ArtistsFilter)).await {
+                            Ok(res) => res.into_iter().next()
+                                .map(|a| a.browse_id.get_raw().to_string())
+                                .unwrap_or_default(),
+                            Err(_) => String::new(),
+                        }
+                    };
+                    if channel.is_empty() { continue; }
+                    if let Ok(art) = api.get_artist(ArtistChannelID::from_raw(&channel)).await {
+                        let disp = art.name.clone();
+                        let releases = art.top_releases.albums.iter()
+                            .flat_map(|s| s.results.iter())
+                            .chain(art.top_releases.singles.iter().flat_map(|s| s.results.iter()));
+                        for a in releases {
+                            let year: i32 = a.year.trim().parse().unwrap_or(0);
+                            let thumb = a.thumbnails.last().map(|t| t.url.clone()).unwrap_or_default();
+                            cand.push((a.title.clone(), a.album_id.get_raw().to_string(), disp.clone(), year, thumb));
                         }
                     }
                 }
-                // Deduplicate by browse_id
+                // Dedup by browse_id.
                 let mut seen = std::collections::HashSet::new();
-                all_albums.retain(|(_, id, _, _, _)| seen.insert(id.clone()));
-                all_albums.truncate(8);
-                all_albums
+                cand.retain(|(_, id, _, _, _)| !id.is_empty() && seen.insert(id.clone()));
+                // Prefer genuinely recent releases; relax the window if too sparse.
+                let mut recent: Vec<_> = cand.iter().filter(|c| c.3 >= current_year - 1).cloned().collect();
+                if recent.len() < 4 {
+                    recent = cand.iter().filter(|c| c.3 >= current_year - 2).cloned().collect();
+                }
+                if recent.len() < 4 {
+                    recent = cand.clone();
+                }
+                // Newest first (unknown years sink to the bottom).
+                recent.sort_by(|a, b| b.3.cmp(&a.3));
+                recent.truncate(10);
+                recent.into_iter()
+                    .map(|(t, id, ar, y, th)| (t, id, ar, if y > 0 { y.to_string() } else { String::new() }, th))
+                    .collect::<Vec<(String, String, String, String, String)>>()
             });
 
             if albums.is_empty() { return; }
@@ -1086,10 +1742,94 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
     }
 }
 
+fn normalize_theme_name(name: &str) -> &'static str {
+    match name {
+        "Solar Red" => "Solar Red",
+        "Ember" => "Ember",
+        "Earth" => "Earth",
+        "Forest" => "Forest",
+        "Ocean" => "Ocean",
+        "Sky" => "Sky",
+        "Twilight" => "Twilight",
+        "Rose" => "Rose",
+        "Mono" => "Mono",
+        _ => "Default Blue",
+    }
+}
+
+fn theme_accent(name: &str) -> slint::Color {
+    let (r, g, b) = match normalize_theme_name(name) {
+        "Solar Red" => (0xe2, 0x50, 0x3f),
+        "Ember" => (0xf2, 0x70, 0x3a),
+        "Earth" => (0xb0, 0x6a, 0x43),
+        "Forest" => (0x3f, 0xa9, 0x6a),
+        "Ocean" => (0x16, 0x99, 0xa8),
+        "Sky" => (0x46, 0xa6, 0xe6),
+        "Twilight" => (0x8b, 0x5c, 0xf6),
+        "Rose" => (0xe2, 0x6a, 0xa0),
+        "Mono" => (0x6b, 0x72, 0x80),
+        _ => (0x64, 0x86, 0xb0),
+    };
+    slint::Color::from_rgb_u8(r, g, b)
+}
+
+fn normalize_theme_mode(mode: &str) -> &'static str {
+    match mode {
+        "Light" => "Light",
+        "Dark" => "Dark",
+        _ => "System",
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_apps_use_light_theme() -> Option<bool> {
+    use windows::core::w;
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{
+        RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD,
+    };
+
+    let mut value: u32 = 0;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+            w!("AppsUseLightTheme"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&mut value as *mut u32).cast()),
+            Some(&mut size),
+        )
+    };
+    (status == ERROR_SUCCESS).then_some(value != 0)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_apps_use_light_theme() -> Option<bool> { None }
+
+fn theme_is_light(mode: &str) -> bool {
+    match normalize_theme_mode(mode) {
+        "Light" => true,
+        "Dark" => false,
+        _ => windows_apps_use_light_theme().unwrap_or(false),
+    }
+}
+
+fn apply_theme(ui: &NativeShellWindow, name: &str, mode: &str) {
+    ui.global::<Theme>().set_accent(theme_accent(name));
+    ui.global::<Theme>().set_is_light(theme_is_light(mode));
+}
+
 pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     // Unify storage: fold any legacy `ytm-native` data into `auricle` before
     // anything reads settings or user data.
     core::persistence::migrate_legacy_dir();
+
+    // Keep yt-dlp current in the background. A stale yt-dlp still resolves a CDN
+    // URL but that URL gets 403'd past the first ~1 MiB, which shows up as every
+    // song failing to play. Checked at most weekly; silent and non-blocking.
+    core::addons::spawn_ytdlp_auto_update();
 
     let playback = core::bridge::playback_core();
 
@@ -1104,6 +1844,21 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     }
 
     let ui = NativeShellWindow::new()?;
+
+    // Apply Appearance before the window is shown so startup never flashes the
+    // default palette. Unknown/legacy values normalize safely.
+    {
+        let settings = core::persistence::load_settings();
+        let name = normalize_theme_name(&settings.theme_name);
+        let mode = normalize_theme_mode(&settings.theme_mode);
+        ui.set_theme_name(SharedString::from(name));
+        ui.set_theme_mode(SharedString::from(mode));
+        apply_theme(&ui, name, mode);
+    }
+
+    // Open at a comfortable desktop size instead of the content's (short) preferred
+    // height, so the window starts large and the layout fills it.
+    ui.window().set_size(slint::LogicalSize::new(1200.0, 760.0));
 
     // Load liked songs immediately on startup
     {
@@ -1297,6 +2052,14 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     }
                 };
                 let result = crate::core::addons::update_ytdlp(on_progress);
+                if result.is_ok() {
+                    // URLs signed by the previous yt-dlp client are partly blocked
+                    // (403 past ~1 MiB); drop them so the next play re-resolves.
+                    crate::core::stream_player::clear_url_cache();
+                    let mut s = core::persistence::load_settings();
+                    s.last_ytdlp_update_check = crate::core::addons::unix_now();
+                    core::persistence::save_settings(&s);
+                }
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_weak2.upgrade() {
                         ui.set_addon_busy(false);
@@ -1693,6 +2456,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     let autoplay_enabled: Arc<std::sync::atomic::AtomicBool> = Arc::new(std::sync::atomic::AtomicBool::new(true));
     // The autoplay/radio queue and seed now live inside PlaybackCore
     // (playback.set_autoplay_queue / pop_autoplay / autoplay_seed / …).
+
+    // Current detail-view descriptors — captured when navigating to an artist/
+    // album/playlist so the Follow / Save buttons know what to persist locally.
+    let cur_artist: Arc<Mutex<core::library::SavedArtist>> = Arc::new(Mutex::new(Default::default()));
+    let cur_album: Arc<Mutex<core::library::SavedAlbum>> = Arc::new(Mutex::new(Default::default()));
+    let cur_playlist: Arc<Mutex<core::library::SavedPlaylist>> = Arc::new(Mutex::new(Default::default()));
 
     fn push_nav_entry(nav_history: &Arc<Mutex<Vec<NavEntry>>>, nav_cursor: &Arc<Mutex<usize>>, view: String, context_id: String) {
         let mut hist = nav_history.lock().unwrap();
@@ -2132,6 +2901,37 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             core::persistence::save_settings(&settings);
         });
     }
+    // ── Appearance settings ──────────────────────────────────────────────────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_set_theme_name(move |requested| {
+            let name = normalize_theme_name(requested.as_str()).to_string();
+            let mut settings = core::persistence::load_settings();
+            settings.theme_name = name.clone();
+            let mode = normalize_theme_mode(&settings.theme_mode).to_string();
+            core::persistence::save_settings(&settings);
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_theme_name(SharedString::from(name.as_str()));
+                ui.set_theme_mode(SharedString::from(mode.as_str()));
+                apply_theme(&ui, &name, &mode);
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_set_theme_mode(move |requested| {
+            let mode = normalize_theme_mode(requested.as_str()).to_string();
+            let mut settings = core::persistence::load_settings();
+            settings.theme_mode = mode.clone();
+            let name = normalize_theme_name(&settings.theme_name).to_string();
+            core::persistence::save_settings(&settings);
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_theme_name(SharedString::from(name.as_str()));
+                ui.set_theme_mode(SharedString::from(mode.as_str()));
+                apply_theme(&ui, &name, &mode);
+            }
+        });
+    }
 
     // ── Search ────────────────────────────────────────────────────────────────
     {
@@ -2384,6 +3184,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         let nav_history = nav_history.clone();
         let nav_cursor = nav_cursor.clone();
         let nav_restoring = nav_restoring.clone();
+        let cur_artist = cur_artist.clone();
         ui.on_navigate_to_artist(move |browse_id| {
             let browse_id = browse_id.to_string();
             if browse_id.trim().is_empty() { return; }
@@ -2408,6 +3209,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 ui.set_artist_view_has_latest(false);
             }
 
+            let cur_artist = cur_artist.clone();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -2423,6 +3225,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 });
 
                 let ui_weak3 = ui_weak2.clone();
+                let browse_id_c = browse_id.clone();
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_weak2.upgrade() {
                         ui.set_is_loading(false);
@@ -2430,7 +3233,16 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                             Ok(artist) => {
                                 ui.set_artist_view_name(SharedString::from(artist.name.as_str()));
                                 ui.set_artist_view_has_thumbnail(false);
-                                ui.set_artist_view_subscribed(artist.subscribed);
+                                let art_thumb = artist.thumbnails.last().map(|t| t.url.clone()).unwrap_or_default();
+                                if let Ok(mut c) = cur_artist.lock() {
+                                    *c = core::library::SavedArtist {
+                                        browse_id: browse_id_c.clone(),
+                                        name: artist.name.clone(),
+                                        thumbnail_url: art_thumb.clone(),
+                                    };
+                                }
+                                core::library::set_artist_thumbnail(&browse_id_c, &art_thumb);
+                                ui.set_artist_view_subscribed(core::library::is_artist_followed(&browse_id_c));
                                 ui.set_artist_view_description(SharedString::from(
                                     artist.description.as_deref().unwrap_or("")
                                 ));
@@ -2974,12 +3786,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 let model = ui.get_album_view_songs();
                 let songs: Vec<core::playback::NowPlaying> = (0..model.row_count())
                     .filter_map(|i| model.row_data(i))
-                    .map(|item| core::playback::NowPlaying {
-                        video_id: item.video_id.to_string(),
-                        title: item.title.to_string(),
-                        artist: item.artist.to_string(),
-                        duration_secs: item.duration_secs as u32,
-                    })
+                    .map(|item| core::playback::NowPlaying::enriched(
+                        item.video_id.to_string(),
+                        item.title.to_string(),
+                        item.artist.to_string(),
+                        item.duration_secs as u32,
+                    ))
                     .collect();
                 if !songs.is_empty() {
                     let playback = crate::core::bridge::playback_core();
@@ -2996,42 +3808,296 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         });
     }
 
-    // ── Toggle Like Album ────────────────────────────────────────────────────
+    // ── Shuffle Album ────────────────────────────────────────────────────────
     {
         let ui_weak = ui.as_weak();
+        ui.on_shuffle_album(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let model = ui.get_album_view_songs();
+                let mut songs: Vec<core::playback::NowPlaying> = (0..model.row_count())
+                    .filter_map(|i| model.row_data(i))
+                    .map(|item| core::playback::NowPlaying::enriched(
+                        item.video_id.to_string(),
+                        item.title.to_string(),
+                        item.artist.to_string(),
+                        item.duration_secs as u32,
+                    ))
+                    .collect();
+                if !songs.is_empty() {
+                    shuffle_vec(&mut songs);
+                    let playback = crate::core::bridge::playback_core();
+                    playback.set_queue(songs);
+                    {
+                        let mut state = playback.state_lock();
+                        state.is_playing = true;
+                    }
+                    let first = playback.now_playing();
+                    playback.set_now_playing(&first.video_id, &first.title, &first.artist, first.duration_secs);
+                    refresh_native_shell_ui(&ui, playback);
+                }
+            }
+        });
+    }
+
+    // ── Toggle Like Album (persist to local library) ─────────────────────────
+    {
+        let ui_weak = ui.as_weak();
+        let cur_album = cur_album.clone();
         ui.on_toggle_like_album(move || {
             if let Some(ui) = ui_weak.upgrade() {
-                let currently_liked = ui.get_album_view_liked();
-                ui.set_album_view_liked(!currently_liked);
-                // Note: actual library rate_playlist/add_to_library calls
-                // require authentication; for now we toggle the local UI state.
-                // When auth is implemented, wire: api.rate_playlist(playlist_id, if liked INDIFFERENT else LIKE)
+                let album = cur_album.lock().map(|a| a.clone()).unwrap_or_default();
+                if album.browse_id.is_empty() {
+                    // No descriptor yet — fall back to a plain UI toggle.
+                    ui.set_album_view_liked(!ui.get_album_view_liked());
+                    return;
+                }
+                let now_saved = core::library::toggle_save_album(album);
+                ui.set_album_view_liked(now_saved);
             }
         });
     }
 
-    // ── Toggle Subscribe Artist ──────────────────────────────────────────────
+    // ── Toggle Follow Artist (persist to local library) ──────────────────────
     {
         let ui_weak = ui.as_weak();
+        let cur_artist = cur_artist.clone();
         ui.on_toggle_subscribe_artist(move || {
             if let Some(ui) = ui_weak.upgrade() {
-                let currently_subscribed = ui.get_artist_view_subscribed();
-                ui.set_artist_view_subscribed(!currently_subscribed);
-                // Note: actual subscribe/unsubscribe calls
-                // require authentication; for now we toggle the local UI state.
+                let artist = cur_artist.lock().map(|a| a.clone()).unwrap_or_default();
+                if artist.browse_id.is_empty() {
+                    ui.set_artist_view_subscribed(!ui.get_artist_view_subscribed());
+                    return;
+                }
+                let now_followed = core::library::toggle_follow_artist(artist);
+                ui.set_artist_view_subscribed(now_followed);
+                refresh_sidebar(&ui);
             }
         });
     }
 
-    // ── Toggle Like Playlist ─────────────────────────────────────────────────
+    // ── Toggle Save Playlist (persist to local library) ──────────────────────
     {
         let ui_weak = ui.as_weak();
+        let cur_playlist = cur_playlist.clone();
         ui.on_toggle_like_playlist(move || {
             if let Some(ui) = ui_weak.upgrade() {
-                let currently_liked = ui.get_playlist_view_liked();
-                ui.set_playlist_view_liked(!currently_liked);
-                // Note: actual library calls require authentication;
-                // for now we toggle the local UI state.
+                let playlist = cur_playlist.lock().map(|p| p.clone()).unwrap_or_default();
+                if playlist.playlist_id.is_empty() {
+                    ui.set_playlist_view_liked(!ui.get_playlist_view_liked());
+                    return;
+                }
+                let now_saved = core::library::toggle_save_playlist(playlist);
+                ui.set_playlist_view_liked(now_saved);
+            }
+        });
+    }
+
+    // ── Add to playlist: open the picker modal for a song ────────────────────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_open_add_to_playlist(move |vid, title, artist, dur| {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_pending_song_vid(vid);
+                ui.set_pending_song_title(title);
+                ui.set_pending_song_artist(artist);
+                ui.set_pending_song_dur(dur);
+                refresh_modal_playlists(&ui);
+                ui.set_show_playlist_modal(true);
+            }
+        });
+    }
+
+    // ── New playlist (create-only modal, no pending song) ────────────────────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_new_playlist(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_pending_song_vid(SharedString::default());
+                ui.set_pending_song_title(SharedString::default());
+                ui.set_pending_song_artist(SharedString::default());
+                ui.set_pending_song_dur(0);
+                refresh_modal_playlists(&ui);
+                ui.set_show_playlist_modal(true);
+            }
+        });
+    }
+
+    // ── Submit a new playlist (create + optionally add the pending song) ─────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_submit_new_playlist(move |name| {
+            if name.trim().is_empty() { return; }
+            if let Some(ui) = ui_weak.upgrade() {
+                let id = core::library::create_playlist(&name);
+                let vid = ui.get_pending_song_vid().to_string();
+                if !vid.is_empty() {
+                    let song = stored_song_from_parts(
+                        &vid,
+                        &ui.get_pending_song_title().to_string(),
+                        &ui.get_pending_song_artist().to_string(),
+                        ui.get_pending_song_dur() as u32,
+                    );
+                    core::library::add_song_to_playlist(&id, song);
+                }
+                ui.set_show_playlist_modal(false);
+                ui.invoke_load_library_data();
+                refresh_sidebar(&ui);
+            }
+        });
+    }
+
+    // ── Add the pending song to an existing local playlist ───────────────────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_add_to_existing_playlist(move |pid| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let vid = ui.get_pending_song_vid().to_string();
+                if !vid.is_empty() {
+                    let song = stored_song_from_parts(
+                        &vid,
+                        &ui.get_pending_song_title().to_string(),
+                        &ui.get_pending_song_artist().to_string(),
+                        ui.get_pending_song_dur() as u32,
+                    );
+                    core::library::add_song_to_playlist(&pid.to_string(), song);
+                }
+                ui.set_show_playlist_modal(false);
+                refresh_sidebar(&ui);
+            }
+        });
+    }
+
+    // ── Delete a local playlist ──────────────────────────────────────────────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_delete_local_playlist(move |id| {
+            core::library::delete_playlist(&id.to_string());
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_current_view(SharedString::from("Library"));
+                ui.set_library_tab(SharedString::from("Playlists"));
+                ui.invoke_load_library_data();
+                refresh_sidebar(&ui);
+            }
+        });
+    }
+
+    // ── Remove a song from a local playlist (reloads the playlist view) ──────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_remove_from_local_playlist(move |pid, vid| {
+            core::library::remove_song_from_playlist(&pid.to_string(), &vid.to_string());
+            if let Some(ui) = ui_weak.upgrade() {
+                if let Some(pl) = core::library::get_local_playlist(&pid.to_string()) {
+                    let items: Vec<SongItem> = pl.songs.iter().map(|s| {
+                        let np: core::playback::NowPlaying = s.clone().into();
+                        make_song_item(&np)
+                    }).collect();
+                    let n = items.len();
+                    ui.set_playlist_view_songs(ModelRc::new(VecModel::from(items)));
+                    ui.set_playlist_view_count(SharedString::from(n.to_string().as_str()));
+                }
+            }
+        });
+    }
+
+    // ── Artist radio (the artist's top tracks; falls back to song radio) ─────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_start_artist_radio(move |video_id, artist_name| {
+            let vid = video_id.to_string();
+            let artist = artist_name.to_string();
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_is_loading(true);
+                ui.set_radio_title(SharedString::from(format!("{} Radio", artist).as_str()));
+                ui.set_radio_songs(ModelRc::new(VecModel::from(Vec::<SongItem>::new())));
+                ui.set_current_view(SharedString::from("Radio"));
+            }
+            let ui_w = ui_weak.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                let raw: Vec<(String, String, String, u32)> = rt.block_on(async {
+                    use ytmapi_rs::YtMusic;
+                    use ytmapi_rs::common::{VideoID, ArtistChannelID, YoutubeID};
+                    let api = match YtMusic::new_unauthenticated().await { Ok(a) => a, Err(_) => return vec![] };
+                    // Resolve the artist's browse id: session metadata, else search by name.
+                    let mut artist_id = core::playback::get_song_meta(&vid).map(|m| m.artist_id).unwrap_or_default();
+                    if artist_id.is_empty() {
+                        use ytmapi_rs::query::{SearchQuery, search::ArtistsFilter};
+                        if let Ok(res) = api.query(SearchQuery::new(artist.clone()).with_filter(ArtistsFilter)).await {
+                            if let Some(a) = res.into_iter().next() { artist_id = a.browse_id.get_raw().to_string(); }
+                        }
+                    }
+                    // Prefer the artist's own top tracks (a real artist-centric radio).
+                    if !artist_id.is_empty() {
+                        if let Ok(art) = api.get_artist(ArtistChannelID::from_raw(&artist_id)).await {
+                            let songs: Vec<(String, String, String, u32)> = art.top_releases.songs.iter()
+                                .flat_map(|section| section.results.iter())
+                                .map(|s| (s.video_id.get_raw().to_string(), s.title.clone(), artist.clone(), 0u32))
+                                .filter(|(v, _, _, _)| !v.is_empty())
+                                .collect();
+                            if songs.len() >= 3 { return songs; }
+                        }
+                    }
+                    // Fallback: watch-playlist radio seeded from the clicked track.
+                    if let Ok(tracks) = api.get_watch_playlist_from_video_id(VideoID::from_raw(&vid)).await {
+                        return tracks.into_iter()
+                            .map(|t| (t.video_id.get_raw().to_string(), t.title, t.author, parse_duration(&t.duration).unwrap_or(0)))
+                            .filter(|(v, _, _, _)| !v.is_empty())
+                            .collect();
+                    }
+                    vec![]
+                });
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_w.upgrade() {
+                        let items: Vec<SongItem> = raw.iter().map(|(v, t, a, d)| {
+                            make_song_item(&core::playback::NowPlaying::enriched(v.clone(), t.clone(), a.clone(), *d))
+                        }).collect();
+                        ui.set_radio_songs(ModelRc::new(VecModel::from(items)));
+                        ui.set_is_loading(false);
+                    }
+                }).ok();
+            });
+        });
+    }
+
+    // ── Queue-row "Play next": move an upcoming song right after the current ─
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_move_queue_song_next(move |idx| {
+            playback.move_queue_song_next(idx.max(0) as usize);
+            if let Some(ui) = ui_weak.upgrade() {
+                let items: Vec<SongItem> = playback.queue_upcoming().iter().map(make_song_item).collect();
+                ui.set_queue(ModelRc::new(VecModel::from(items)));
+            }
+        });
+    }
+
+    // ── "Go to artist" resolved by video id (session meta), else by name ─────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_open_artist_for(move |vid, name| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let aid = core::playback::get_song_meta(&vid.to_string()).map(|m| m.artist_id).unwrap_or_default();
+                if !aid.is_empty() {
+                    ui.invoke_navigate_to_artist(SharedString::from(aid.as_str()));
+                } else if !name.is_empty() {
+                    ui.invoke_go_to_song_artist(name);
+                }
+            }
+        });
+    }
+
+    // ── "Go to album" resolved by video id (session meta) ────────────────────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_open_album_for(move |vid| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let m = core::playback::get_song_meta(&vid.to_string()).unwrap_or_default();
+                if !m.album_id.is_empty() {
+                    ui.invoke_navigate_to_album(SharedString::from(m.album_id.as_str()));
+                } else if !m.album.is_empty() {
+                    ui.invoke_go_to_song_album(SharedString::from(m.album.as_str()));
+                }
             }
         });
     }
@@ -3044,12 +4110,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 let model = ui.get_radio_songs();
                 let songs: Vec<core::playback::NowPlaying> = (0..model.row_count())
                     .filter_map(|i| model.row_data(i))
-                    .map(|item| core::playback::NowPlaying {
-                        video_id: item.video_id.to_string(),
-                        title: item.title.to_string(),
-                        artist: item.artist.to_string(),
-                        duration_secs: item.duration_secs as u32,
-                    })
+                    .map(|item| core::playback::NowPlaying::enriched(
+                        item.video_id.to_string(),
+                        item.title.to_string(),
+                        item.artist.to_string(),
+                        item.duration_secs as u32,
+                    ))
                     .collect();
                 if !songs.is_empty() {
                     let playback = crate::core::bridge::playback_core();
@@ -3133,6 +4199,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         let nav_history = nav_history.clone();
         let nav_cursor = nav_cursor.clone();
         let nav_restoring = nav_restoring.clone();
+        let cur_album = cur_album.clone();
         ui.on_navigate_to_album(move |browse_id| {
             let browse_id = browse_id.to_string();
             if browse_id.trim().is_empty() { return; }
@@ -3152,6 +4219,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 ui.set_current_view(SharedString::from("Album"));
             }
 
+            let cur_album = cur_album.clone();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -3167,6 +4235,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 });
 
                 let ui_weak3 = ui_weak2.clone();
+                let browse_id_c = browse_id.clone();
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_weak2.upgrade() {
                         ui.set_is_loading(false);
@@ -3177,7 +4246,17 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                 ui.set_album_view_artist(SharedString::from(artist_name.as_str()));
                                 ui.set_album_view_year(SharedString::from(album.year.as_str()));
                                 ui.set_album_view_has_thumbnail(false);
-                                ui.set_album_view_liked(matches!(album.library_status, ytmapi_rs::common::LibraryStatus::InLibrary));
+                                let alb_thumb = album.thumbnails.last().map(|t| t.url.clone()).unwrap_or_default();
+                                if let Ok(mut c) = cur_album.lock() {
+                                    *c = core::library::SavedAlbum {
+                                        browse_id: browse_id_c.clone(),
+                                        title: album.title.clone(),
+                                        artist: artist_name.clone(),
+                                        thumbnail_url: alb_thumb.clone(),
+                                    };
+                                }
+                                core::library::set_album_thumbnail(&browse_id_c, &alb_thumb);
+                                ui.set_album_view_liked(core::library::is_album_saved(&browse_id_c));
                                 ui.set_album_view_duration(SharedString::from(album.duration.as_str()));
                                 ui.set_album_view_description(SharedString::from(
                                     album.description.as_deref().unwrap_or("")
@@ -3538,16 +4617,32 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 #[cfg(target_os = "windows")]
                 {
                     use windows::Win32::Foundation::HWND;
-                    use windows::Win32::UI::WindowsAndMessaging::{IsIconic, ShowWindow, SW_HIDE, FindWindowW};
+                    use windows::Win32::UI::WindowsAndMessaging::{IsIconic, ShowWindow, SW_HIDE, FindWindowExW, GetWindowThreadProcessId};
                     use windows::core::w;
 
-                    // Lazily resolve HWND (window exists after ui.run() starts)
+                    // Lazily resolve the app window (exists after ui.run() starts).
+                    // In debug builds a console window can share the "Auricle" title,
+                    // so pick the top-level "Auricle" window owned by THIS process —
+                    // otherwise we'd hide/restore the console and minimize-to-tray
+                    // would silently do nothing.
                     let mut hwnd_val = app_hwnd.load(std::sync::atomic::Ordering::Relaxed);
                     if hwnd_val == 0 {
                         let found = unsafe {
-                            FindWindowW(None, w!("Auricle"))
-                                .map(|h| h.0 as isize)
-                                .unwrap_or(0)
+                            let our_pid = std::process::id();
+                            let mut child = HWND::default();
+                            let mut result: isize = 0;
+                            loop {
+                                match FindWindowExW(HWND::default(), child, None, w!("Auricle")) {
+                                    Ok(h) if !h.0.is_null() => {
+                                        child = h;
+                                        let mut pid: u32 = 0;
+                                        GetWindowThreadProcessId(h, Some(&mut pid));
+                                        if pid == our_pid { result = h.0 as isize; break; }
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            result
                         };
                         if found != 0 {
                             app_hwnd.store(found, std::sync::atomic::Ordering::Relaxed);
@@ -3633,14 +4728,17 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                         crate::core::cache::spawn_cache_download(np.video_id.clone(), np.title.clone(), np.artist.clone());
                         // Persist as last played
                         let mut settings = core::persistence::load_settings();
-                        settings.last_played = Some(core::persistence::StoredSong {
-                            video_id: np.video_id,
-                            title: np.title,
-                            artist: np.artist,
-                            duration_secs: np.duration_secs,
-                        });
+                        settings.last_played = Some(core::persistence::StoredSong::from(&np));
                         core::persistence::save_settings(&settings);
                     }
+                    // History changed — refresh the "recently listened" album shortcuts.
+                    let ui_w = ui_weak.clone();
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = ui_w.upgrade() {
+                            ui.set_sidebar_albums(ModelRc::new(VecModel::from(compute_sidebar_albums())));
+                            spawn_sidebar_album_thumbs(ui.as_weak());
+                        }
+                    }).ok();
                 }
 
                 let track = playback.now_playing();
@@ -3938,7 +5036,9 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                         let _ = ShowWindow(hwnd, SW_HIDE);
                     }
                 } else if event.id() == &quit_id2 {
-                    std::process::exit(0);
+                    // Quit via the event loop so the TrayIcon's Drop removes the icon.
+                    // (std::process::exit skips destructors, leaving a ghost tray icon.)
+                    slint::invoke_from_event_loop(|| { let _ = slint::quit_event_loop(); }).ok();
                 }
             }));
         }
@@ -3972,11 +5072,15 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     {
         let settings = core::persistence::load_settings();
         if let Some(last) = settings.last_played {
+            core::playback::register_song_meta(&last.video_id, &last.album, &last.album_id, &last.artist_id);
             let np = crate::core::playback::NowPlaying {
                 video_id: last.video_id.clone(),
                 title: last.title.clone(),
                 artist: last.artist.clone(),
                 duration_secs: last.duration_secs,
+                album: last.album.clone(),
+                album_id: last.album_id.clone(),
+                artist_id: last.artist_id.clone(),
             };
             playback.set_now_playing_paused(np);
             ui.set_track_title(SharedString::from(last.title.as_str()));
@@ -4031,87 +5135,63 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     {
         let ui_weak = ui.as_weak();
         ui.on_load_library_data(move || {
-            let ui_weak2 = ui_weak.clone();
+            let _ = &ui_weak;
             if let Some(ui) = ui_weak.upgrade() {
                 let tab = ui.get_library_tab().to_string();
                 match tab.as_str() {
                     "Albums" => {
-                        // Derive unique albums from liked songs
-                        let liked = playback.get_liked_songs();
-                        let mut seen = std::collections::HashSet::new();
-                        let mut albums: Vec<AlbumItem> = Vec::new();
-                        for song in &liked {
-                            let album_name = String::new(); // NowPlaying has no album field
-                            if !album_name.is_empty() && seen.insert(album_name.clone()) {
-                                let avatar = album_name.chars().next()
-                                    .map(|c| c.to_uppercase().to_string())
-                                    .unwrap_or_else(|| "?".to_string());
-                                let _ = avatar;
-                                albums.push(AlbumItem {
-                                    title: SharedString::from(album_name.as_str()),
-                                    browse_id: SharedString::default(), // no browse-id from liked songs
-                                    artist: SharedString::from(song.artist.as_str()),
-                                    year: SharedString::default(),
-                                    thumbnail: Default::default(),
-                                    has_thumbnail: false,
-                                });
+                        // Real saved albums from the local library.
+                        let albums: Vec<AlbumItem> = core::library::saved_albums().into_iter().map(|a| {
+                            let (thumb, has) = load_cached_thumb(&library_thumb_path("album", &a.browse_id));
+                            AlbumItem {
+                                title: SharedString::from(a.title.as_str()),
+                                browse_id: SharedString::from(a.browse_id.as_str()),
+                                artist: SharedString::from(a.artist.as_str()),
+                                year: SharedString::default(),
+                                thumbnail: thumb,
+                                has_thumbnail: has,
                             }
-                        }
+                        }).collect();
                         ui.set_library_albums(ModelRc::new(VecModel::from(albums)));
+                        spawn_album_thumb_loader(ui_weak.clone());
                     },
                     "Artists" => {
-                        // Derive unique artists from liked songs
-                        let liked = playback.get_liked_songs();
-                        let mut seen = std::collections::HashSet::new();
-                        let mut artists: Vec<ArtistItem> = Vec::new();
-                        for song in &liked {
-                            let artist_name = song.artist.clone();
-                            if !artist_name.is_empty() && seen.insert(artist_name.clone()) {
-                                artists.push(ArtistItem {
-                                    name: SharedString::from(artist_name.as_str()),
-                                    browse_id: SharedString::default(), // will be resolved on click
-                                    thumbnail: Default::default(),
-                                    has_thumbnail: false,
-                                    subscriber_count: SharedString::default(),
-                                });
+                        // Real followed artists from the local library.
+                        let artists: Vec<ArtistItem> = core::library::followed_artists().into_iter().map(|a| {
+                            let (thumb, has) = load_cached_thumb(&library_thumb_path("artist", &a.browse_id));
+                            ArtistItem {
+                                name: SharedString::from(a.name.as_str()),
+                                browse_id: SharedString::from(a.browse_id.as_str()),
+                                thumbnail: thumb,
+                                has_thumbnail: has,
+                                subscriber_count: SharedString::default(),
                             }
-                        }
+                        }).collect();
                         ui.set_library_artists(ModelRc::new(VecModel::from(artists)));
+                        spawn_artist_thumb_loader(ui_weak.clone());
                     },
                     "Playlists" => {
-                        // Fetch library playlists from API in background
-                        std::thread::spawn(move || {
-                            let rt = tokio::runtime::Builder::new_current_thread()
-                                .enable_all()
-                                .build()
-                                .unwrap();
-                            let result: Result<Vec<ytmapi_rs::parse::LibraryPlaylist>, String> = rt.block_on(async {
-                                // Library playlists require authentication; return empty for now
-                                Ok(vec![])
-                            });
-                            slint::invoke_from_event_loop(move || {
-                                if let Some(ui) = ui_weak2.upgrade() {
-                                    match result {
-                                        Ok(playlists) => {
-                                            let items: Vec<PlaylistItem> = playlists.into_iter().map(|p| {
-                                                let count_text = SharedString::default();
-                                                PlaylistItem {
-                                                    title: SharedString::from(p.title.as_str()),
-                                                    playlist_id: SharedString::from(p.playlist_id.get_raw()),
-                                                    thumbnail: Default::default(),
-                                                    has_thumbnail: false,
-                                                    count_text,
-                                                }
-                                            }).collect();
-                                            ui.set_library_playlists(ModelRc::new(VecModel::from(items)));
-                                        },
-                                        Err(_) => {
-                                            // Leave empty on error
-                                        }
-                                    }
-                                }
-                            }).ok();
-                        });
+                        // Local (user-created) playlists first, then saved public ones.
+                        let mut items: Vec<PlaylistItem> = core::library::local_playlists().into_iter().map(|p| {
+                            let n = p.songs.len();
+                            PlaylistItem {
+                                title: SharedString::from(p.name.as_str()),
+                                playlist_id: SharedString::from(p.id.as_str()),
+                                thumbnail: Default::default(),
+                                has_thumbnail: false,
+                                count_text: SharedString::from(format!("{} song{}", n, if n == 1 { "" } else { "s" }).as_str()),
+                            }
+                        }).collect();
+                        items.extend(core::library::saved_playlists().into_iter().map(|p| {
+                            PlaylistItem {
+                                title: SharedString::from(p.title.as_str()),
+                                playlist_id: SharedString::from(p.playlist_id.as_str()),
+                                thumbnail: Default::default(),
+                                has_thumbnail: false,
+                                count_text: SharedString::from("Saved"),
+                            }
+                        }));
+                        ui.set_library_playlists(ModelRc::new(VecModel::from(items)));
                     },
                     _ => {}
                 }
@@ -4155,6 +5235,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         let nav_history = nav_history.clone();
         let nav_cursor = nav_cursor.clone();
         let nav_restoring = nav_restoring.clone();
+        let cur_playlist = cur_playlist.clone();
         ui.on_navigate_to_playlist(move |playlist_id| {
             let playlist_id = playlist_id.to_string();
             if playlist_id.trim().is_empty() { return; }
@@ -4168,12 +5249,40 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 }
             }
 
+            // Local (user-created) playlists are stored on disk — render directly,
+            // no API call. Their ids are prefixed "local-".
+            if playlist_id.starts_with("local-") {
+                if let Some(ui) = ui_weak.upgrade() {
+                    if let Some(pl) = core::library::get_local_playlist(&playlist_id) {
+                        let items: Vec<SongItem> = pl.songs.iter()
+                            .map(|s| make_song_item(&s.clone().into()))
+                            .collect();
+                        let n = items.len();
+                        ui.set_playlist_view_title(SharedString::from(pl.name.as_str()));
+                        ui.set_playlist_view_songs(ModelRc::new(VecModel::from(items)));
+                        ui.set_playlist_view_count(SharedString::from(n.to_string().as_str()));
+                        ui.set_playlist_view_duration(SharedString::default());
+                        ui.set_playlist_view_similar(ModelRc::new(VecModel::from(Vec::<PlaylistItem>::new())));
+                        ui.set_playlist_view_has_thumbnail(false);
+                        ui.set_playlist_view_liked(false);
+                        ui.set_playlist_view_is_local(true);
+                        ui.set_playlist_view_id(SharedString::from(playlist_id.as_str()));
+                        ui.set_current_view(SharedString::from("Playlist"));
+                        ui.set_is_loading(false);
+                    }
+                }
+                return;
+            }
+
             let ui_weak2 = ui_weak.clone();
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_is_loading(true);
                 ui.set_current_view(SharedString::from("Playlist"));
+                ui.set_playlist_view_is_local(false);
+                ui.set_playlist_view_id(SharedString::from(playlist_id.as_str()));
             }
 
+            let cur_playlist = cur_playlist.clone();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -4191,9 +5300,18 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 });
 
                 let ui_weak3 = ui_weak2.clone();
+                let playlist_id_c = playlist_id.clone();
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_weak2.upgrade() {
                         ui.set_is_loading(false);
+                        if let Ok(mut c) = cur_playlist.lock() {
+                            *c = core::library::SavedPlaylist {
+                                playlist_id: playlist_id_c.clone(),
+                                title: ui.get_playlist_view_title().to_string(),
+                                thumbnail_url: String::new(),
+                            };
+                        }
+                        ui.set_playlist_view_liked(core::library::is_playlist_saved(&playlist_id_c));
                         match result {
                             Ok(tracks) => {
                                 let songs: Vec<Song> = map_playlist_items(tracks);
@@ -4432,14 +5550,45 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 let model = ui.get_playlist_view_songs();
                 let songs: Vec<core::playback::NowPlaying> = (0..model.row_count())
                     .filter_map(|i| model.row_data(i))
-                    .map(|item| core::playback::NowPlaying {
-                        video_id: item.video_id.to_string(),
-                        title: item.title.to_string(),
-                        artist: item.artist.to_string(),
-                        duration_secs: item.duration_secs as u32,
-                    })
+                    .map(|item| core::playback::NowPlaying::enriched(
+                        item.video_id.to_string(),
+                        item.title.to_string(),
+                        item.artist.to_string(),
+                        item.duration_secs as u32,
+                    ))
                     .collect();
                 if !songs.is_empty() {
+                    let playback = crate::core::bridge::playback_core();
+                    playback.set_queue(songs);
+                    {
+                        let mut state = playback.state_lock();
+                        state.is_playing = true;
+                    }
+                    let first = playback.now_playing();
+                    playback.set_now_playing(&first.video_id, &first.title, &first.artist, first.duration_secs);
+                    refresh_native_shell_ui(&ui, playback);
+                }
+            }
+        });
+    }
+
+    // ── Shuffle Playlist ─────────────────────────────────────────────────────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_shuffle_playlist(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                let model = ui.get_playlist_view_songs();
+                let mut songs: Vec<core::playback::NowPlaying> = (0..model.row_count())
+                    .filter_map(|i| model.row_data(i))
+                    .map(|item| core::playback::NowPlaying::enriched(
+                        item.video_id.to_string(),
+                        item.title.to_string(),
+                        item.artist.to_string(),
+                        item.duration_secs as u32,
+                    ))
+                    .collect();
+                if !songs.is_empty() {
+                    shuffle_vec(&mut songs);
                     let playback = crate::core::bridge::playback_core();
                     playback.set_queue(songs);
                     {
@@ -4467,12 +5616,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 };
                 let songs: Vec<core::playback::NowPlaying> = (0..model.row_count())
                     .filter_map(|i| model.row_data(i))
-                    .map(|item| core::playback::NowPlaying {
-                        video_id: item.video_id.to_string(),
-                        title: item.title.to_string(),
-                        artist: item.artist.to_string(),
-                        duration_secs: item.duration_secs as u32,
-                    })
+                    .map(|item| core::playback::NowPlaying::enriched(
+                        item.video_id.to_string(),
+                        item.title.to_string(),
+                        item.artist.to_string(),
+                        item.duration_secs as u32,
+                    ))
                     .collect();
                 if !songs.is_empty() {
                     let playback = crate::core::bridge::playback_core();
@@ -4494,6 +5643,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         ui.on_load_home_data(move || {
             fetch_home_enhanced_data(ui_weak.clone());
+            fetch_followed_songs(ui_weak.clone());
         });
     }
 
@@ -4503,6 +5653,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
 
     // Fetch enhanced home data (new releases, mixes, genre, language)
     fetch_home_enhanced_data(ui.as_weak());
+
+    // H1: "From artists you follow" — top songs from followed artists.
+    fetch_followed_songs(ui.as_weak());
+
+    // Populate the sidebar shortcuts (your artists + your playlists).
+    refresh_sidebar(&ui);
 
     ui.run()
 }

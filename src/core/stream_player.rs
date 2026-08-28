@@ -132,6 +132,19 @@ pub fn invalidate_cached_url(video_id: &str) {
     }
 }
 
+/// Drops every cached CDN URL. Called after yt-dlp is updated: YouTube binds a
+/// signed URL to the player client that produced it, and URLs from an outdated
+/// yt-dlp are served only in part (HTTP 403 past the first ~1 MiB). Without this
+/// the 6h TTL would keep handing out those poisoned URLs after an update.
+pub fn clear_url_cache() {
+    if let Ok(mut cache) = url_cache().lock() {
+        if !cache.is_empty() {
+            cache.clear();
+            save_url_cache(&cache);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // HTTP request helpers
 // ---------------------------------------------------------------------------

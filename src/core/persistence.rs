@@ -16,6 +16,12 @@ pub struct StoredSong {
     pub title: String,
     pub artist: String,
     pub duration_secs: u32,
+    #[serde(default)]
+    pub album: String,
+    #[serde(default)]
+    pub album_id: String,
+    #[serde(default)]
+    pub artist_id: String,
 }
 
 impl From<&NowPlaying> for StoredSong {
@@ -25,6 +31,9 @@ impl From<&NowPlaying> for StoredSong {
             title: np.title.clone(),
             artist: np.artist.clone(),
             duration_secs: np.duration_secs,
+            album: np.album.clone(),
+            album_id: np.album_id.clone(),
+            artist_id: np.artist_id.clone(),
         }
     }
 }
@@ -36,6 +45,9 @@ impl From<StoredSong> for NowPlaying {
             title: s.title,
             artist: s.artist,
             duration_secs: s.duration_secs,
+            album: s.album,
+            album_id: s.album_id,
+            artist_id: s.artist_id,
         }
     }
 }
@@ -58,17 +70,37 @@ pub struct AppSettings {
     /// cost of more background downloads.
     #[serde(default = "default_prefetch_depth")]
     pub prefetch_depth: u32,
+    #[serde(default = "default_theme_name")]
+    pub theme_name: String,
+    #[serde(default = "default_theme_mode")]
+    pub theme_mode: String,
+    /// Unix seconds of the last automatic `yt-dlp` update check. YouTube changes
+    /// its stream signing/throttling regularly, so a stale yt-dlp starts failing
+    /// with HTTP 403 on playback; the app refreshes it periodically in the
+    /// background. 0 = never checked.
+    #[serde(default)]
+    pub last_ytdlp_update_check: u64,
 }
 
 fn default_prefetch_depth() -> u32 { 1 }
+fn default_theme_name() -> String { "Default Blue".to_string() }
+fn default_theme_mode() -> String { "System".to_string() }
 
 impl Default for AppSettings {
     fn default() -> Self {
-        Self { minimize_to_tray: true, last_played: None, onboarding_seen: false, prefetch_depth: default_prefetch_depth() }
+        Self {
+            minimize_to_tray: true,
+            last_played: None,
+            onboarding_seen: false,
+            prefetch_depth: default_prefetch_depth(),
+            theme_name: default_theme_name(),
+            theme_mode: default_theme_mode(),
+            last_ytdlp_update_check: 0,
+        }
     }
 }
 
-fn data_dir() -> PathBuf {
+pub fn data_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
         let base = std::env::var("LOCALAPPDATA")
