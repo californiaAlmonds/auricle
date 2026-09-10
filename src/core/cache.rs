@@ -253,6 +253,7 @@ fn download_audio(video_id: &str, staging: &Path) -> Result<(), String> {
     args.extend([
         "-f".to_string(), "bestaudio[ext=m4a]/bestaudio/best".to_string(),
         "--no-playlist".to_string(),
+        "--force-ipv4".to_string(),
         "--fixup".to_string(), "never".to_string(),
         "-o".to_string(), staging_str,
         watch_url,

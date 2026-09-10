@@ -4,6 +4,8 @@ use ytmapi_rs::query::{SearchQuery, search::SongsFilter};
 use ytmapi_rs::common::YoutubeID;
 
 pub mod core;
+mod context_ui;
+mod search_ui;
 
 use std::sync::{Arc, Mutex};
 use slint::{Model, ModelRc, SharedString, VecModel};
@@ -77,6 +79,23 @@ fn map_search_results(results: Vec<ytmapi_rs::parse::SearchResultSong>) -> Vec<S
 fn map_playlist_items(results: Vec<ytmapi_rs::parse::PlaylistItem>) -> Vec<Song> {
     results.into_iter().filter_map(|p| {
         match p {
+            ytmapi_rs::parse::PlaylistItem::Song(track) => {
+                let credits = context_ui::credits(&track.artists);
+                let video_id = track.video_id.get_raw().to_string();
+                let artist_id = credits.first().map(|artist| artist.browse_id.clone()).unwrap_or_default();
+                core::menu_metadata::register_artists("Song", &video_id, credits.clone());
+                core::playback::register_song_meta(&video_id, &track.album.name, track.album.id.get_raw(), &artist_id);
+                Some(Song {
+                    video_id,
+                    name: track.title,
+                    artist: ArtistRef { name: context_ui::credit_names(&credits), browse_id: artist_id },
+                    album: Some(AlbumRef { name: track.album.name, browse_id: track.album.id.get_raw().into() }),
+                    duration: parse_duration(&track.duration),
+                    thumbnails: track.thumbnails.into_iter().map(|thumb| Thumbnail {
+                        url: thumb.url, width: thumb.width as u64, height: thumb.height as u64,
+                    }).collect(),
+                })
+            }
             ytmapi_rs::parse::PlaylistItem::Video(v) => {
                   let song = Song {
                     video_id: v.video_id.get_raw().to_string(),
@@ -127,14 +146,7 @@ fn make_song_item(t: &core::playback::NowPlaying) -> SongItem {
         String::new()
     };
     let thumb_path = std::env::temp_dir().join(format!("ytm_thumb_{}.jpg", t.video_id));
-    let (thumbnail, has_thumbnail) = if thumb_path.exists() {
-        match slint::Image::load_from_path(&thumb_path) {
-            Ok(img) => (img, true),
-            Err(_) => (Default::default(), false),
-        }
-    } else {
-        (Default::default(), false)
-    };
+    let (thumbnail, has_thumbnail) = load_cached_thumb(&thumb_path);
     SongItem {
         video_id: SharedString::from(t.video_id.as_str()),
         title: SharedString::from(t.title.as_str()),
@@ -341,38 +353,48 @@ fn spawn_sidebar_artist_thumbs(ui_weak: slint::Weak<NativeShellWindow>) {
 
 /// Albums from recently-listened songs (currently playing first, then history),
 /// de-duplicated and newest-first, for the sidebar "recently listened" shortcut.
-fn compute_sidebar_albums() -> Vec<AlbumItem> {
+/// Recently-listened albums for the sidebar, as plain data.
+///
+/// Deliberately does NOT touch images: the background thumbnail fetcher only
+/// needs ids, and calling [`compute_sidebar_albums`] there decoded every cover a
+/// second time on the UI thread.
+fn sidebar_album_seeds() -> Vec<(String, String, String)> {
     use std::collections::HashSet;
     let pb = crate::core::bridge::playback_core();
     let mut entries: Vec<core::playback::NowPlaying> = Vec::new();
     let np = pb.now_playing();
     if !np.album_id.is_empty() && !np.album.is_empty() { entries.push(np); }
     entries.extend(pb.get_history());
-    let mut out: Vec<AlbumItem> = Vec::new();
+    let mut out: Vec<(String, String, String)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for e in entries {
         if e.album_id.is_empty() || e.album.is_empty() { continue; }
         if !seen.insert(e.album_id.clone()) { continue; }
-        let (thumb, has) = load_cached_thumb(&library_thumb_path("album", &e.album_id));
-        out.push(AlbumItem {
-            title: SharedString::from(e.album.as_str()),
-            browse_id: SharedString::from(e.album_id.as_str()),
-            artist: SharedString::from(e.artist.as_str()),
-            year: SharedString::default(),
-            thumbnail: thumb,
-            has_thumbnail: has,
-        });
+        out.push((e.album_id, e.album, e.artist));
         if out.len() >= 8 { break; }
     }
     out
 }
 
+fn compute_sidebar_albums() -> Vec<AlbumItem> {
+    sidebar_album_seeds().into_iter().map(|(album_id, album, artist)| {
+        let (thumb, has) = load_cached_thumb(&library_thumb_path("album", &album_id));
+        AlbumItem {
+            title: SharedString::from(album.as_str()),
+            browse_id: SharedString::from(album_id.as_str()),
+            artist: SharedString::from(artist.as_str()),
+            year: SharedString::default(),
+            thumbnail: thumb,
+            has_thumbnail: has,
+        }
+    }).collect()
+}
+
 /// Background: fetch album art for the sidebar "recently listened" albums.
 fn spawn_sidebar_album_thumbs(ui_weak: slint::Weak<NativeShellWindow>) {
-    let ids: Vec<String> = compute_sidebar_albums().iter()
-        .filter(|a| !a.has_thumbnail)
-        .map(|a| a.browse_id.to_string())
-        .filter(|s| !s.is_empty())
+    let ids: Vec<String> = sidebar_album_seeds().into_iter()
+        .map(|(id, _, _)| id)
+        .filter(|id| !id.is_empty() && !library_thumb_path("album", id).exists())
         .collect();
     if ids.is_empty() { return; }
     core::net::spawn(move || {
@@ -470,10 +492,46 @@ fn purge_oversized_thumb_cache() {
     core::persistence::save_settings(&settings);
 }
 
-/// Load a cached thumbnail image if it exists on disk.
+// Decoded-thumbnail cache for `load_cached_thumb` (below).
+// `thread_local!` is a macro invocation, so this cannot be a `///` doc comment.
+thread_local! {
+    // Decoded-thumbnail cache, keyed by path.
+    //
+    // `refresh_native_shell_ui` rebuilds the queue AND the whole liked-songs
+    // model on every track change, and each row used to re-read and re-decode
+    // its JPEG from disk. With a few dozen liked songs that was tens of
+    // synchronous image decodes on the UI thread per song change — the visible
+    // "app not responding" blip between tracks.
+    //
+    // `slint::Image` is refcounted, so returning a cached clone is essentially
+    // free. `Image` is also `!Send`, which is exactly why this is thread-local
+    // rather than a global mutex.
+    //
+    // Only successful loads are memoised: a miss stays uncached so a thumbnail
+    // that finishes downloading later is still picked up on the next refresh.
+    static THUMB_CACHE: std::cell::RefCell<
+        std::collections::HashMap<std::path::PathBuf, slint::Image>
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Upper bound on [`THUMB_CACHE`] entries before it is dropped wholesale.
+/// These are small (~320px) covers, so a few hundred is cheap to hold.
+const THUMB_CACHE_MAX: usize = 512;
+
+/// Loads a cached thumbnail from disk, memoising the decoded image.
 fn load_cached_thumb(path: &std::path::Path) -> (slint::Image, bool) {
+    if let Some(img) = THUMB_CACHE.with(|c| c.borrow().get(path).cloned()) {
+        return (img, true);
+    }
     if path.exists() {
         if let Ok(img) = slint::Image::load_from_path(path) {
+            THUMB_CACHE.with(|c| {
+                let mut map = c.borrow_mut();
+                if map.len() >= THUMB_CACHE_MAX {
+                    map.clear();
+                }
+                map.insert(path.to_path_buf(), img.clone());
+            });
             return (img, true);
         }
     }
@@ -499,6 +557,56 @@ fn pick_thumb<T: ThumbSize>(thumbs: &[T]) -> Option<&T> {
         .filter(|t| t.longest_edge() >= THUMB_TARGET_PX)
         .min_by_key(|t| t.longest_edge())
         .or_else(|| thumbs.iter().max_by_key(|t| t.longest_edge()))
+}
+
+/// Tidies an artist bio for display.
+///
+/// YouTube Music appends a Wikipedia attribution like
+/// `From Wikipedia (https://en.wikipedia.org/wiki/Some_Artist)`. Two things go
+/// wrong with it:
+///   * the API's plain-text extraction drops the link run, leaving a dangling
+///     `From Wikipedia (` — which is what actually rendered in the UI; and
+///   * when the URL *is* present it is one unbreakable token, so a word-wrapping
+///     `Text` cannot fit it on a line and silently clips it.
+/// Either way, keep the credit and drop the link.
+fn clean_artist_description(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+
+    // Remove any "(http…)" / "(https…)" parenthetical, wherever it appears.
+    while let Some(open) = rest.find("(http") {
+        match rest[open..].find(')') {
+            Some(rel_close) => {
+                out.push_str(&rest[..open]);
+                rest = &rest[open + rel_close + 1..];
+            }
+            // Unbalanced parenthesis: drop the remainder rather than emit a
+            // half-open link.
+            None => {
+                out.push_str(&rest[..open]);
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+
+    // Tidy the whitespace the removal leaves behind, then drop any trailing
+    // empty parenthesis left by the API's own link stripping.
+    let mut cleaned = out
+        .lines()
+        .map(|line| line.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+
+    while cleaned.ends_with('(') || cleaned.ends_with("()") {
+        cleaned.truncate(cleaned.trim_end_matches(['(', ')']).len());
+        cleaned = cleaned.trim_end().to_string();
+    }
+
+    cleaned
 }
 
 /// Lets [`pick_thumb`] work over both our own [`Thumbnail`] and the one the
@@ -2323,49 +2431,13 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     }
 
     // ── Explore genre ─────────────────────────────────────────────────────────
+    let search_controller = search_ui::wire(&ui);
     {
         let ui_weak = ui.as_weak();
         ui.on_explore_genre(move |genre_query| {
-            let query = genre_query.to_string();
-            let ui_weak2 = ui_weak.clone();
             if let Some(ui) = ui_weak.upgrade() {
-                ui.set_is_loading(true);
-                ui.set_current_view(SharedString::from("Search"));
+                ui.invoke_do_search(genre_query);
             }
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                let result = rt.block_on(async {
-                    let api = YtMusic::new_unauthenticated().await?;
-                    api.query(SearchQuery::new(query).with_filter(SongsFilter)).await
-                });
-                slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_weak2.upgrade() {
-                        ui.set_is_loading(false);
-                        if let Ok(songs) = result {
-                            let items: Vec<SongItem> = songs.into_iter().map(|s| {
-                                let avatar = s.artist.chars().next()
-                                    .map(|c| c.to_uppercase().to_string())
-                                    .unwrap_or_else(|| "?".to_string());
-                                let dur_secs: u32 = s.duration.as_str().split(':')
-                                    .collect::<Vec<_>>().iter()
-                                    .fold(0u32, |acc, p| acc * 60 + p.parse::<u32>().unwrap_or(0));
-                                SongItem {
-                                    video_id: SharedString::from(s.video_id.get_raw()),
-                                    title: SharedString::from(s.title.as_str()),
-                                    artist: SharedString::from(s.artist.as_str()),
-                                    album: SharedString::from(s.album.as_ref().map(|a| a.name.as_str()).unwrap_or("")),
-                                    duration_str: SharedString::from(s.duration.as_str()),
-                                    avatar_letter: SharedString::from(avatar.as_str()),
-                                    duration_secs: dur_secs as i32,
-                                    thumbnail: Default::default(),
-                                    has_thumbnail: false,
-                                }
-                            }).collect();
-                            ui.set_search_results(ModelRc::new(VecModel::from(items)));
-                        }
-                    }
-                }).ok();
-            });
         });
     }
 
@@ -2453,18 +2525,18 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         ui.on_explore_mood(move |params_str| {
             let params_raw = params_str.to_string();
-            let ui_weak2 = ui_weak.clone();
-            if let Some(ui) = ui_weak.upgrade() {
-                ui.set_is_loading(true);
-                ui.set_current_view(SharedString::from("Search"));
-            }
+            let Some(ui) = ui_weak.upgrade() else { return; };
+            let query = ui.get_explore_moods().iter()
+                .find(|mood| mood.params == params_str)
+                .map(|mood| mood.title.to_string())
+                .unwrap_or_else(|| "Mood".to_string());
+            let request = search_controller.begin_external(&ui, query);
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .unwrap();
                 let result = rt.block_on(async {
-                    use ytmapi_rs::YtMusic;
                     use ytmapi_rs::query::GetMoodPlaylistsQuery;
                     use ytmapi_rs::common::{MoodCategoryParams, YoutubeID};
                     let api = YtMusic::new_unauthenticated().await.map_err(|e| e.to_string())?;
@@ -2480,35 +2552,19 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     }
                     Ok::<Vec<ytmapi_rs::parse::PlaylistItem>, String>(vec![])
                 });
-                slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_weak2.upgrade() {
-                        ui.set_is_loading(false);
-                        if let Ok(tracks) = result {
-                            let items: Vec<SongItem> = map_playlist_items(tracks).into_iter().map(|s| {
-                                let avatar = s.artist.name.chars().next()
-                                    .map(|c| c.to_uppercase().to_string())
-                                    .unwrap_or_else(|| "?".to_string());
-                                let dur_str = s.duration.map(|d| {
-                                    let m = d / 60;
-                                    let s_rem = d % 60;
-                                    format!("{}:{:02}", m, s_rem)
-                                }).unwrap_or_default();
-                                SongItem {
-                                    video_id: SharedString::from(s.video_id.as_str()),
-                                    title: SharedString::from(s.name.as_str()),
-                                    artist: SharedString::from(s.artist.name.as_str()),
-                                    album: SharedString::from(s.album.as_ref().map(|a| a.name.as_str()).unwrap_or("")),
-                                    duration_str: SharedString::from(dur_str.as_str()),
-                                    avatar_letter: SharedString::from(avatar.as_str()),
-                                    duration_secs: s.duration.unwrap_or(0) as i32,
-                                    thumbnail: Default::default(),
-                                    has_thumbnail: false,
-                                }
-                            }).collect();
-                            ui.set_search_results(ModelRc::new(VecModel::from(items)));
-                        }
-                    }
-                }).ok();
+                request.finish(result.map(|tracks| {
+                    map_playlist_items(tracks).into_iter().map(|song| core::search::SearchEntry {
+                        kind: "Song".to_string(),
+                        id: song.video_id,
+                        title: song.name,
+                        artist: song.artist.name,
+                        artist_id: song.artist.browse_id,
+                        album_id: song.album.as_ref().map(|album| album.browse_id.clone()).unwrap_or_default(),
+                        album: song.album.map(|album| album.name).unwrap_or_default(),
+                        duration_secs: song.duration.unwrap_or(0),
+                        ..core::search::SearchEntry::default()
+                    }).collect()
+                }));
             });
         });
     }
@@ -2537,6 +2593,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     let cur_artist: Arc<Mutex<core::library::SavedArtist>> = Arc::new(Mutex::new(Default::default()));
     let cur_album: Arc<Mutex<core::library::SavedAlbum>> = Arc::new(Mutex::new(Default::default()));
     let cur_playlist: Arc<Mutex<core::library::SavedPlaylist>> = Arc::new(Mutex::new(Default::default()));
+    context_ui::wire(&ui, cur_artist.clone(), cur_album.clone());
 
     fn push_nav_entry(nav_history: &Arc<Mutex<Vec<NavEntry>>>, nav_cursor: &Arc<Mutex<usize>>, view: String, context_id: String) {
         let mut hist = nav_history.lock().unwrap();
@@ -2558,6 +2615,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         let nav_cursor = nav_cursor.clone();
         ui.on_navigate(move |view| {
             if let Some(ui) = ui_weak.upgrade() {
+                context_ui::invalidate(&ui);
                 ui.set_current_view(view.clone());
                 push_nav_entry(&nav_history, &nav_cursor, view.to_string(), String::new());
                 let hist = nav_history.lock().unwrap();
@@ -2591,6 +2649,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 *cur -= 1;
                 let entry = hist[*cur].clone();
                 if let Some(ui) = ui_weak.upgrade() {
+                    context_ui::invalidate(&ui);
                     ui.set_current_view(SharedString::from(entry.view.as_str()));
                     update_nav_buttons(&ui, &hist, *cur);
                     if entry.view == "Artist" && !entry.context_id.is_empty() {
@@ -2630,6 +2689,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 *cur += 1;
                 let entry = hist[*cur].clone();
                 if let Some(ui) = ui_weak.upgrade() {
+                    context_ui::invalidate(&ui);
                     ui.set_current_view(SharedString::from(entry.view.as_str()));
                     update_nav_buttons(&ui, &hist, *cur);
                     if entry.view == "Artist" && !entry.context_id.is_empty() {
@@ -3008,251 +3068,6 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         });
     }
 
-    // ── Search ────────────────────────────────────────────────────────────────
-    {
-        let ui_weak = ui.as_weak();
-        ui.on_do_search(move |query| {
-            let query = query.to_string();
-            if query.trim().is_empty() {
-                return;
-            }
-
-            let ui_weak2 = ui_weak.clone();
-            if let Some(ui) = ui_weak.upgrade() {
-                ui.set_is_loading(true);
-                ui.set_current_view(SharedString::from("Search"));
-            }
-
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
-
-                let results = rt.block_on(async {
-                    use ytmapi_rs::YtMusic;
-                    use ytmapi_rs::query::{SearchQuery, search::SongsFilter, search::ArtistsFilter, search::AlbumsFilter};
-
-                    let api = YtMusic::new_unauthenticated().await.map_err(|e| e.to_string())?;
-                    let songs = api.query(SearchQuery::new(query.clone()).with_filter(SongsFilter))
-                        .await.map_err(|e| e.to_string())?;
-                    let artists = api.query(SearchQuery::new(query.clone()).with_filter(ArtistsFilter))
-                        .await.unwrap_or_default();
-                    let albums = api.query(SearchQuery::new(query.clone()).with_filter(AlbumsFilter))
-                        .await.unwrap_or_default();
-                    Ok::<_, String>((songs, artists, albums))
-                });
-
-                // Collect video_ids for thumbnail fetching
-                let video_ids_for_thumbs: Vec<String> = match &results {
-                    Ok((songs, _, _)) => songs.iter().map(|s| s.video_id.get_raw().to_string()).collect(),
-                    Err(_) => vec![],
-                };
-
-                let ui_weak3 = ui_weak2.clone();
-                let ui_weak_for_song_thumbs = ui_weak3.clone();
-                slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_weak2.upgrade() {
-                        ui.set_is_loading(false);
-                        match results {
-                            Ok((songs, artists, albums)) => {
-                                let items: Vec<SongItem> = songs.into_iter().map(|s| {
-                                    let avatar = s.artist.chars().next()
-                                        .map(|c| c.to_uppercase().to_string())
-                                        .unwrap_or_else(|| "?".to_string());
-                                    let dur_secs: u32 = s.duration.as_str().split(':')
-                                        .collect::<Vec<_>>()
-                                        .iter()
-                                        .fold(0u32, |acc, p| acc * 60 + p.parse::<u32>().unwrap_or(0));
-                                    // Check if thumbnail already cached in temp
-                                    let vid_raw = s.video_id.get_raw().to_string();
-                                    let thumb_path = std::env::temp_dir().join(format!("ytm_thumb_{}.jpg", vid_raw));
-                                    let (thumbnail, has_thumbnail) = if thumb_path.exists() {
-                                        match slint::Image::load_from_path(&thumb_path) {
-                                            Ok(img) => (img, true),
-                                            Err(_) => (Default::default(), false),
-                                        }
-                                    } else {
-                                        (Default::default(), false)
-                                    };
-                                    SongItem {
-                                        video_id: SharedString::from(s.video_id.get_raw()),
-                                        title: SharedString::from(s.title.as_str()),
-                                        artist: SharedString::from(s.artist.as_str()),
-                                        album: SharedString::from(
-                                            s.album.as_ref().map(|a| a.name.as_str()).unwrap_or(""),
-                                        ),
-                                        duration_str: SharedString::from(s.duration.as_str()),
-                                        avatar_letter: SharedString::from(avatar.as_str()),
-                                        duration_secs: dur_secs as i32,
-                                        thumbnail,
-                                        has_thumbnail,
-                                    }
-                                }).collect();
-                                ui.set_search_results(ModelRc::new(VecModel::from(items)));
-
-                                // Artist results
-                                let mut artist_thumb_urls: Vec<(usize, String)> = vec![];
-                                let artist_items: Vec<ArtistItem> = artists.into_iter().take(10).enumerate().map(|(i, a)| {
-                                    if let Some(t) = pick_thumb(&a.thumbnails) {
-                                        artist_thumb_urls.push((i, t.url.clone()));
-                                    }
-                                    ArtistItem {
-                                        name: SharedString::from(a.artist.as_str()),
-                                        browse_id: SharedString::from(a.browse_id.get_raw()),
-                                        thumbnail: Default::default(),
-                                        has_thumbnail: false,
-                                        subscriber_count: SharedString::from(""),
-                                    }
-                                }).collect();
-                                ui.set_search_artists(ModelRc::new(VecModel::from(artist_items)));
-
-                                // Album results
-                                let mut album_thumb_urls: Vec<(usize, String)> = vec![];
-                                let album_items: Vec<AlbumItem> = albums.into_iter().take(10).enumerate().map(|(i, a)| {
-                                    if let Some(t) = pick_thumb(&a.thumbnails) {
-                                        album_thumb_urls.push((i, t.url.clone()));
-                                    }
-                                    AlbumItem {
-                                        title: SharedString::from(a.title.as_str()),
-                                        browse_id: SharedString::from(a.album_id.get_raw()),
-                                        artist: SharedString::from(a.artist.as_str()),
-                                        year: SharedString::from(a.year.as_str()),
-                                        thumbnail: Default::default(),
-                                        has_thumbnail: false,
-                                    }
-                                }).collect();
-                                ui.set_search_albums(ModelRc::new(VecModel::from(album_items)));
-
-                                // Fetch artist thumbnails in background
-                                if !artist_thumb_urls.is_empty() {
-                                    let ui_w = ui_weak3.clone();
-                                    std::thread::spawn(move || {
-                                        if let Ok(client) = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(5)).build() {
-                                            for (idx, url) in &artist_thumb_urls {
-                                                let path = std::env::temp_dir().join(format!("ytm_artist_search_{}.jpg", idx));
-                                                if let Ok(resp) = client.get(url).send() {
-                                                    if resp.status().is_success() {
-                                                        if let Ok(bytes) = resp.bytes() {
-                                                            let _ = std::fs::write(&path, &bytes);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            let indices: Vec<usize> = artist_thumb_urls.iter().map(|(i, _)| *i).collect();
-                                            slint::invoke_from_event_loop(move || {
-                                                if let Some(ui) = ui_w.upgrade() {
-                                                    let model = ui.get_search_artists();
-                                                    let mut items: Vec<ArtistItem> = (0..model.row_count()).map(|i| model.row_data(i).unwrap()).collect();
-                                                    for idx in indices {
-                                                        let path = std::env::temp_dir().join(format!("ytm_artist_search_{}.jpg", idx));
-                                                        if path.exists() {
-                                                            if let Ok(img) = slint::Image::load_from_path(&path) {
-                                                                items[idx].thumbnail = img;
-                                                                items[idx].has_thumbnail = true;
-                                                            }
-                                                        }
-                                                    }
-                                                    ui.set_search_artists(ModelRc::new(VecModel::from(items)));
-                                                }
-                                            }).ok();
-                                        }
-                                    });
-                                }
-
-                                // Fetch album thumbnails in background
-                                if !album_thumb_urls.is_empty() {
-                                    let ui_w = ui_weak3.clone();
-                                    std::thread::spawn(move || {
-                                        if let Ok(client) = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(5)).build() {
-                                            for (idx, url) in &album_thumb_urls {
-                                                let path = std::env::temp_dir().join(format!("ytm_album_search_{}.jpg", idx));
-                                                if let Ok(resp) = client.get(url).send() {
-                                                    if resp.status().is_success() {
-                                                        if let Ok(bytes) = resp.bytes() {
-                                                            let _ = std::fs::write(&path, &bytes);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            let indices: Vec<usize> = album_thumb_urls.iter().map(|(i, _)| *i).collect();
-                                            slint::invoke_from_event_loop(move || {
-                                                if let Some(ui) = ui_w.upgrade() {
-                                                    let model = ui.get_search_albums();
-                                                    let mut items: Vec<AlbumItem> = (0..model.row_count()).map(|i| model.row_data(i).unwrap()).collect();
-                                                    for idx in indices {
-                                                        let path = std::env::temp_dir().join(format!("ytm_album_search_{}.jpg", idx));
-                                                        if path.exists() {
-                                                            if let Ok(img) = slint::Image::load_from_path(&path) {
-                                                                items[idx].thumbnail = img;
-                                                                items[idx].has_thumbnail = true;
-                                                            }
-                                                        }
-                                                    }
-                                                    ui.set_search_albums(ModelRc::new(VecModel::from(items)));
-                                                }
-                                            }).ok();
-                                        }
-                                    });
-                                }
-                            }
-                            Err(e) => {
-                                log::error!("Search failed: {e}");
-                            }
-                        }
-                    }
-                }).ok();
-
-                // Spawn background thumbnail fetch for search results
-                if !video_ids_for_thumbs.is_empty() {
-                    let ui_weak_thumb = ui_weak_for_song_thumbs;
-                    std::thread::spawn(move || {
-                        let client = reqwest::blocking::Client::builder()
-                            .timeout(std::time::Duration::from_secs(5))
-                            .build()
-                            .ok();
-                        if let Some(client) = client {
-                            for vid in &video_ids_for_thumbs {
-                                let thumb_path = std::env::temp_dir().join(format!("ytm_thumb_{}.jpg", vid));
-                                if thumb_path.exists() { continue; }
-                                let url = format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", vid);
-                                if let Ok(resp) = client.get(&url).send() {
-                                    if resp.status().is_success() {
-                                        if let Ok(bytes) = resp.bytes() {
-                                            let _ = std::fs::write(&thumb_path, &bytes);
-                                        }
-                                    }
-                                }
-                            }
-                            // After all thumbnails fetched, update the UI model
-                            slint::invoke_from_event_loop(move || {
-                                if let Some(ui) = ui_weak_thumb.upgrade() {
-                                    let model = ui.get_search_results();
-                                    let count = model.row_count();
-                                    let mut new_items: Vec<SongItem> = Vec::with_capacity(count);
-                                    for i in 0..count {
-                                        let mut item = model.row_data(i).unwrap();
-                                        if !item.has_thumbnail {
-                                            let tp = std::env::temp_dir().join(format!("ytm_thumb_{}.jpg", item.video_id.as_str()));
-                                            if tp.exists() {
-                                                if let Ok(img) = slint::Image::load_from_path(&tp) {
-                                                    item.thumbnail = img;
-                                                    item.has_thumbnail = true;
-                                                }
-                                            }
-                                        }
-                                        new_items.push(item);
-                                    }
-                                    ui.set_search_results(ModelRc::new(VecModel::from(new_items)));
-                                }
-                            }).ok();
-                        }
-                    });
-                }
-            });
-        });
-    }
-
     // ── Navigate to Artist ─────────────────────────────────────────────────────
     {
         let ui_weak = ui.as_weak();
@@ -3263,6 +3078,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         ui.on_navigate_to_artist(move |browse_id| {
             let browse_id = browse_id.to_string();
             if browse_id.trim().is_empty() { return; }
+            if let Some(ui) = ui_weak.upgrade() { context_ui::invalidate(&ui); }
 
             // Push to nav history unless restoring from back/forward
             if !nav_restoring.load(std::sync::atomic::Ordering::Relaxed) {
@@ -3309,6 +3125,15 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                 ui.set_artist_view_name(SharedString::from(artist.name.as_str()));
                                 ui.set_artist_view_has_thumbnail(false);
                                 let art_thumb = pick_thumb(&artist.thumbnails).map(|t| t.url.clone()).unwrap_or_default();
+                                context_ui::register_entity("Artist", &browse_id_c, &artist.name, "", &art_thumb);
+                                core::menu_metadata::register_artists("Artist", &browse_id_c, vec![core::menu_metadata::ArtistCredit {
+                                    name: artist.name.clone(), browse_id: browse_id_c.clone(),
+                                }]);
+                                for release in artist.top_releases.albums.iter().chain(artist.top_releases.singles.iter())
+                                    .flat_map(|section| section.results.iter()) {
+                                    context_ui::register_entity("Album", release.album_id.get_raw(), &release.title, &artist.name,
+                                        pick_thumb(&release.thumbnails).map(|thumb| thumb.url.as_str()).unwrap_or(""));
+                                }
                                 if let Ok(mut c) = cur_artist.lock() {
                                     *c = core::library::SavedArtist {
                                         browse_id: browse_id_c.clone(),
@@ -3319,7 +3144,8 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                 core::library::set_artist_thumbnail(&browse_id_c, &art_thumb);
                                 ui.set_artist_view_subscribed(core::library::is_artist_followed(&browse_id_c));
                                 ui.set_artist_view_description(SharedString::from(
-                                    artist.description.as_deref().unwrap_or("")
+                                    clean_artist_description(artist.description.as_deref().unwrap_or(""))
+                                        .as_str()
                                 ));
 
                                 // Convert top songs
@@ -3334,6 +3160,13 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                             .map(|c| c.to_uppercase().to_string())
                                             .unwrap_or_else(|| "?".to_string());
                                         let vid = s.video_id.get_raw();
+                                        let credits = context_ui::credits(&s.artists);
+                                        let artist_names = context_ui::credit_names(&credits);
+                                        core::playback::register_song_meta(
+                                            vid, s.album.name.as_str(),
+                                            ytmapi_rs::common::YoutubeID::get_raw(&s.album.id),
+                                            credits.first().map(|artist| artist.browse_id.as_str()).unwrap_or(""));
+                                        core::menu_metadata::register_artists("Song", vid, credits);
                                         let thumb_path = std::env::temp_dir().join(format!("ytm_thumb_{}.jpg", vid));
                                         let (thumbnail, has_thumbnail) = if thumb_path.exists() {
                                             match slint::Image::load_from_path(&thumb_path) {
@@ -3344,7 +3177,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                         SongItem {
                                             video_id: SharedString::from(vid),
                                             title: SharedString::from(s.title.as_str()),
-                                            artist: SharedString::from(artist.name.as_str()),
+                                            artist: SharedString::from(artist_names.as_str()),
                                             album: SharedString::from(s.album.name.as_str()),
                                             duration_str: SharedString::from(""),
                                             avatar_letter: SharedString::from(avatar.as_str()),
@@ -3745,6 +3578,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             let ui_w = ui_weak.clone();
             // Show loading and navigate to Radio page
             if let Some(ui) = ui_w.upgrade() {
+                context_ui::invalidate(&ui);
                 ui.set_is_loading(true);
                 ui.set_radio_title(SharedString::from(format!("Song Radio").as_str()));
                 ui.set_radio_songs(ModelRc::new(VecModel::from(Vec::<SongItem>::new())));
@@ -4082,6 +3916,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             let vid = video_id.to_string();
             let artist = artist_name.to_string();
             if let Some(ui) = ui_weak.upgrade() {
+                context_ui::invalidate(&ui);
                 ui.set_is_loading(true);
                 ui.set_radio_title(SharedString::from(format!("{} Radio", artist).as_str()));
                 ui.set_radio_songs(ModelRc::new(VecModel::from(Vec::<SongItem>::new())));
@@ -4165,15 +4000,27 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     // ── "Go to album" resolved by video id (session meta) ────────────────────
     {
         let ui_weak = ui.as_weak();
-        ui.on_open_album_for(move |vid| {
+        ui.on_open_album_for(move |vid, album_name| {
             if let Some(ui) = ui_weak.upgrade() {
                 let m = core::playback::get_song_meta(&vid.to_string()).unwrap_or_default();
                 if !m.album_id.is_empty() {
                     ui.invoke_navigate_to_album(SharedString::from(m.album_id.as_str()));
-                } else if !m.album.is_empty() {
-                    ui.invoke_go_to_song_album(SharedString::from(m.album.as_str()));
+                    return;
+                }
+                // Fall back to the album NAME. Prefer the cached metadata, but a
+                // song we've never played has no meta at all — hence the name the
+                // row itself is displaying, passed in by the caller. Without this
+                // fallback "Go to album" silently did nothing for search results.
+                let name = if !m.album.is_empty() { m.album } else { album_name.to_string() };
+                if !name.trim().is_empty() {
+                    ui.invoke_go_to_song_album(SharedString::from(name.as_str()));
                 }
             }
+        });
+        ui.on_album_resolvable(move |vid, album_name| {
+            if !album_name.trim().is_empty() { return true; }
+            let m = core::playback::get_song_meta(&vid.to_string()).unwrap_or_default();
+            !m.album_id.is_empty() || !m.album.is_empty()
         });
     }
 
@@ -4278,6 +4125,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         ui.on_navigate_to_album(move |browse_id| {
             let browse_id = browse_id.to_string();
             if browse_id.trim().is_empty() { return; }
+            if let Some(ui) = ui_weak.upgrade() { context_ui::invalidate(&ui); }
 
             if !nav_restoring.load(std::sync::atomic::Ordering::Relaxed) {
                 push_nav_entry(&nav_history, &nav_cursor, "Album".to_string(), browse_id.clone());
@@ -4316,8 +4164,9 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                         ui.set_is_loading(false);
                         match result {
                             Ok(album) => {
+                                context_ui::register_album(&browse_id_c, &album);
                                 ui.set_album_view_title(SharedString::from(album.title.as_str()));
-                                let artist_name = album.artists.first().map(|a| a.name.as_str()).unwrap_or("").to_string();
+                                let artist_name = context_ui::credit_names(&context_ui::credits(&album.artists));
                                 ui.set_album_view_artist(SharedString::from(artist_name.as_str()));
                                 ui.set_album_view_year(SharedString::from(album.year.as_str()));
                                 ui.set_album_view_has_thumbnail(false);
@@ -4557,112 +4406,6 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         });
     }
 
-    // ── Live Search (suggestions as user types) ────────────────────────────────
-    {
-        let ui_weak = ui.as_weak();
-        ui.on_live_search(move |query| {
-            let query = query.to_string();
-            if query.trim().is_empty() {
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_search_suggestions(ModelRc::new(VecModel::from(Vec::<SongItem>::new())));
-                }
-                return;
-            }
-
-            let ui_weak2 = ui_weak.clone();
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
-
-                let results = rt.block_on(async {
-                    use ytmapi_rs::YtMusic;
-                    use ytmapi_rs::query::{SearchQuery, search::SongsFilter};
-
-                    let api = YtMusic::new_unauthenticated().await.map_err(|e| e.to_string())?;
-                    api.query(SearchQuery::new(query).with_filter(SongsFilter))
-                        .await
-                        .map_err(|e| e.to_string())
-                });
-
-                // Fetch thumbnails inline (parallel) before displaying
-                if let Ok(ref songs) = results {
-                    let client = reqwest::blocking::Client::builder()
-                        .timeout(std::time::Duration::from_secs(4))
-                        .build()
-                        .ok();
-                    if let Some(client) = client {
-                        use std::sync::Arc;
-                        let client = Arc::new(client);
-                        let handles: Vec<_> = songs.iter().take(6).filter_map(|s| {
-                            let vid = s.video_id.get_raw().to_string();
-                            let thumb_path = std::env::temp_dir().join(format!("ytm_thumb_{}.jpg", &vid));
-                            if thumb_path.exists() { return None; }
-                            let client = Arc::clone(&client);
-                            Some(std::thread::spawn(move || {
-                                let url = format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", vid);
-                                if let Ok(resp) = client.get(&url).send() {
-                                    if resp.status().is_success() {
-                                        if let Ok(bytes) = resp.bytes() {
-                                            let _ = std::fs::write(&thumb_path, &bytes);
-                                        }
-                                    }
-                                }
-                            }))
-                        }).collect();
-                        for h in handles { let _ = h.join(); }
-                    }
-                }
-
-                slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_weak2.upgrade() {
-                        match results {
-                            Ok(songs) => {
-                                let items: Vec<SongItem> = songs.into_iter().take(6).map(|s| {
-                                    let avatar = s.artist.chars().next()
-                                        .map(|c| c.to_uppercase().to_string())
-                                        .unwrap_or_else(|| "?".to_string());
-                                    let dur_secs: u32 = s.duration.as_str().split(':')
-                                        .collect::<Vec<_>>()
-                                        .iter()
-                                        .fold(0u32, |acc, p| acc * 60 + p.parse::<u32>().unwrap_or(0));
-                                    let vid_raw = s.video_id.get_raw().to_string();
-                                    let thumb_path = std::env::temp_dir().join(format!("ytm_thumb_{}.jpg", &vid_raw));
-                                    let (thumbnail, has_thumbnail) = if thumb_path.exists() {
-                                        match slint::Image::load_from_path(&thumb_path) {
-                                            Ok(img) => (img, true),
-                                            Err(_) => (slint::Image::default(), false),
-                                        }
-                                    } else {
-                                        (slint::Image::default(), false)
-                                    };
-                                    SongItem {
-                                        video_id: SharedString::from(s.video_id.get_raw()),
-                                        title: SharedString::from(s.title.as_str()),
-                                        artist: SharedString::from(s.artist.as_str()),
-                                        album: SharedString::from(
-                                            s.album.as_ref().map(|a| a.name.as_str()).unwrap_or(""),
-                                        ),
-                                        duration_str: SharedString::from(s.duration.as_str()),
-                                        avatar_letter: SharedString::from(avatar.as_str()),
-                                        duration_secs: dur_secs as i32,
-                                        thumbnail,
-                                        has_thumbnail,
-                                    }
-                                }).collect();
-                                ui.set_search_suggestions(ModelRc::new(VecModel::from(items)));
-                            }
-                            Err(_) => {
-                                ui.set_search_suggestions(ModelRc::new(VecModel::from(Vec::<SongItem>::new())));
-                            }
-                        }
-                    }
-                }).ok();
-            });
-        });
-    }
-
     // HWND will be resolved lazily after the window is shown
     #[cfg(target_os = "windows")]
     let app_hwnd: Arc<std::sync::atomic::AtomicIsize> = Arc::new(std::sync::atomic::AtomicIsize::new(0));
@@ -4682,8 +4425,9 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             let mut last_thumbnail_id = String::new();
             let mut last_precached_id = String::new(); // next-song we've queued a full cache download for
             let mut last_upgraded_id = String::new();  // song we've upgraded stream→cache
+            let mut last_sidebar_album_sig = String::new(); // dedupes the sidebar album rebuild
             let mut thumb_refresh_counter: u32 = 0;
-            let mut thumb_fetch_spawned = false;
+            let mut thumb_fetch_done: Option<std::sync::mpsc::Receiver<()>> = None;
 
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(500));
@@ -4807,13 +4551,25 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                         core::persistence::save_settings(&settings);
                     }
                     // History changed — refresh the "recently listened" album shortcuts.
-                    let ui_w = ui_weak.clone();
-                    slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = ui_w.upgrade() {
-                            ui.set_sidebar_albums(ModelRc::new(VecModel::from(compute_sidebar_albums())));
-                            spawn_sidebar_album_thumbs(ui.as_weak());
-                        }
-                    }).ok();
+                    //
+                    // Rebuilding this model decodes up to 8 covers ON THE UI THREAD, so
+                    // only do it when the album set actually changed. Most track changes
+                    // (same album, or an album already in the recent list) leave it
+                    // identical and can be skipped entirely.
+                    let sig = sidebar_album_seeds().into_iter()
+                        .map(|(id, _, _)| id)
+                        .collect::<Vec<_>>()
+                        .join("\u{1}");
+                    if sig != last_sidebar_album_sig {
+                        last_sidebar_album_sig = sig;
+                        let ui_w = ui_weak.clone();
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui_w.upgrade() {
+                                ui.set_sidebar_albums(ModelRc::new(VecModel::from(compute_sidebar_albums())));
+                                spawn_sidebar_album_thumbs(ui.as_weak());
+                            }
+                        }).ok();
+                    }
                 }
 
                 let track = playback.now_playing();
@@ -4955,8 +4711,13 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 }
 
                 // ── Periodic thumbnail fetch for queue items (every 3s = 6 ticks) ──
+                if let Some(done) = &thumb_fetch_done {
+                    if !matches!(done.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)) {
+                        thumb_fetch_done = None;
+                    }
+                }
                 thumb_refresh_counter += 1;
-                if thumb_refresh_counter >= 6 && !thumb_fetch_spawned {
+                if thumb_refresh_counter >= 6 && thumb_fetch_done.is_none() {
                     thumb_refresh_counter = 0;
                     // Check if any queue items are missing thumbnails
                     let missing: Vec<String> = playback.full_queue().iter()
@@ -4967,7 +4728,8 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                         .map(|np| np.video_id.clone())
                         .collect();
                     if !missing.is_empty() {
-                        thumb_fetch_spawned = true;
+                        let (done_tx, done_rx) = std::sync::mpsc::channel();
+                        thumb_fetch_done = Some(done_rx);
                         let ui_weak_t = ui_weak.clone();
                         std::thread::spawn(move || {
                             let client = reqwest::blocking::Client::builder()
@@ -5014,15 +4776,9 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                     }
                                 }
                             }).ok();
+                            drop(done_tx);
                         });
-                    } else {
-                        // All thumbnails present, stop checking
-                        thumb_fetch_spawned = false;
                     }
-                }
-                // Reset spawn flag once thread completes (approximate: after 10s)
-                if thumb_fetch_spawned && thumb_refresh_counter == 0 {
-                    thumb_fetch_spawned = false;
                 }
 
                 let ui_w = ui_weak.clone();
@@ -5314,6 +5070,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         ui.on_navigate_to_playlist(move |playlist_id| {
             let playlist_id = playlist_id.to_string();
             if playlist_id.trim().is_empty() { return; }
+            if let Some(ui) = ui_weak.upgrade() { context_ui::invalidate(&ui); }
 
             if !nav_restoring.load(std::sync::atomic::Ordering::Relaxed) {
                 push_nav_entry(&nav_history, &nav_cursor, "Playlist".to_string(), playlist_id.clone());

@@ -770,6 +770,78 @@ fn resolve_ytdlp() -> PathBuf {
     crate::core::addons::resolve_tool("yt-dlp")
 }
 
+const EXTRACTION_TIMEOUT: Duration = Duration::from_secs(20);
+
+fn run_extraction_command(
+    command: &mut std::process::Command,
+    deadline: std::time::Instant,
+    video_id: &str,
+) -> Result<std::process::Output, String> {
+    use std::io::{self, Read};
+    use std::process::Stdio;
+    use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+    use wait_timeout::ChildExt;
+
+    fn drain_output(reader: impl Read + Send + 'static) -> io::Result<Receiver<io::Result<Vec<u8>>>> {
+        let (sender, receiver) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("yt-dlp-output".to_string())
+            .spawn(move || {
+                let mut reader = reader;
+                let mut bytes = Vec::new();
+                let result = reader.read_to_end(&mut bytes).map(|_| bytes);
+                let _ = sender.send(result);
+            })?;
+        Ok(receiver)
+    }
+
+    let timeout_error = || format!(
+        "[native-audio][stage=extract][code=extract-timeout] video_id={video_id} yt-dlp extraction exceeded its total deadline"
+    );
+    let remaining = || deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining().is_zero() {
+        return Err(timeout_error());
+    }
+
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("yt-dlp spawn error: {error}"))?;
+
+    let result = (|| {
+        let stdout = drain_output(child.stdout.take().unwrap())
+            .map_err(|error| format!("yt-dlp output reader error: {error}"))?;
+        let stderr = drain_output(child.stderr.take().unwrap())
+            .map_err(|error| format!("yt-dlp output reader error: {error}"))?;
+        let status = child.wait_timeout(remaining())
+            .map_err(|error| format!("yt-dlp wait error: {error}"))?
+            .ok_or_else(timeout_error)?;
+
+        // Descendants can retain pipe handles after exit; never join these readers.
+        let finish_output = |receiver: Receiver<io::Result<Vec<u8>>>| {
+            receiver.recv_timeout(remaining())
+                .map_err(|error| match error {
+                    RecvTimeoutError::Timeout => timeout_error(),
+                    RecvTimeoutError::Disconnected => "yt-dlp output reader disconnected".to_string(),
+                })?
+                .map_err(|error| format!("yt-dlp output read error: {error}"))
+        };
+        Ok(std::process::Output {
+            status,
+            stdout: finish_output(stdout)?,
+            stderr: finish_output(stderr)?,
+        })
+    })();
+
+    if result.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    result
+}
+
 /// Names of browsers whose cookie database exists on this machine, in priority order.
 /// Shared by the streaming path and the cache download path.
 pub fn detected_cookie_browsers() -> Vec<&'static str> {
@@ -843,6 +915,7 @@ pub fn get_stream_url(video_id: &str) -> Result<String, String> {
     let yt_url = format!("https://www.youtube.com/watch?v={video_id}");
 
     let start = std::time::Instant::now();
+    let deadline = start + EXTRACTION_TIMEOUT;
 
     // Build a list of browsers to try based on whether their cookie DB exists.
     let mut browser_attempts: Vec<Option<&str>> =
@@ -856,6 +929,7 @@ pub fn get_stream_url(video_id: &str) -> Result<String, String> {
         cmd.args([
             "-g", "-f", "140/bestaudio[ext=m4a]/bestaudio",
             "--no-playlist",
+            "--force-ipv4",
             "--no-check-certificates",
             "--no-warnings",
             "--extractor-retries", "2",
@@ -877,10 +951,10 @@ pub fn get_stream_url(video_id: &str) -> Result<String, String> {
             cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
 
-        let output = match cmd.output() {
+        let output = match run_extraction_command(&mut cmd, deadline, video_id) {
             Ok(o) => o,
             Err(e) => {
-                last_err = format!("yt-dlp spawn error: {e}");
+                last_err = e;
                 break;
             }
         };
@@ -905,6 +979,122 @@ pub fn get_stream_url(video_id: &str) -> Result<String, String> {
     }
 
     Err(last_err)
+}
+
+#[cfg(test)]
+mod extraction_tests {
+    use super::{run_extraction_command, EXTRACTION_TIMEOUT};
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    const CHILD_MODE: &str = "AURICLE_EXTRACTION_TEST_CHILD";
+
+    fn child_command(mode: &str) -> Command {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact", "core::stream_player::extraction_tests::process_child",
+            "--ignored", "--nocapture",
+        ]).env(CHILD_MODE, mode);
+        command
+    }
+
+    fn block_child(duration: Duration) {
+        let (_sender, receiver) = std::sync::mpsc::channel::<()>();
+        let _ = receiver.recv_timeout(duration);
+    }
+
+    #[test]
+    #[ignore]
+    fn process_child() {
+        let Ok(mode) = std::env::var(CHILD_MODE) else {
+            return;
+        };
+        match mode.as_str() {
+            "success" => {
+                println!("extract-stdout");
+                eprintln!("extract-stderr");
+            }
+            "nonzero" => {
+                println!("extract-partial");
+                eprintln!("Sign in: extract-failed");
+                std::process::exit(23);
+            }
+            "large" => {
+                let stdout = vec![b'O'; 1024 * 1024];
+                let stderr = vec![b'E'; 1024 * 1024];
+                std::io::stdout().write_all(&stdout).unwrap();
+                std::io::stderr().write_all(&stderr).unwrap();
+            }
+            "hold" => block_child(Duration::from_secs(10)),
+            "descendant" => {
+                child_command("hold")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::inherit())
+                    .stderr(Stdio::inherit())
+                    .spawn().unwrap();
+            }
+            _ => panic!("unexpected extraction test child mode"),
+        }
+    }
+
+    #[test]
+    fn successful_output() {
+        let output = run_extraction_command(
+            &mut child_command("success"), Instant::now() + Duration::from_secs(5), "test-success",
+        ).unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("extract-stdout"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("extract-stderr"));
+    }
+
+    #[test]
+    fn nonzero_exit_preserves_output() {
+        let output = run_extraction_command(
+            &mut child_command("nonzero"), Instant::now() + Duration::from_secs(5), "test-nonzero",
+        ).unwrap();
+        assert_eq!(output.status.code(), Some(23));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("extract-partial"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Sign in: extract-failed"));
+    }
+
+    #[test]
+    fn large_stdout_and_stderr_do_not_deadlock() {
+        let output = run_extraction_command(
+            &mut child_command("large"), Instant::now() + Duration::from_secs(5), "test-large",
+        ).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout.iter().filter(|&&byte| byte == b'O').count(), 1024 * 1024);
+        assert_eq!(output.stderr.iter().filter(|&&byte| byte == b'E').count(), 1024 * 1024);
+    }
+
+    #[test]
+    fn deadline_terminates_running_child() {
+        let start = Instant::now();
+        let error = run_extraction_command(
+            &mut child_command("hold"), start + Duration::from_secs(1), "test-deadline",
+        ).unwrap_err();
+        assert_eq!(error, "[native-audio][stage=extract][code=extract-timeout] video_id=test-deadline yt-dlp extraction exceeded its total deadline");
+        assert!(start.elapsed() < Duration::from_secs(4));
+    }
+
+    #[test]
+    fn inherited_pipes_do_not_extend_deadline() {
+        let start = Instant::now();
+        let error = run_extraction_command(
+            &mut child_command("descendant"), start + Duration::from_secs(1), "test-descendant",
+        ).unwrap_err();
+        assert!(error.contains("[stage=extract][code=extract-timeout] video_id=test-descendant"));
+        assert!(start.elapsed() < Duration::from_secs(4));
+    }
+
+    #[test]
+    fn expired_deadline_prevents_another_attempt() {
+        assert_eq!(EXTRACTION_TIMEOUT, Duration::from_secs(20));
+        let mut command = Command::new("auricle-extraction-test-missing-command");
+        let error = run_extraction_command(&mut command, Instant::now(), "test-expired").unwrap_err();
+        assert!(error.contains("[stage=extract][code=extract-timeout] video_id=test-expired"));
+    }
 }
 
 /// Pre-fetches a stream URL in a background thread (populates the URL cache).

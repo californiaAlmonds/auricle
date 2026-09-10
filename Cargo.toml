@@ -33,6 +33,7 @@ tray-icon = "0.19"
 image = { version = "0.25", default-features = false, features = ["png"] }
 zip = "2.2"
 self_update = { version = "0.42", default-features = false, features = ["rustls", "archive-zip", "compression-zip-deflate"], optional = true }
+wait-timeout = "0.2"
 
 [features]
 # `self-update` is on by default for the portable build. Installer/Store builds

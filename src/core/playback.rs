@@ -2,7 +2,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rodio::{OutputStream, OutputStreamHandle, Sink};
 use ytmapi_rs::common::YoutubeID;
@@ -166,6 +166,15 @@ fn log_native_audio_error(stage: &str, code: &str, video_id: &str, detail: &str)
     eprintln!("{message}");
 }
 
+fn log_native_audio_timing(stage: &str, code: &str, video_id: &str, started: Instant) {
+    let elapsed_ms = started.elapsed().as_millis();
+    let message = format!(
+        "[native-audio][stage={stage}][code={code}] video_id={video_id} elapsed_ms={elapsed_ms}"
+    );
+    log::info!("{message}");
+    eprintln!("{message}");
+}
+
 fn create_audio_engine(duration_out: Arc<AtomicU32>) -> Result<AudioEngine, String> {
     let (_stream, handle) = OutputStream::try_default()
         .map_err(|err| format!("Failed to open native audio output: {err}"))?;
@@ -187,8 +196,10 @@ fn create_audio_engine(duration_out: Arc<AtomicU32>) -> Result<AudioEngine, Stri
 fn spawn_stream_fetch(events: mpsc::Sender<AudioEvent>, request_id: u64, video_id: String, force_refresh: bool) {
     thread::spawn(move || {
         // 1. Cache hit? (a local .m4a can never 401 — always safe to use)
+        let selection_started = Instant::now();
         let cached = AudioCache::global().lock().ok()
             .and_then(|mut c| c.get(&video_id));
+        log_native_audio_timing("source-select", if cached.is_some() { "cache-hit" } else { "stream-selected" }, &video_id, selection_started);
         if let Some(path) = cached {
             let _ = events.send(AudioEvent::StreamReady {
                 request_id,
@@ -203,7 +214,10 @@ fn spawn_stream_fetch(events: mpsc::Sender<AudioEvent>, request_id: u64, video_i
             crate::core::stream_player::invalidate_cached_url(&video_id);
         }
         // 2. Stream URL via yt-dlp
-        let url = match get_stream_url(&video_id) {
+        let extraction_started = Instant::now();
+        let url_result = get_stream_url(&video_id);
+        log_native_audio_timing("extract", if url_result.is_ok() { "stream-url-ready" } else { "stream-url-failed" }, &video_id, extraction_started);
+        let url = match url_result {
             Ok(u) => u,
             Err(e) => {
                 let _ = events.send(AudioEvent::StreamReady { request_id, video_id, result: Err(e) });
@@ -211,8 +225,9 @@ fn spawn_stream_fetch(events: mpsc::Sender<AudioEvent>, request_id: u64, video_i
             }
         };
         // 3. Get total byte length for seeking (Range:bytes=0-0 — very fast, <200ms)
+        let length_started = Instant::now();
         let content_len = crate::core::stream_player::fetch_content_length(&url);
-        eprintln!("[stream-fetch] {video_id} content_len={content_len:?}");
+        log_native_audio_timing("length-lookup", if content_len.is_some() { "length-ready" } else { "length-unknown" }, &video_id, length_started);
         let _ = events.send(AudioEvent::StreamReady {
             request_id,
             video_id,
@@ -224,10 +239,13 @@ fn spawn_stream_fetch(events: mpsc::Sender<AudioEvent>, request_id: u64, video_i
 fn load_stream_into_engine(engine: &mut AudioEngine, video_id: &str, url: &str, fallback_content_len: Option<u64>, seek_secs: Option<f64>, tee_meta: Option<(&str, &str)>) -> Result<(), String> {
     // Write-through-cache only a fresh full load (no seek). A seek starts mid-file
     // and would produce a non-contiguous cache file, so stream without teeing then.
-    let mut source = match (tee_meta, seek_secs) {
+    let decode_started = Instant::now();
+    let source_result = match (tee_meta, seek_secs) {
         (Some((title, artist)), None) => StreamingAudioSource::from_url_teed(url, video_id, title, artist),
         _ => StreamingAudioSource::from_url(url),
-    }.map_err(|e| {
+    };
+    log_native_audio_timing("http-decode-init", if source_result.is_ok() { "stream-open-ready" } else { "stream-open-failed" }, video_id, decode_started);
+    let mut source = source_result.map_err(|e| {
         log_native_audio_error("decode", "stream-open-failed", video_id, &e);
         e
     })?;
@@ -248,7 +266,9 @@ fn load_stream_into_engine(engine: &mut AudioEngine, video_id: &str, url: &str, 
 
     replacement_sink.set_volume(engine.volume);
     engine.duration_out.store(source.duration_secs().unwrap_or(0), Ordering::Relaxed);
+    let append_started = Instant::now();
     replacement_sink.append(source);
+    log_native_audio_timing("sink-append", "source-appended", video_id, append_started);
     replacement_sink.play();
 
     engine.sink.stop();
@@ -1429,6 +1449,136 @@ impl PlaybackCore {
             "Pause".to_string()
         } else {
             "Play".to_string()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires an uncached AURICLE_TEST_VIDEO_ID, network, yt-dlp and an audio output device; writes tee staging audio"]
+    fn live_uncached_audio_worker_starts_stream() {
+        let video_id = std::env::var("AURICLE_TEST_VIDEO_ID")
+            .expect("set AURICLE_TEST_VIDEO_ID to an uncached public track");
+        assert!(video_id.len() == 11 && video_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'), "invalid-video-id");
+        {
+            let mut cache = AudioCache::global().lock().expect("audio-cache-lock-failed");
+            assert!(cache.get(&video_id).is_none(), "track {video_id} is cached; choose another track without deleting user cache");
+            assert!(!cache.cache_dir().join(format!("{video_id}.m4a")).exists(), "audio file for {video_id} already exists; choose another track");
+        }
+
+        let advance_pending = Arc::new(AtomicBool::new(false));
+        let is_cached = Arc::new(AtomicBool::new(true));
+        let audio_loading = Arc::new(AtomicBool::new(false));
+        let just_started = Arc::new(AtomicBool::new(false));
+        let detected_duration = Arc::new(AtomicU32::new(0));
+        let started = Instant::now();
+        let worker = spawn_audio_worker(
+            advance_pending.clone(),
+            is_cached.clone(),
+            audio_loading.clone(),
+            just_started.clone(),
+            detected_duration.clone(),
+        ).expect("audio-worker-spawn-failed");
+        worker.sender.send(AudioCommand::SetVolume(0.0)).expect("set-volume-failed");
+        worker.sender.send(AudioCommand::SetTrack {
+            video_id: video_id.clone(),
+            title: "Streaming smoke test".to_string(),
+            artist: "Test".to_string(),
+            duration_secs: 0,
+        }).expect("set-track-failed");
+        worker.sender.send(AudioCommand::SetPlaying(true)).expect("set-playing-failed");
+
+        let deadline = started + Duration::from_secs(25);
+        while !just_started.load(Ordering::Relaxed) && !advance_pending.load(Ordering::Relaxed) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() { break; }
+            thread::sleep(remaining.min(Duration::from_millis(25)));
+        }
+        let elapsed_ms = started.elapsed().as_millis();
+        let did_start = just_started.load(Ordering::Relaxed);
+        let did_advance = advance_pending.load(Ordering::Relaxed);
+        let cached = is_cached.load(Ordering::Relaxed);
+        let loading = audio_loading.load(Ordering::Relaxed);
+        let duration_secs = detected_duration.load(Ordering::Relaxed);
+        let pause_result = worker.sender.send(AudioCommand::SetPlaying(false));
+        drop(worker);
+
+        eprintln!("[native-audio][stage=worker-smoke][code=worker-state] video_id={video_id} elapsed_ms={elapsed_ms} just_started={did_start} advance_pending={did_advance} is_cached={cached} audio_loading={loading} detected_duration_secs={duration_secs}");
+        assert!(!did_advance, "worker advanced before successful streaming startup");
+        assert!(did_start, "worker did not start within 25 seconds");
+        assert!(!cached, "worker used cached audio instead of from_url_teed");
+        assert!(!loading, "worker remained loading after startup");
+        assert!(duration_secs > 0, "stream duration was not detected");
+        pause_result.expect("pause-worker-failed");
+    }
+
+    #[test]
+    #[ignore = "requires AURICLE_TEST_VIDEO_ID, network, yt-dlp and an audio output device"]
+    fn live_uncached_stream_reaches_sink() {
+        let started = Instant::now();
+        let stage = Arc::new(Mutex::new("configuration"));
+        let worker_stage = stage.clone();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let result = (|| -> Result<(), &'static str> {
+                let video_id = std::env::var("AURICLE_TEST_VIDEO_ID")
+                    .map_err(|_| "missing-video-id")?;
+                if video_id.len() != 11 || !video_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-') {
+                    return Err("invalid-video-id");
+                }
+
+                *worker_stage.lock().unwrap() = "audio-engine";
+                let engine_started = Instant::now();
+                let engine_result = create_audio_engine(Arc::new(AtomicU32::new(0)));
+                log_native_audio_timing("audio-engine", if engine_result.is_ok() { "engine-ready" } else { "engine-failed" }, &video_id, engine_started);
+                let mut engine = engine_result.map_err(|_| "engine-failed")?;
+                engine.volume = 0.0;
+
+                log_native_audio_timing("source-select", "live-stream-cache-bypassed", &video_id, Instant::now());
+                *worker_stage.lock().unwrap() = "extract";
+                let extraction_started = Instant::now();
+                let url_result = get_stream_url(&video_id);
+                log_native_audio_timing("extract", if url_result.is_ok() { "stream-url-ready" } else { "stream-url-failed" }, &video_id, extraction_started);
+                let url = url_result.map_err(|_| "stream-url-failed")?;
+
+                *worker_stage.lock().unwrap() = "length-lookup";
+                let length_started = Instant::now();
+                let content_len = crate::core::stream_player::fetch_content_length(&url);
+                log_native_audio_timing("length-lookup", if content_len.is_some() { "length-ready" } else { "length-unknown" }, &video_id, length_started);
+
+                *worker_stage.lock().unwrap() = "stream-load";
+                load_stream_into_engine(&mut engine, &video_id, &url, content_len, None, None)
+                    .map_err(|_| "stream-load-failed")?;
+
+                *worker_stage.lock().unwrap() = "sink-progress";
+                let progress_started = Instant::now();
+                while started.elapsed() < Duration::from_secs(24) && progress_started.elapsed() < Duration::from_secs(5) {
+                    let position = engine.sink.get_pos();
+                    if position > Duration::from_secs(1) {
+                        eprintln!("[native-audio][stage=sink-progress][code=live-progress-ready] video_id={video_id} position_ms={} elapsed_ms={} total_ms={}", position.as_millis(), progress_started.elapsed().as_millis(), started.elapsed().as_millis());
+                        engine.sink.stop();
+                        return Ok(());
+                    }
+                    if engine.sink.empty() {
+                        return Err("sink-ended-before-progress");
+                    }
+                    thread::sleep(Duration::from_millis(25));
+                }
+                Err("sink-progress-timeout")
+            })();
+            let _ = sender.send(result);
+        });
+
+        match receiver.recv_timeout(Duration::from_secs(25)) {
+            Ok(Ok(())) => {},
+            Ok(Err(code)) => panic!("[native-audio][stage={}][code={code}] elapsed_ms={}", *stage.lock().unwrap(), started.elapsed().as_millis()),
+            Err(error) => panic!("[native-audio][stage={}][code={}] elapsed_ms={}", *stage.lock().unwrap(), match error {
+                mpsc::RecvTimeoutError::Timeout => "live-timeout",
+                mpsc::RecvTimeoutError::Disconnected => "live-worker-disconnected",
+            }, started.elapsed().as_millis()),
         }
     }
 }

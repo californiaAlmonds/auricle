@@ -522,6 +522,7 @@ dependencies = [
  "symphonia",
  "tokio",
  "tray-icon",
+ "wait-timeout",
  "windows 0.58.0",
  "ytmapi-rs",
  "zip",
@@ -7208,6 +7209,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "wait-timeout"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09ac3b126d3914f9849036f826e054cbabdc8519970b8998ddaf3b5bd3c65f11"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

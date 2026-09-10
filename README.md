@@ -1,7 +1,8 @@
 # Auricle
 
 Auricle is a native desktop music player for Windows, built with **Rust** and the
-**[Slint](https://slint.dev/)** UI toolkit. It provides fast search, a persistent
+**[Slint](https://slint.dev/)** UI toolkit. It provides fast debounced search with
+artist/album/song/playlist results, unified right-click context menus, a persistent
 queue, likes/history, OS media-key integration, and a local audio cache — all in a
 lightweight native shell with no embedded web view.
 
@@ -64,6 +65,10 @@ cargo run --bin auricle
 - `src/core/playback.rs` — queue, history, likes, and the playback worker.
 - `src/core/stream_player.rs` — HTTP/range streaming audio source.
 - `src/core/cache.rs` — LRU on-disk audio cache.
+- `src/core/search.rs` — search client with result caching and catalogue enrichment.
+- `src/search_ui.rs` — debounced, cancellable search worker wired to the UI.
+- `src/context_ui.rs` — unified song/album/artist right-click context menus.
+- `src/core/menu_metadata.rs` — artist/album credit resolution for context menus.
 
 ## Technologies
 
