@@ -111,7 +111,7 @@ jobs:
           HASH=$(sha256sum "dist/auricle-${V}-portable.zip" | cut -d' ' -f1)
           git clone "https://x-access-token:${{ secrets.SCOOP_BUCKET_TOKEN }}@github.com/californiaAlmonds/scoop-auricle.git" bucket
           mkdir -p bucket/bucket
-            sed -e "s/__VERSION__/${V}/g" \
+          sed -e "s/__VERSION__/${V}/g" \
               -e "s/__HASH__/${HASH}/g" \
               packaging/scoop/auricle.json > bucket/bucket/auricle.json
           cd bucket
