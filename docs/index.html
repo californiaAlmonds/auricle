@@ -3,7 +3,11 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Auricle — YouTube Music, natively on Windows</title>
+  <title>Auricle — Native Windows Music Player</title>
+  <meta name="description" content="Auricle is a native Windows music player for the YouTube Music catalogue, with song, album, artist and playlist search, a local library, queue, autoplay and audio caching." />
+  <meta property="og:title" content="Auricle — Native Windows Music Player" />
+  <meta property="og:description" content="Search, build your local library, and keep listening in a native Rust and Slint app for Windows." />
+  <meta property="og:image" content="https://californiaalmonds.github.io/auricle/screenshot.png" />
   <style>
     :root {
       --bg: #0e0e10;
@@ -287,11 +291,12 @@
 <!-- ── Hero ── -->
 <section class="hero">
   <div class="badge">🪟 Windows · Free &amp; Open Source · GPLv3</div>
-  <h1>YouTube Music,<br><span>natively</span> on Windows</h1>
+  <h1>Auricle</h1>
   <p>
-    Auricle is a lightweight desktop music player built with Rust and Slint —
-    fast search, a persistent queue, OS media-key support, and local audio caching.
-    No web view, no Electron, no overhead.
+    A native Windows music player for the YouTube Music catalogue.
+    Search songs, albums, artists and playlists, build your local library,
+    and keep listening with a queue, autoplay and audio caching.
+    Built with Rust and Slint, without Electron or an embedded web view.
   </p>
   <div class="btn-group">
     <a class="btn btn-primary" href="https://github.com/californiaAlmonds/auricle/releases/latest">
@@ -306,7 +311,7 @@
 <!-- ── Screenshot ── -->
 <div class="screenshot-section">
   <div class="screenshot-frame">
-    <img src="screenshot.png" alt="Auricle app — Home screen showing recommendations, new releases, and mixed playlists" style="width:100%;border-radius:8px;display:block;" />
+    <img src="screenshot.png" alt="Auricle 0.1.4 running on Windows" style="width:100%;border-radius:8px;display:block;" />
   </div>
 </div>
 
@@ -314,38 +319,38 @@
 <section id="features">
   <div class="container">
     <div class="section-label">Features</div>
-    <h2 class="section-title">Everything you need, nothing you don't</h2>
-    <p class="section-sub">Auricle strips away the browser layer to give you a snappy, native music experience.</p>
+    <h2 class="section-title">Search, collect, and keep listening</h2>
+    <p class="section-sub">A native desktop player with a library that stays on your device.</p>
     <div class="features-grid">
       <div class="feature-card">
         <div class="feature-icon">🔍</div>
-        <h3>Fast Search</h3>
-        <p>Search YouTube Music's full catalogue instantly via the native ytmapi-rs client.</p>
+        <h3>Catalogue Search</h3>
+        <p>Find songs, albums, artists and playlists with suggestions, mixed previews and dedicated result tabs.</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">📋</div>
-        <h3>Persistent Queue</h3>
-        <p>Your queue and listening history survive across restarts, stored locally with SQLite.</p>
+        <h3>Queue &amp; Autoplay</h3>
+        <p>Choose what plays next, manage queued tracks, and continue listening with related music.</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">❤️</div>
-        <h3>Likes &amp; History</h3>
-        <p>Track what you love and revisit what you've played, offline and always available.</p>
+        <h3>Your Local Library</h3>
+        <p>Follow artists, save albums and playlists, and revisit liked songs and listening history on your device.</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">⌨️</div>
-        <h3>OS Media Keys</h3>
-        <p>Play, pause, skip — your keyboard media controls just work via souvlaki integration.</p>
+        <h3>Right-Click Actions</h3>
+        <p>Open artist and album pages, explore track credits, and manage playback and queue actions from context menus.</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">💾</div>
         <h3>Local Audio Cache</h3>
-        <p>LRU on-disk cache (default 500 MB) keeps recently played tracks ready for instant replay.</p>
+        <p>A size-limited on-disk cache reuses recently played audio. The default cache limit is 500 MB.</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">🪶</div>
         <h3>Native &amp; Lightweight</h3>
-        <p>Built in Rust with the Slint UI toolkit — no Electron, no web view, minimal RAM footprint.</p>
+        <p>Built in Rust with the Slint UI toolkit, without Electron or an embedded browser.</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">🔔</div>
@@ -386,7 +391,7 @@
         <div class="step-num">3</div>
         <div class="step-body">
           <h3>Search &amp; play</h3>
-          <p>Type any artist, song, or album. Hit play. Media keys and the system tray work out of the box.</p>
+          <p>Find a song, artist, album or playlist. Start playback, build your queue, or save music to your local library.</p>
         </div>
       </div>
     </div>
@@ -399,19 +404,19 @@
     <div class="section-label">Download</div>
     <h2 class="section-title">Get Auricle</h2>
     <p class="section-sub">Free, open source, and available now for Windows.</p>
-    <div class="version-pill">Latest release: v0.1.2-beta</div>
+    <div class="version-pill">Version 0.1.4</div>
     <div class="btn-group" style="justify-content:center">
       <a class="btn btn-primary" href="https://github.com/californiaAlmonds/auricle/releases/latest">
         ⬇ Download Latest Release
       </a>
-      <a class="btn btn-secondary" href="https://sourceforge.net/p/auricle/" target="_blank">
+      <a class="btn btn-secondary" href="https://sourceforge.net/projects/auricle/" target="_blank">
         <img alt="Download auricle" src="https://sourceforge.net/sflogo.php?type=18&amp;group_id=4109074" width=200>
       </a>
       <a class="btn btn-secondary" href="https://github.com/californiaAlmonds/auricle/releases">
         📦 All Releases
       </a>
     </div>
-    <p class="download-note">Requires Windows. yt-dlp and ffmpeg can be installed from the onboarding screen.</p>
+    <p class="download-note">Windows 10/11, 64-bit. Installer and portable ZIP available. Streaming requires optional third-party add-ons.</p>
   </div>
 </section>
 
@@ -420,15 +425,15 @@
   <div class="container">
     <div class="section-label">Tech Stack</div>
     <h2 class="section-title">Built on solid foundations</h2>
-    <p class="section-sub" style="margin-bottom:2rem">Auricle is 100% Rust — fast, safe, and dependency-minimal.</p>
+    <p class="section-sub" style="margin-bottom:2rem">A Rust application with a native Slint interface and local data storage.</p>
     <div class="tech-grid">
       <div class="tech-badge"><span class="dot"></span> Rust</div>
       <div class="tech-badge"><span class="dot"></span> Slint UI</div>
       <div class="tech-badge"><span class="dot"></span> Tokio (async runtime)</div>
       <div class="tech-badge"><span class="dot"></span> rodio + symphonia (audio)</div>
       <div class="tech-badge"><span class="dot"></span> ytmapi-rs (YouTube Music API)</div>
-      <div class="tech-badge"><span class="dot"></span> souvlaki (OS media keys)</div>
-      <div class="tech-badge"><span class="dot"></span> rusqlite (local storage)</div>
+      <div class="tech-badge"><span class="dot"></span> JSON (local metadata)</div>
+      <div class="tech-badge"><span class="dot"></span> LRU audio cache</div>
       <div class="tech-badge"><span class="dot"></span> yt-dlp (stream extraction)</div>
     </div>
   </div>
@@ -447,19 +452,19 @@
       </div>
       <div class="faq-item">
         <h3>Is it safe to use?</h3>
-        <p>Auricle is fully open source (GPLv3) — you can read every line of code on GitHub. It makes no network requests beyond fetching music metadata and audio streams from YouTube Music.</p>
+        <p>Auricle is an early, open-source release under GPLv3. Review the source and release notes before installing. Network access is used for music metadata, artwork and playback, optional add-on downloads, and update checks in the portable build. Auricle is not affiliated with YouTube or Google.</p>
       </div>
       <div class="faq-item">
         <h3>What Windows versions are supported?</h3>
-        <p>Auricle targets modern Windows (10 and 11). It is compiled with MSVC C++ Build Tools and requires no additional runtime installation.</p>
+        <p>The installer and portable build target 64-bit Windows 10 and 11. Building from source also requires Rust and the MSVC C++ Build Tools.</p>
       </div>
       <div class="faq-item">
         <h3>Does it work without a YouTube Premium account?</h3>
-        <p>Auricle uses the public YouTube Music catalogue. Some features may work differently depending on your account status. No login is required to search and play.</p>
+        <p>Auricle searches the public YouTube Music catalogue without an in-app account. Playback depends on optional add-ons and the source service; availability and regional restrictions can vary.</p>
       </div>
       <div class="faq-item">
         <h3>How do I build from source?</h3>
-        <p>You need Rust ≥ 1.77.2 and the MSVC C++ Build Tools. Clone the repo and run <code>cargo run --bin native_shell</code> or use <code>npm run run</code> for convenience.</p>
+        <p>You need a current stable Rust toolchain and the MSVC C++ Build Tools. Clone the repo and run <code>cargo run --bin auricle</code> or use <code>npm run run</code> for convenience.</p>
       </div>
     </div>
   </div>
@@ -494,7 +499,7 @@
     <a href="https://github.com/californiaAlmonds/auricle/blob/main/LICENSE">License (GPLv3)</a>
     <a href="https://github.com/californiaAlmonds/auricle/issues">Issues</a>
   </div>
-  <p>© 2025 Auricle contributors · Licensed under GPLv3 · Not affiliated with YouTube or Google</p>
+  <p>© 2026 Auricle contributors · Licensed under GPLv3 · Not affiliated with YouTube or Google</p>
 </footer>
 
 </body>

@@ -1,19 +1,34 @@
 # Auricle
 
 Auricle is a native desktop music player for Windows, built with **Rust** and the
-**[Slint](https://slint.dev/)** UI toolkit. It provides fast debounced search with
-artist/album/song/playlist results, unified right-click context menus, a persistent
-queue, likes/history, OS media-key integration, and a local audio cache — all in a
-lightweight native shell with no embedded web view.
+**[Slint](https://slint.dev/)** UI toolkit. Search the YouTube Music catalogue,
+organize your local library, and keep listening with a queue, autoplay, and an
+audio cache. The app runs in a native shell with no Electron or embedded web view.
 
 [![Download auricle](https://a.fsdn.com/con/app/sf-download-button)](https://sourceforge.net/projects/auricle/files/latest/download)
 
-![Auricle screenshot](docs/screenshot.png)
+![Auricle 0.1.4 on Windows](docs/screenshot.png)
+
+## Features
+
+- Search songs, albums, artists, and playlists with suggestions and mixed previews.
+- Browse artist and album pages, save albums and playlists, and follow artists locally.
+- Use right-click menus to navigate artist and album credits or manage the queue.
+- Play, pause, seek, adjust volume, and keep listening with queue and autoplay controls.
+- Keep liked songs and listening history on your device.
+- Reuse recently played audio with a size-limited local cache (500 MB by default).
+- Minimize to the Windows system tray while playback continues.
+
+## Download
+
+Get the Windows installer or portable ZIP from [GitHub Releases](https://github.com/californiaAlmonds/auricle/releases/latest).
+Downloads are also mirrored on [SourceForge](https://sourceforge.net/projects/auricle/files/).
 
 ## Status
 
-This is an actively evolving prototype. The only supported UI is the native Slint
-shell (`ui/native_shell.slint`); there is no React/Vite/Express frontend.
+Version 0.1.4 is an early Windows release. Streaming depends on external services
+and optional add-ons, and availability can change. Auricle is not affiliated with
+YouTube or Google. The only supported UI is the native Slint shell.
 
 ## Essential add-ons (yt-dlp & ffmpeg)
 
@@ -76,8 +91,7 @@ cargo run --bin auricle
 - **Language / runtime**: Rust, Tokio
 - **Audio**: rodio + symphonia (decode/playback)
 - **Music API**: `ytmapi-rs`
-- **OS media controls**: souvlaki
-- **Local storage**: rusqlite
+- **Local storage**: JSON metadata and an on-disk audio cache
 
 ## Contributing
 
