@@ -1,9 +1,9 @@
 $ErrorActionPreference = 'Stop'
 
 $packageName = 'auricle'
-$version     = '0.0.0'
+$version     = '__VERSION__'
 $url64       = "https://github.com/californiaAlmonds/auricle/releases/download/v$version/auricle-$version-setup.exe"
-$checksum64  = '0000000000000000000000000000000000000000000000000000000000000000'
+$checksum64  = '__CHECKSUM__'
 
 Install-ChocolateyPackage `
   -PackageName $packageName `
