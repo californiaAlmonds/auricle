@@ -11,6 +11,7 @@
 # ── Build / log artifacts ─────────────────────────────────────
 build_output.txt
 *.log
+playback_log*.txt
 /dist/
 
 # ── Environment / secrets ─────────────────────────────────────
