@@ -1,4 +1,5 @@
 use crate::core::search::{SearchClient, SearchEntry as Entry, SearchPage};
+use crate::core::search_history::SearchHistory;
 use crate::{AlbumItem, ArtistItem, NativeShellWindow, PlaylistItem, SearchEntry, SongItem};
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::collections::HashSet;
@@ -180,6 +181,15 @@ fn navigable(entry: &Entry) -> bool {
         )
 }
 
+fn history_entries(queries: Vec<String>) -> Vec<Entry> {
+    queries.into_iter().map(|query| Entry {
+        kind: "History".into(),
+        id: query.clone(),
+        title: query,
+        ..Entry::default()
+    }).collect()
+}
+
 fn preview_entries(completions: &[String], page: &SearchPage) -> Vec<Entry> {
     let mut entries = Vec::new();
     let mut seen = HashSet::new();
@@ -262,6 +272,8 @@ fn selection_after_update(
             entry.kind == selected.kind
                 && if entry.kind == "Completion" {
                     entry.title == selected.title
+                } else if entry.kind == "History" {
+                    entry.id == selected.id && entry.title == selected.title
                 } else {
                     entry.id == selected.id
                 }
@@ -342,6 +354,7 @@ struct Bridge {
     ui: slint::Weak<NativeShellWindow>,
     generations: Arc<Generations>,
     displayed: Arc<Mutex<Displayed>>,
+    history: SearchHistory,
 }
 
 impl Bridge {
@@ -371,6 +384,7 @@ impl Bridge {
             register_page(&page);
             ui.set_search_top(page.top.as_ref().map(map_entry).unwrap_or_default());
             ui.set_search_intent(page.intent.as_str().into());
+            ui.set_search_correction(page.corrected_query.as_str().into());
             ui.set_search_results(model(page.songs.iter().map(map_song).collect()));
             ui.set_search_artists(model(page.artists.iter().map(map_artist).collect()));
             ui.set_search_albums(model(page.albums.iter().map(map_album).collect()));
@@ -411,7 +425,7 @@ impl Bridge {
             let Some(ui) = bridge.ui.upgrade() else {
                 return;
             };
-            if !bridge.preview_current(&ui, generation) {
+            if !bridge.preview_current(&ui, generation) || ui.get_search_history_mode() {
                 return;
             }
             for entry in &entries {
@@ -696,7 +710,7 @@ fn thumbnail_path(entry: &Entry) -> std::path::PathBuf {
 }
 
 fn thumbnail(entry: &Entry) -> (slint::Image, bool) {
-    if entry.kind == "Completion" {
+    if matches!(entry.kind.as_str(), "Completion" | "History") {
         return (Default::default(), false);
     }
     crate::load_cached_thumb(&thumbnail_path(entry))
@@ -944,6 +958,7 @@ async fn worker(mut receiver: UnboundedReceiver<Command>, bridge: Bridge) {
 
 fn cancel_preview(ui: &NativeShellWindow, bridge: &Bridge, sender: &UnboundedSender<Command>) {
     let generation = advance(&bridge.generations.preview);
+    ui.set_search_history_mode(false);
     ui.set_search_preview_busy(false);
     ui.set_search_preview_error("".into());
     ui.set_search_preview(model(Vec::new()));
@@ -955,6 +970,30 @@ fn cancel_preview(ui: &NativeShellWindow, bridge: &Bridge, sender: &UnboundedSen
         query: String::new(),
         deadline: Instant::now(),
     });
+}
+
+fn refresh_history(ui: &NativeShellWindow, bridge: &Bridge) {
+    let generation = bridge.generations.preview.load(Ordering::SeqCst);
+    let entries = history_entries(bridge.history.queries());
+    let selected = {
+        let displayed = bridge.displayed.lock().unwrap();
+        selection_after_update(
+            displayed.preview.as_ref().map(|(generation, entries)| (*generation, entries.as_slice())),
+            ui.get_search_preview_selected(), generation, &entries,
+        )
+    };
+    ui.set_search_preview(model(entries.iter().map(map_entry).collect()));
+    ui.set_search_preview_selected(selected);
+    ui.set_search_preview_busy(false);
+    ui.set_search_preview_error("".into());
+    bridge.displayed.lock().unwrap().preview = Some((generation, entries));
+}
+
+fn show_history(ui: &NativeShellWindow, bridge: &Bridge, sender: &UnboundedSender<Command>) {
+    cancel_preview(ui, bridge, sender);
+    ui.set_search_history_mode(true);
+    ui.set_search_dropdown_open(true);
+    refresh_history(ui, bridge);
 }
 
 fn prepare_request(
@@ -983,6 +1022,7 @@ fn prepare_request(
     ui.set_search_detail_error("".into());
     ui.set_search_top(SearchEntry::default());
     ui.set_search_intent("".into());
+    ui.set_search_correction("".into());
     ui.set_search_results(model(Vec::new()));
     ui.set_search_artists(model(Vec::new()));
     ui.set_search_albums(model(Vec::new()));
@@ -1052,8 +1092,22 @@ pub(crate) fn wire(ui: &NativeShellWindow) -> Controller {
         ui: ui.as_weak(),
         generations: Arc::new(Generations::default()),
         displayed: Arc::new(Mutex::new(Displayed::default())),
+        history: SearchHistory::new(),
     };
     let controller = Controller { bridge: bridge.clone(), sender: sender.clone() };
+    {
+        let bridge = bridge.clone();
+        crate::core::net::spawn(move || {
+            bridge.history.load();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = bridge.ui.upgrade() {
+                    if ui.get_search_history_mode() && ui.get_search_dropdown_open() {
+                        refresh_history(&ui, &bridge);
+                    }
+                }
+            });
+        });
+    }
     let worker_bridge = bridge.clone();
     let _ = std::thread::Builder::new()
         .name("ytm-search".into())
@@ -1101,6 +1155,12 @@ pub(crate) fn wire(ui: &NativeShellWindow) -> Controller {
         let sender = sender.clone();
         ui.on_do_search(move |query| {
             if let Some(ui) = bridge.ui.upgrade() {
+                let query = query.trim();
+                if query.is_empty() {
+                    show_history(&ui, &bridge, &sender);
+                    return;
+                }
+                bridge.history.submit(query);
                 submit(&ui, &bridge, &sender, query.to_string(), "All".into());
             }
         });
@@ -1137,10 +1197,12 @@ pub(crate) fn wire(ui: &NativeShellWindow) -> Controller {
                 return;
             };
             if query.trim().is_empty() {
-                cancel_preview(&ui, &bridge, &sender);
+                show_history(&ui, &bridge, &sender);
                 return;
             }
             let generation = advance(&bridge.generations.preview);
+            ui.set_search_history_mode(false);
+            ui.set_search_dropdown_open(true);
             ui.set_search_preview(model(Vec::new()));
             ui.set_search_preview_selected(-1);
             ui.set_search_preview_error("".into());
@@ -1159,12 +1221,52 @@ pub(crate) fn wire(ui: &NativeShellWindow) -> Controller {
             }
         });
     }
+    {
+        let bridge = bridge.clone();
+        let sender = sender.clone();
+        ui.on_show_search_history(move || {
+            if let Some(ui) = bridge.ui.upgrade() {
+                show_history(&ui, &bridge, &sender);
+            }
+        });
+    }
+    {
+        let bridge = bridge.clone();
+        ui.on_remove_search_history(move |query| {
+            bridge.history.remove(query.as_str());
+            if let Some(ui) = bridge.ui.upgrade() {
+                if ui.get_search_history_mode() && ui.get_search_dropdown_open() {
+                    refresh_history(&ui, &bridge);
+                }
+            }
+        });
+    }
+    {
+        let bridge = bridge.clone();
+        ui.on_clear_search_history(move || {
+            bridge.history.clear();
+            if let Some(ui) = bridge.ui.upgrade() {
+                if ui.get_search_history_mode() && ui.get_search_dropdown_open() {
+                    refresh_history(&ui, &bridge);
+                }
+            }
+        });
+    }
+    {
+        let bridge = bridge.clone();
+        let sender = sender.clone();
+        ui.on_cancel_live_search(move || {
+            if let Some(ui) = bridge.ui.upgrade() {
+                cancel_preview(&ui, &bridge, &sender);
+            }
+        });
+    }
     ui.on_activate_search_entry(move |entry| {
         let Some(ui) = bridge.ui.upgrade() else {
             return;
         };
         cancel_preview(&ui, &bridge, &sender);
-        if entry.kind == "Completion" {
+        if matches!(entry.kind.as_str(), "Completion" | "History") {
             ui.invoke_do_search(entry.title);
             return;
         }
@@ -1185,6 +1287,39 @@ pub(crate) fn wire(ui: &NativeShellWindow) -> Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_rows_keep_query_identity_and_selection_without_catalogue_metadata() {
+        let previous = history_entries(vec!["First".into(), "Second".into()]);
+        let entries = history_entries(vec!["Second".into()]);
+        assert_eq!(entries[0].kind, "History");
+        assert_eq!(entries[0].id, entries[0].title);
+        assert!(entries[0].artist.is_empty() && entries[0].thumbnail_url.is_empty());
+        assert!(!navigable(&entries[0]));
+        assert_eq!(selection_after_update(Some((2, &previous)), 1, 2, &entries), 0);
+        assert_eq!(selection_after_update(Some((2, &previous)), 0, 2, &entries), -1);
+        assert_eq!(selection_after_update(Some((2, &previous)), 1, 3, &entries), -1);
+    }
+
+    #[test]
+    fn history_generation_invalidates_network_preview_without_canceling_submitted_search() {
+        let generations = Generations::default();
+        let network = advance(&generations.preview);
+        let main = request(advance(&generations.main));
+        let mut pending = Pending::default();
+        pending.apply(Command::Main(main.clone()));
+        pending.apply(Command::Preview {
+            generation: network, query: "typed".into(), deadline: Instant::now(),
+        });
+        let history = advance(&generations.preview);
+        pending.apply(Command::Preview {
+            generation: history, query: String::new(), deadline: Instant::now(),
+        });
+        assert!(!ImageScope::Preview(network).current(&generations));
+        assert!(ImageScope::Main(main.clone()).current(&generations));
+        assert!(pending.preview.is_none());
+        assert_eq!(pending.main.unwrap().request, main);
+    }
 
     fn entry(kind: &str, id: &str) -> Entry {
         Entry {
@@ -1366,6 +1501,7 @@ mod tests {
         let base = SearchPage {
             top: Some(entry("Artist", "top")),
             intent: "Artist".into(),
+            corrected_query: "corrected artist".into(),
             songs: vec![entry("Song", "query-song")],
             artists: vec![entry("Artist", "query-artist")],
             albums: vec![entry("Album", "query-album")],
@@ -1375,6 +1511,7 @@ mod tests {
         assert_eq!(error, "Detail unavailable");
         assert_eq!(page.top.unwrap().id, "top");
         assert_eq!(page.intent, "Artist");
+        assert_eq!(page.corrected_query, "corrected artist");
         assert_eq!(page.songs[0].id, "query-song");
         assert_eq!(page.artists[0].id, "query-artist");
         assert_eq!(page.albums[0].id, "query-album");
@@ -1389,6 +1526,7 @@ mod tests {
         let page = SearchPage {
             top: Some(entry("Artist", "artist")),
             intent: "Artist".into(),
+            corrected_query: String::new(),
             songs: vec![entry("Song", "query-song")],
             artists: vec![entry("Artist", "query-artist")],
             albums: vec![entry("Album", "query-album")],

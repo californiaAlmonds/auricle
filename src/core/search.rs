@@ -7,7 +7,7 @@ use ytmapi_rs::parse::{
     SearchResultArtist, SearchResultCommunityPlaylist, SearchResultFeaturedPlaylist,
     SearchResultPlaylist, SearchResultSong, SearchResults, TopResult, TopResultType,
 };
-use ytmapi_rs::query::search::{AlbumsFilter, ArtistsFilter, PlaylistsFilter, SongsFilter};
+use ytmapi_rs::query::search::{AlbumsFilter, ArtistsFilter, PlaylistsFilter, SongsFilter, SpellingMode};
 use ytmapi_rs::query::{GetAlbumQuery, GetArtistQuery, GetSearchSuggestionsQuery, SearchQuery};
 use ytmapi_rs::YtMusic;
 
@@ -30,6 +30,7 @@ pub struct SearchEntry {
 pub struct SearchPage {
     pub top: Option<SearchEntry>,
     pub intent: String,
+    pub corrected_query: String,
     pub songs: Vec<SearchEntry>,
     pub artists: Vec<SearchEntry>,
     pub albums: Vec<SearchEntry>,
@@ -67,23 +68,70 @@ impl SearchClient {
         if query.trim().is_empty() {
             return Ok(SearchPage::default());
         }
+        let category = normalize(category);
+        let known_correction = self.cache.get(&search_key(query, "all")?, Instant::now())
+            .and_then(|cached| match cached {
+                CachedValue::Page(page) if !page.corrected_query.is_empty() => Some(page.corrected_query),
+                _ => None,
+            });
         if let Some(CachedValue::Page(page)) = self.cache.get(&key, Instant::now()) {
+            if known_correction.as_ref().map_or(true, |effective| page.corrected_query == *effective) {
+                return Ok(page);
+            }
+        }
+        if let Some(effective) = known_correction {
+            let (mut page, _) = self.search_once(&effective, &category, false).await?;
+            page.corrected_query = effective;
+            self.cache.insert(key, CachedValue::Page(page.clone()), Instant::now());
             return Ok(page);
         }
-        let category = normalize(category);
+        let (mut page, provider_retry) = self.search_once(query, &category, true).await?;
+        let correction = if !page.corrected_query.is_empty() {
+            None
+        } else if provider_retry.is_some() {
+            provider_retry
+        } else if !useful_results(&page) {
+            self.completions(query).await.ok()
+                .and_then(|suggestions| closest_correction(query, &suggestions))
+        } else {
+            None
+        };
+        if let Some(effective) = correction {
+            if let Ok((mut corrected, _)) = self.search_once(&effective, &category, false).await {
+                if useful_results(&corrected) {
+                    corrected.corrected_query = effective;
+                    page = corrected;
+                }
+            }
+        }
+        self.cache.insert(key, CachedValue::Page(page.clone()), Instant::now());
+        Ok(page)
+    }
+
+    async fn search_once(
+        &mut self, query: &str, category: &str, allow_correction: bool,
+    ) -> Result<(SearchPage, Option<String>), String> {
         if category != "all" {
-            return self.filtered(query, &category).await;
+            return self.filtered(query, category).await.map(|page| (page, None));
         }
         let json = self
             .api
-            .json_query(SearchQuery::new(query))
+            .json_query(SearchQuery::new(query).with_spelling_mode(if allow_correction {
+                SpellingMode::WithSuggestions
+            } else {
+                SpellingMode::ExactMatch
+            }))
             .await
             .map_err(|error| error.to_string())?;
-        let (results, mut identity) = parse_unfiltered_results(
-            query,
-            serde_json::to_value(json).map_err(|error| error.to_string())?,
-        )?;
+        let json = serde_json::to_value(json).map_err(|error| error.to_string())?;
+        let correction = provider_correction(query, &json, allow_correction);
+        if let Some((effective, false)) = &correction {
+            return Ok((SearchPage::default(), Some(effective.clone())));
+        }
+        let query = correction.as_ref().map(|(effective, _)| effective.as_str()).unwrap_or(query);
+        let (results, mut identity) = parse_unfiltered_results(query, json)?;
         let mut page = unfiltered_page(results);
+        page.corrected_query = correction.as_ref().map(|(effective, _)| effective.clone()).unwrap_or_default();
         if needs_music_video_songs(identity.as_ref(), &page) {
             if let Ok(songs) = self.filtered(query, "songs").await {
                 page.songs = songs.songs;
@@ -136,15 +184,14 @@ impl SearchClient {
             .as_ref()
             .map(|entry| entry.kind.clone())
             .unwrap_or_default();
-        self.cache
-            .insert(key, CachedValue::Page(page.clone()), Instant::now());
-        Ok(page)
+        Ok((page, None))
     }
 
     pub async fn preview(&mut self, query: &str) -> Result<SearchPage, String> {
         let mut page = self.search(query, "All").await?;
         if page.playlists.is_empty() && !query.trim().is_empty() {
-            merge_playlist_supplement(&mut page, self.filtered(query, "playlists").await);
+            let effective = effective_query(query, &page).to_string();
+            merge_playlist_supplement(&mut page, self.filtered(&effective, "playlists").await);
         }
         Ok(page)
     }
@@ -250,7 +297,7 @@ impl SearchClient {
         };
         let mut enriched = merge_catalogue(page, &catalogue);
         if top.kind == "Artist" && page.playlists.is_empty() {
-            merge_playlist_supplement(&mut enriched, self.filtered(&top.title, "playlists").await);
+            merge_playlist_supplement(&mut enriched, self.filtered(effective_query(&top.title, page), "playlists").await);
         }
         Ok(enriched)
     }
@@ -276,6 +323,72 @@ impl SearchClient {
         );
         Ok(completions)
     }
+}
+
+fn effective_query<'query>(original: &'query str, page: &'query SearchPage) -> &'query str {
+    if page.corrected_query.is_empty() { original } else { &page.corrected_query }
+}
+
+fn useful_results(page: &SearchPage) -> bool {
+    page.top.iter().chain(entries(page)).any(|entry| !entry.id.trim().is_empty())
+}
+
+fn closest_correction(query: &str, suggestions: &[String]) -> Option<String> {
+    let original = normalize(query);
+    if original.chars().count() < 4 || original.chars().count() > 128 {
+        return None;
+    }
+    let mut best: Option<(f64, String)> = None;
+    for suggestion in suggestions {
+        let candidate = normalize(suggestion);
+        if candidate == original || candidate.is_empty()
+            || candidate.split_whitespace().count() != original.split_whitespace().count()
+            || candidate.chars().count() > 128
+        {
+            continue;
+        }
+        let similarity = strsim::normalized_damerau_levenshtein(&original, &candidate);
+        let distance = strsim::damerau_levenshtein(&original, &candidate);
+        if similarity >= 0.80 && distance <= 2
+            && best.as_ref().map_or(true, |(score, _)| similarity > *score)
+        {
+            best = Some((similarity, suggestion.split_whitespace().collect::<Vec<_>>().join(" ")));
+        }
+    }
+    best.map(|(_, suggestion)| suggestion)
+}
+
+fn provider_correction(query: &str, json: &serde_json::Value, allowed: bool) -> Option<(String, bool)> {
+    if !allowed {
+        return None;
+    }
+    fn visit(query: &str, value: &serde_json::Value) -> Option<(String, bool)> {
+        match value {
+            serde_json::Value::Object(object) => {
+                for (renderer, applied) in [("showingResultsForRenderer", true), ("didYouMeanRenderer", false)] {
+                    if let Some(correction) = object.get(renderer) {
+                        let paths = if applied {
+                            ["/correctedQueryEndpoint/searchEndpoint/query", "/correctedQuery/runs/0/navigationEndpoint/searchEndpoint/query"]
+                        } else {
+                            ["/navigationEndpoint/searchEndpoint/query", "/correctedQueryEndpoint/searchEndpoint/query"]
+                        };
+                        for path in paths {
+                            if let Some(text) = correction.pointer(path).and_then(serde_json::Value::as_str) {
+                                let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                                if !text.is_empty() && normalize(&text) != normalize(query) {
+                                    return Some((text, applied));
+                                }
+                            }
+                        }
+                    }
+                }
+                object.values().find_map(|value| visit(query, value))
+            }
+            serde_json::Value::Array(values) => values.iter().find_map(|value| visit(query, value)),
+            _ => None,
+        }
+    }
+    visit(query, json)
 }
 
 fn parse_unfiltered_results(
@@ -843,6 +956,7 @@ fn merge_catalogue(page: &SearchPage, catalogue: &SearchPage) -> SearchPage {
     SearchPage {
         top: page.top.clone(),
         intent: page.intent.clone(),
+        corrected_query: page.corrected_query.clone(),
         songs: catalogue.songs.clone(),
         artists: catalogue.artists.clone(),
         albums: catalogue.albums.clone(),
@@ -1161,6 +1275,90 @@ fn deduplicate(entries: &mut Vec<SearchEntry>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conservative_completion_correction_uses_distance_not_provider_rank() {
+        let suggestions = vec!["unrelated artist".into(), "arijit songs".into(), "arijit".into()];
+        assert_eq!(closest_correction("arihit", &suggestions).as_deref(), Some("arijit"));
+        assert!(closest_correction("arihit", &["unrelated".into(), "arihit".into()]).is_none());
+        assert!(closest_correction("abc", &["abd".into()]).is_none());
+        assert_eq!(closest_correction("arjiit", &["arijit".into()]).as_deref(), Some("arijit"));
+    }
+
+    #[test]
+    fn correction_uses_only_named_provider_endpoints_not_unrelated_navigation() {
+        let json = serde_json::json!({"contents": [{"itemSectionRenderer": {"contents": [{
+            "didYouMeanRenderer": {"navigationEndpoint": {"searchEndpoint": {"query": "arijit"}}}
+        }]}}]});
+        assert_eq!(provider_correction("arihit", &json, true), Some(("arijit".into(), false)));
+        assert!(provider_correction("  ARIJIT ", &json, true).is_none());
+        let json = serde_json::json!({"showingResultsForRenderer": {
+            "correctedQueryEndpoint": {"searchEndpoint": {"query": "arijit"}},
+            "originalQueryEndpoint": {"searchEndpoint": {"query": "arihit"}}
+        }});
+        assert_eq!(provider_correction("arihit", &json, true), Some(("arijit".into(), true)));
+        assert!(provider_correction("arihit", &serde_json::json!({
+            "navigationEndpoint": {"searchEndpoint": {"query": "arijit"}}
+        }), true).is_none());
+    }
+
+    #[test]
+    fn exact_correction_retry_ignores_further_provider_changes_and_cycles() {
+        for suggestion in ["arihit", "another correction", "arijit"] {
+            let json = serde_json::json!({"didYouMeanRenderer": {
+                "navigationEndpoint": {"searchEndpoint": {"query": suggestion}}
+            }});
+            assert!(provider_correction("arijit", &json, false).is_none());
+        }
+    }
+
+    #[test]
+    fn correction_cache_and_enrichment_preserve_original_query_and_category() {
+        let mut cache = Cache::new();
+        let page = SearchPage {
+            corrected_query: "arijit".into(),
+            top: Some(entry("Artist", "UC-real", "Arijit Singh")),
+            ..Default::default()
+        };
+        cache.insert(search_key("arihit", "All").unwrap(), CachedValue::Page(page.clone()), Instant::now());
+        assert!(cache.get(&search_key("arijit", "All").unwrap(), Instant::now()).is_none());
+        assert!(cache.get(&search_key("arihit", "Artists").unwrap(), Instant::now()).is_none());
+        let Some(CachedValue::Page(cached)) = cache.get(&search_key("  ARIHIT ", "all").unwrap(), Instant::now()) else {
+            panic!("missing original query cache");
+        };
+        assert_eq!(effective_query("arihit", &cached), "arijit");
+        assert_eq!(merge_catalogue(&page, &SearchPage::default()).corrected_query, "arijit");
+        assert_eq!(effective_query("original", &SearchPage::default()), "original");
+    }
+
+    #[test]
+    #[ignore = "Requires live YouTube Music access"]
+    fn live_arihit_correction_returns_strong_artist() {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            tokio::time::timeout(Duration::from_secs(90), async {
+                let mut client = SearchClient::new().await.expect("provider client");
+                client.cache.insert(search_key("arihit", "Artists").unwrap(),
+                    CachedValue::Page(SearchPage::default()), Instant::now());
+                let page = client.search("arihit", "All").await.expect("original typo search");
+                let completion_fallback = client.cache.entries.iter()
+                    .any(|entry| matches!(&entry.key, CacheKey::Completions(query) if query == "arihit"));
+                eprintln!("arihit correction={:?} top={:?} songs={} artists={} albums={} completion_fallback={completion_fallback}",
+                    page.corrected_query, page.top.as_ref().map(|top| (&top.kind, &top.title)),
+                    page.songs.len(), page.artists.len(), page.albums.len());
+                let top = page.top.as_ref().expect("strong artist top");
+                assert_eq!(top.kind, "Artist");
+                assert!(normalize(&top.title).contains("arijit"));
+                assert!(!top.id.is_empty());
+                assert!(!page.corrected_query.is_empty());
+                let repeated = client.search("arihit", "All").await.unwrap();
+                assert_eq!(repeated.corrected_query, page.corrected_query);
+                let artists = client.search("arihit", "Artists").await.unwrap();
+                assert_eq!(artists.corrected_query, page.corrected_query);
+                assert!(artists.artists.iter().any(|artist| artist.id == top.id));
+                assert!(client.cache.get(&search_key("arihit", "Artists").unwrap(), Instant::now()).is_some());
+            }).await.expect("live typo check timeout");
+        });
+    }
 
     fn entry(kind: &str, id: &str, title: &str) -> SearchEntry {
         SearchEntry {

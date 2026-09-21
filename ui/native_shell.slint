@@ -718,6 +718,19 @@ export component NativeShellWindow inherits Window {
     in-out property <AlbumItem> artist-view-latest-release: { title: "", browse-id: "", artist: "", year: "", has-thumbnail: false };
     in-out property <bool> artist-view-has-latest: false;
 
+    in-out property <string> discography-title: "";
+    in-out property <string> discography-artist-id: "";
+    in-out property <[AlbumItem]> discography-items: [];
+    in-out property <string> discography-filter: "All";
+    in-out property <bool> discography-busy: false;
+    in-out property <string> discography-error: "";
+    callback open-discography();
+    callback navigate-to-discography(string);
+    callback discography-category(string);
+    callback retry-discography();
+    callback discography-view-changed(string);
+    callback request-discography-thumbnail(string);
+
     // Radio view
     in-out property <string> radio-title: "";
     in-out property <[SongItem]> radio-songs: [];
@@ -783,6 +796,12 @@ export component NativeShellWindow inherits Window {
     in-out property <[SearchEntry]> search-preview: [];
     in-out property <bool> search-preview-busy: false;
     in-out property <string> search-preview-error: "";
+    in-out property <string> search-correction: "";
+    in-out property <bool> search-history-mode: false;
+    callback show-search-history();
+    callback remove-search-history(string);
+    callback clear-search-history();
+    callback cancel-live-search();
     property <bool> search-catalogue-visible: search-filter != "All"
         || (search-top.kind != "Artist" && search-top.kind != "Album")
         || !search-detail-busy;
@@ -795,7 +814,7 @@ export component NativeShellWindow inherits Window {
     callback search-category(string);
     callback activate-search-entry(SearchEntry);
             callback search-view-changed(string);
-            changed current-view => { search-view-changed(current-view); }
+            changed current-view => { search-view-changed(current-view); discography-view-changed(current-view); }
 
     in-out property <bool> is-loading: false;
 
@@ -813,14 +832,13 @@ export component NativeShellWindow inherits Window {
     function close-search-preview() {
         search-dropdown-open = false;
         search-preview-selected = -1;
-        live-search("");
+        cancel-live-search();
     }
     function open-search-preview() {
-        if search-inp.text != "" {
-            search-preview-selected = -1;
-            search-dropdown-open = true;
-            live-search(search-inp.text);
-        }
+        search-preview-selected = -1;
+        search-dropdown-open = true;
+        if search-inp.text == "" { show-search-history(); }
+        else { live-search(search-inp.text); }
     }
     function submit-search(text: string) {
         close-search-preview();
@@ -828,7 +846,7 @@ export component NativeShellWindow inherits Window {
         if text != "" { do-search(text); }
     }
     function choose-search-preview(entry: SearchEntry) {
-        if entry.kind == "Completion" { search-inp.text = entry.title; }
+        if entry.kind == "Completion" || entry.kind == "History" { search-inp.text = entry.title; }
         close-search-preview();
         key-scope.focus();
         activate-search-entry(entry);
@@ -1352,7 +1370,7 @@ export component NativeShellWindow inherits Window {
                                             changed has-focus => {
                                                 if self.has-focus {
                                                     if !search-dropdown-open { open-search-preview(); }
-                                                } else if search-dropdown-open { close-search-preview(); }
+                                                }
                                             }
                                             accepted => {
                                                 if search-dropdown-open && !search-preview-busy && search-preview-error == ""
@@ -1362,10 +1380,11 @@ export component NativeShellWindow inherits Window {
                                             }
                                             edited => {
                                                 search-preview-selected = -1;
-                                                if self.text == "" { close-search-preview(); }
-                                                else { search-dropdown-open = true; live-search(self.text); }
+                                                search-dropdown-open = true;
+                                                live-search(self.text);
                                             }
                                             key-pressed(event) => {
+                                                if event.text == Key.Tab { close-search-preview(); return reject; }
                                                 if event.text == "\u{1}" || (event.modifiers.control && (event.text == "a" || event.text == "A")) {
                                                     self.select-all();
                                                     return accept;
@@ -1386,7 +1405,7 @@ export component NativeShellWindow inherits Window {
                                     width: 30px; height: 30px; border-radius: 15px;
                                     background: search-inp.text != "" && clr-btn.has-hover ? Theme.hover-veil : transparent;
                                     if search-inp.text != "": Image { source: @image-url("icons/close.svg"); width: 14px; height: 14px; colorize: Theme.text-muted; x: 8px; y: 8px; }
-                                    clr-btn := TouchArea { clicked => { close-search-preview(); search-inp.text = ""; search-inp.focus(); } }
+                                    clr-btn := TouchArea { clicked => { close-search-preview(); search-inp.text = ""; search-inp.focus(); open-search-preview(); } }
                                 }
                                 }
                             }
@@ -1910,6 +1929,11 @@ export component NativeShellWindow inherits Window {
                                 }
                                 Rectangle { height: Theme.section-gap; }
 
+                                if !search-busy && search-correction != "": Text {
+                                    text: "Results for \{search-correction}";
+                                    font-size: 13px; color: Theme.text-muted;
+                                    height: 32px; vertical-alignment: center;
+                                }
                                 if search-busy: Rectangle {
                                     height: 64px;
                                     Text { text: "Searching..."; width: parent.width; height: parent.height; font-size: 14px; color: Theme.text-muted; vertical-alignment: center; }
@@ -2174,6 +2198,69 @@ export component NativeShellWindow inherits Window {
                             }
                         }
 
+                        if current-view == "Discography": VerticalLayout {
+                            padding: 32px; spacing: Theme.heading-gap;
+                            Text { text: "Discography"; color: Theme.text; font-size: 28px; font-weight: 700; }
+                            Text { text: discography-title; color: Theme.text-muted; font-size: 16px; overflow: elide; }
+                            HorizontalLayout {
+                                height: 40px; spacing: 8px; alignment: start;
+                                for category in ["All", "Albums", "Singles"]: TabPill {
+                                    label: category; active: discography-filter == category;
+                                    clicked => { discography-filter = category; discography-category(category); }
+                                }
+                            }
+                            if discography-busy: Text { text: "Loading discography..."; height: 40px; color: Theme.text-muted; font-size: 14px; }
+                            if !discography-busy && discography-error != "": HorizontalLayout {
+                                spacing: 12px;
+                                Text { text: discography-error; wrap: word-wrap; color: Theme.danger; font-size: 14px; horizontal-stretch: 1; }
+                                Rectangle {
+                                    width: 76px; height: 32px; border-radius: Theme.radius-sm;
+                                    background: retry-discography-ta.has-hover ? Theme.surface-hover : Theme.surface;
+                                    Text { text: "Retry"; width: parent.width; height: parent.height; color: Theme.text; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
+                                    retry-discography-ta := TouchArea { clicked => { retry-discography(); } }
+                                }
+                            }
+                            if !discography-busy && discography-error == "" && discography-items.length == 0: Text {
+                                text: "No releases found"; height: 48px; color: Theme.text-muted; font-size: 14px;
+                            }
+                            discography-list := ListView {
+                                vertical-stretch: 1;
+                                property <int> columns: max(1, min(8, floor(self.width / 192px)));
+                                for row in ceil(discography-items.length / self.columns): Rectangle {
+                                    height: 244px;
+                                    for column in discography-list.columns: Rectangle {
+                                        x: column * (discography-list.width / discography-list.columns);
+                                        width: discography-list.width / discography-list.columns;
+                                        height: 244px;
+                                        if row * discography-list.columns + column < discography-items.length: Rectangle {
+                                            property <AlbumItem> release: discography-items[row * discography-list.columns + column];
+                                            init => { request-discography-thumbnail(release.browse-id); }
+                                            changed release => { if !release.has-thumbnail { request-discography-thumbnail(release.browse-id); } }
+                                            width: min(184px, parent.width); height: 232px;
+                                            border-radius: Theme.radius-sm;
+                                            background: release-ta.has-hover ? Theme.glass-hover : transparent;
+                                            Rectangle {
+                                                x: 8px; y: 8px; width: parent.width - 16px; height: self.width;
+                                                border-radius: Theme.radius-sm; clip: true; background: Theme.art-placeholder;
+                                                if release.has-thumbnail: Image { source: release.thumbnail; width: parent.width; height: parent.height; image-fit: cover; }
+                                                if !release.has-thumbnail: Image { source: @image-url("icons/album.svg"); width: 40px; height: 40px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; colorize: Theme.text-dim; }
+                                            }
+                                            Text { text: release.title; x: 8px; y: parent.width; width: parent.width - 16px; height: 20px; color: Theme.text; font-size: 13px; font-weight: 600; overflow: elide; }
+                                            Text { text: release.year; x: 8px; y: parent.width + 24px; width: parent.width - 16px; height: 18px; color: Theme.text-muted; font-size: 12px; }
+                                            release-ta := TouchArea {
+                                                clicked => { navigate-to-album(release.browse-id); }
+                                                pointer-event(event) => {
+                                                    if event.button == PointerEventButton.right && event.kind == PointerEventKind.up {
+                                                        open-entity-ctx("Album", release.browse-id, release.title, release.artist, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // ARTIST
                         if !is-loading && current-view == "Artist": SmoothFlickable {
                             viewport-width: self.width; viewport-height: artist-col.preferred-height;
@@ -2217,10 +2304,6 @@ export component NativeShellWindow inherits Window {
                                                 text: artist-view-name;
                                                 font-size: 40px; font-weight: 800; color: Theme.text;
                                                 overflow: elide;
-                                            }
-                                            if artist-view-songs.length > 0: Text {
-                                                text: "\{artist-view-songs.length} popular tracks";
-                                                font-size: 13px; color: Theme.text-muted;
                                             }
                                             Rectangle { height: 12px; }
                                             HorizontalLayout {
@@ -2399,10 +2482,19 @@ export component NativeShellWindow inherits Window {
                                         Rectangle { horizontal-stretch: 1; }
                                     }
                                 }
-                                if artist-view-albums.length > 0: VerticalLayout {
+                                if artist-view-albums.length > 0 || artist-view-singles.length > 0: VerticalLayout {
                                     height: self.preferred-height; alignment: start;
                                     padding-left: 32px; padding-right: 32px; padding-top: Theme.section-gap; spacing: Theme.heading-gap;
-                                    Text { text: "Discography"; font-size: 22px; font-weight: 700; color: Theme.text; }
+                                    HorizontalLayout {
+                                        height: 32px;
+                                        Text { text: "Discography"; font-size: 22px; font-weight: 700; color: Theme.text; vertical-alignment: center; horizontal-stretch: 1; }
+                                        Rectangle {
+                                            width: 88px; height: 32px; border-radius: Theme.radius-sm;
+                                            background: view-discography.has-hover ? Theme.hover-veil : transparent;
+                                            Text { text: "View all"; color: Theme.text-muted; font-size: 13px; width: parent.width; height: parent.height; horizontal-alignment: center; vertical-alignment: center; }
+                                            view-discography := TouchArea { clicked => { open-discography(); } }
+                                        }
+                                    }
                                     Rectangle {
                                         height: 230px; clip: true;
                                         disco-fl := SmoothFlickable {
@@ -4330,19 +4422,29 @@ export component NativeShellWindow inherits Window {
         y: search-bar-rect.absolute-position.y + search-bar-rect.height + 6px;
         width: min(420px, root.width - 24px);
         height: min(400px, root.height - self.y - 20px,
-            search-preview-busy || search-preview-error != "" || search-preview.length == 0 ? 96px : search-preview.length * 64px + 16px);
+            (search-preview-busy || search-preview-error != "" || search-preview.length == 0 ? 96px : search-preview.length * 64px + 16px) + (search-history-mode ? 40px : 0px));
         border-radius: Theme.radius; background: Theme.glass-strong;
         border-color: Theme.border; border-width: 1px;
         drop-shadow-blur: 20px; drop-shadow-color: #000000a0; drop-shadow-offset-y: 8px;
         clip: true;
+        if search-history-mode: HorizontalLayout {
+            x: 16px; y: 8px; width: parent.width - 32px; height: 32px;
+            Text { text: "Recent searches"; font-size: 13px; font-weight: 600; color: Theme.text; vertical-alignment: center; horizontal-stretch: 1; }
+            if search-preview.length > 0: Rectangle {
+                width: 64px; height: 32px; border-radius: 6px;
+                background: clear-history-ta.has-hover ? Theme.hover-veil : transparent;
+                Text { text: "Clear"; color: Theme.text-muted; font-size: 12px; width: parent.width; height: parent.height; horizontal-alignment: center; vertical-alignment: center; }
+                clear-history-ta := TouchArea { clicked => { clear-search-history(); } }
+            }
+        }
         if search-preview-busy || search-preview-error != "" || search-preview.length == 0: Text {
-            x: 16px; y: 12px; width: parent.width - 32px; height: parent.height - 24px;
-            text: search-preview-busy ? "Searching..." : (search-preview-error != "" ? search-preview-error : "No suggestions found");
+            x: 16px; y: search-history-mode ? 52px : 12px; width: parent.width - 32px; height: parent.height - self.y - 12px;
+            text: search-preview-busy ? "Searching..." : (search-preview-error != "" ? search-preview-error : search-history-mode ? "No recent searches" : "No suggestions found");
             color: search-preview-error != "" && !search-preview-busy ? Theme.danger : Theme.text-muted;
             font-size: 13px; wrap: word-wrap; vertical-alignment: center; horizontal-alignment: center;
         }
         search-preview-scroll := SmoothFlickable {
-            x: 8px; y: 8px; width: parent.width - 16px; height: parent.height - 16px;
+            x: 8px; y: search-history-mode ? 48px : 8px; width: parent.width - 16px; height: parent.height - self.y - 8px;
             visible: !search-preview-busy && search-preview-error == "" && search-preview.length > 0;
             viewport-width: self.width;
             viewport-height: search-preview.length * 64px;
@@ -4357,13 +4459,13 @@ export component NativeShellWindow inherits Window {
                 height: 64px; border-radius: 6px;
                 background: search-preview-selected == i ? Theme.accent-soft : (sug-ta.has-hover ? Theme.hover-veil : transparent);
                 HorizontalLayout {
-                    padding-left: 10px; padding-right: 10px; padding-top: 10px; padding-bottom: 10px; spacing: 12px;
+                    padding-left: 10px; padding-right: item.kind == "History" ? 42px : 10px; padding-top: 10px; padding-bottom: 10px; spacing: 12px;
                     Rectangle {
                         width: 44px; height: 44px; border-radius: item.kind == "Artist" ? 22px : 6px; clip: true;
-                        background: item.kind == "Completion" ? transparent : Theme.art-placeholder;
-                        if item.has-thumbnail && item.kind != "Completion": Image { source: item.thumbnail; width: parent.width; height: parent.height; image-fit: cover; }
-                        if !item.has-thumbnail || item.kind == "Completion": Image {
-                            source: item.kind == "Completion" ? @image-url("icons/search.svg")
+                        background: item.kind == "Completion" || item.kind == "History" ? transparent : Theme.art-placeholder;
+                        if item.has-thumbnail && item.kind != "Completion" && item.kind != "History": Image { source: item.thumbnail; width: parent.width; height: parent.height; image-fit: cover; }
+                        if !item.has-thumbnail || item.kind == "Completion" || item.kind == "History": Image {
+                            source: item.kind == "Completion" || item.kind == "History" ? @image-url("icons/search.svg")
                                 : item.kind == "Artist" ? @image-url("icons/artist.svg")
                                 : item.kind == "Album" ? @image-url("icons/album.svg")
                                 : item.kind == "Playlist" ? @image-url("icons/queue.svg") : @image-url("icons/play.svg");
@@ -4372,8 +4474,8 @@ export component NativeShellWindow inherits Window {
                     }
                     Rectangle {
                         horizontal-stretch: 1; min-width: 0px;
-                        Text { text: item.title; y: 2px; width: parent.width; height: 20px; font-size: 14px; font-weight: 500; color: Theme.text; overflow: elide; }
-                        Text {
+                        Text { text: item.title; y: item.kind == "Completion" || item.kind == "History" ? 12px : 2px; width: parent.width; height: 20px; font-size: 14px; font-weight: 500; color: Theme.text; overflow: elide; }
+                        if item.kind != "Completion" && item.kind != "History": Text {
                             text: item.kind + (item.subtitle != "" ? " \u{2022} " + item.subtitle : "");
                             y: 24px; width: parent.width; height: 18px; font-size: 12px; color: Theme.text-muted; overflow: elide;
                         }
@@ -4394,6 +4496,13 @@ export component NativeShellWindow inherits Window {
                             }
                         }
                     }
+                }
+                Rectangle {
+                    x: parent.width - 38px; y: 16px; width: 32px; height: 32px; border-radius: 6px;
+                    visible: item.kind == "History";
+                    background: remove-history-ta.has-hover ? Theme.hover-veil : transparent;
+                    Image { source: @image-url("icons/close.svg"); x: 9px; y: 9px; width: 14px; height: 14px; colorize: Theme.text-muted; }
+                    remove-history-ta := TouchArea { enabled: item.kind == "History"; clicked => { remove-search-history(item.title); } }
                 }
             }
         }

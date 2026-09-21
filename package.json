@@ -1,7 +1,7 @@
 {
   "name": "auricle-desktop",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.2.0",
   "description": "Auricle — a native desktop music player for Windows, built with Rust and Slint.",
   "scripts": {
     "build": "cargo build --bin auricle",

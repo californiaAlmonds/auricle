@@ -5,6 +5,7 @@ use ytmapi_rs::common::YoutubeID;
 
 pub mod core;
 mod context_ui;
+mod discography_ui;
 mod search_ui;
 
 use std::sync::{Arc, Mutex};
@@ -2608,6 +2609,20 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         ui.set_can_go_forward(cursor < hist.len().saturating_sub(1));
     }
 
+    {
+        let nav_history = nav_history.clone();
+        let nav_cursor = nav_cursor.clone();
+        let nav_restoring = nav_restoring.clone();
+        discography_ui::wire(&ui, cur_artist.clone(), move |ui, artist_id| {
+            if !nav_restoring.load(std::sync::atomic::Ordering::Relaxed) {
+                push_nav_entry(&nav_history, &nav_cursor, "Discography".to_string(), artist_id.to_string());
+                let hist = nav_history.lock().unwrap();
+                let cur = *nav_cursor.lock().unwrap();
+                update_nav_buttons(ui, &hist, cur);
+            }
+        });
+    }
+
     // ── Navigate ──────────────────────────────────────────────────────────────
     {
         let ui_weak = ui.as_weak();
@@ -2615,6 +2630,11 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         let nav_cursor = nav_cursor.clone();
         ui.on_navigate(move |view| {
             if let Some(ui) = ui_weak.upgrade() {
+                if view == "Discography" {
+                    let artist_id = ui.get_discography_artist_id();
+                    if !artist_id.is_empty() { ui.invoke_navigate_to_discography(artist_id); }
+                    return;
+                }
                 context_ui::invalidate(&ui);
                 ui.set_current_view(view.clone());
                 push_nav_entry(&nav_history, &nav_cursor, view.to_string(), String::new());
@@ -2658,6 +2678,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                         drop(hist);
                         ui.invoke_navigate_to_artist(SharedString::from(entry.context_id.as_str()));
                         nav_restoring.store(false, std::sync::atomic::Ordering::Relaxed);
+                    } else if entry.view == "Discography" && !entry.context_id.is_empty() {
+                        nav_restoring.store(true, std::sync::atomic::Ordering::Relaxed);
+                        drop(cur);
+                        drop(hist);
+                        ui.invoke_navigate_to_discography(SharedString::from(entry.context_id.as_str()));
+                        nav_restoring.store(false, std::sync::atomic::Ordering::Relaxed);
                     } else if entry.view == "Album" && !entry.context_id.is_empty() {
                         nav_restoring.store(true, std::sync::atomic::Ordering::Relaxed);
                         drop(cur);
@@ -2697,6 +2723,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                         drop(cur);
                         drop(hist);
                         ui.invoke_navigate_to_artist(SharedString::from(entry.context_id.as_str()));
+                        nav_restoring.store(false, std::sync::atomic::Ordering::Relaxed);
+                    } else if entry.view == "Discography" && !entry.context_id.is_empty() {
+                        nav_restoring.store(true, std::sync::atomic::Ordering::Relaxed);
+                        drop(cur);
+                        drop(hist);
+                        ui.invoke_navigate_to_discography(SharedString::from(entry.context_id.as_str()));
                         nav_restoring.store(false, std::sync::atomic::Ordering::Relaxed);
                     } else if entry.view == "Album" && !entry.context_id.is_empty() {
                         nav_restoring.store(true, std::sync::atomic::Ordering::Relaxed);

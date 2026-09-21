@@ -3,6 +3,7 @@ pub mod stream_player;
 pub mod audio_priority;
 pub mod net;
 pub mod search;
+pub mod search_history;
 pub mod bridge;
 pub mod cache;
 pub mod persistence;

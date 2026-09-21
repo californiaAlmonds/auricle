@@ -5,11 +5,12 @@
     <version>__VERSION__</version>
     <title>Auricle</title>
     <authors>californiaAlmonds</authors>
+    <copyright>Copyright (c) 2026 californiaAlmonds</copyright>
     <projectUrl>https://californiaalmonds.github.io/auricle/</projectUrl>
     <projectSourceUrl>https://github.com/californiaAlmonds/auricle</projectSourceUrl>
     <packageSourceUrl>https://github.com/californiaAlmonds/auricle</packageSourceUrl>
     <licenseUrl>https://github.com/californiaAlmonds/auricle/blob/main/LICENSE</licenseUrl>
-    <iconUrl>https://raw.githubusercontent.com/californiaAlmonds/auricle/main/icons/icon.png</iconUrl>
+    <iconUrl>https://cdn.jsdelivr.net/gh/californiaAlmonds/auricle@v0.1.4/icons/icon.png</iconUrl>
     <releaseNotes>https://github.com/californiaAlmonds/auricle/releases</releaseNotes>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <tags>music youtube-music player rust slint audio</tags>
