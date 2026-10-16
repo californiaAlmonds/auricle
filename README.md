@@ -7,7 +7,7 @@ audio cache. The app runs in a native shell with no Electron or embedded web vie
 
 [![Download auricle](https://a.fsdn.com/con/app/sf-download-button)](https://sourceforge.net/projects/auricle/files/latest/download)
 
-![Auricle 0.1.4 on Windows](docs/screenshot.png)
+![Auricle on Windows](docs/screenshot.png)
 
 ## Features
 
@@ -26,7 +26,8 @@ Downloads are also mirrored on [SourceForge](https://sourceforge.net/projects/au
 
 ## Status
 
-Version 0.1.4 is an early Windows release. Streaming depends on external services
+Version 0.1.5 is an early Windows release. It fixes startup on PCs without the
+Microsoft Visual C++ Redistributable, which is no longer required. Streaming depends on external services
 and optional add-ons, and availability can change. Auricle is not affiliated with
 YouTube or Google. The only supported UI is the native Slint shell.
 
