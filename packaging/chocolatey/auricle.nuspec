@@ -5,11 +5,12 @@
     <version>__VERSION__</version>
     <title>Auricle</title>
     <authors>californiaAlmonds</authors>
+    <copyright>Copyright (c) 2026 californiaAlmonds</copyright>
     <projectUrl>https://californiaalmonds.github.io/auricle/</projectUrl>
     <projectSourceUrl>https://github.com/californiaAlmonds/auricle</projectSourceUrl>
     <packageSourceUrl>https://github.com/californiaAlmonds/auricle</packageSourceUrl>
     <licenseUrl>https://github.com/californiaAlmonds/auricle/blob/main/LICENSE</licenseUrl>
-    <iconUrl>https://raw.githubusercontent.com/californiaAlmonds/auricle/main/icons/icon.png</iconUrl>
+    <iconUrl>https://cdn.jsdelivr.net/gh/californiaAlmonds/auricle@v__VERSION__/icons/icon.png</iconUrl>
     <releaseNotes>https://github.com/californiaAlmonds/auricle/releases</releaseNotes>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <tags>music youtube-music player rust slint audio</tags>
@@ -18,7 +19,7 @@
 
   Features include song, album, artist and playlist search with suggestions and previews; local artist follows and saved albums/playlists; right-click artist, album and queue actions; playback controls, queue and autoplay; liked songs and listening history; a size-limited audio cache; and minimize-to-tray support.
 
-  ![Auricle 0.1.4 on Windows](https://californiaalmonds.github.io/auricle/screenshot.png)
+  ![Auricle on Windows](https://californiaalmonds.github.io/auricle/screenshot.png)
 
   This is an early Windows release. Streaming availability depends on external services and optional add-ons. yt-dlp and ffmpeg are installed at the user's discretion and are not bundled or redistributed. Auricle is not affiliated with YouTube or Google.</description>
   </metadata>
