@@ -19,6 +19,45 @@ const CACHE_TTL: Duration = Duration::from_secs(120);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 const SECTIONS: &str = "/contents/singleColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents";
 
+pub(crate) fn parse_plays(text: &str) -> u64 {
+    let Some(token) = text.split_whitespace().next() else {
+        return 0;
+    };
+    let cleaned = token.replace(',', "");
+    let (number, multiplier) = match cleaned.as_bytes().last().copied() {
+        Some(b'k' | b'K') => (&cleaned[..cleaned.len() - 1], 1e3_f64),
+        Some(b'm' | b'M') => (&cleaned[..cleaned.len() - 1], 1e6_f64),
+        Some(b'b' | b'B') => (&cleaned[..cleaned.len() - 1], 1e9_f64),
+        _ => (cleaned.as_str(), 1.0_f64),
+    };
+    if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+        return 0;
+    }
+    let Ok(value) = number.parse::<f64>() else {
+        return 0;
+    };
+    if !value.is_finite() || value <= 0.0 {
+        return 0;
+    }
+    (value * multiplier).round() as u64
+}
+
+pub(crate) fn order_by_popularity<T>(
+    releases: Vec<(String, T)>,
+    plays_by_release: &std::collections::HashMap<String, u64>,
+) -> Vec<T> {
+    let mut seen = HashSet::new();
+    let mut deduped: Vec<(u64, T)> = releases
+        .into_iter()
+        .filter_map(|(id, item)| {
+            seen.insert(id.clone())
+                .then(|| (plays_by_release.get(&id).copied().unwrap_or(0), item))
+        })
+        .collect();
+    deduped.sort_by(|(a, _), (b, _)| b.cmp(a));
+    deduped.into_iter().map(|(_, item)| item).collect()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Category {
     Albums,
@@ -1119,5 +1158,59 @@ mod tests {
         assert_eq!(cache.0.len(), CACHE_CAPACITY);
         assert!(cache.get("1", now).is_none());
         assert!(cache.get("0", now + CACHE_TTL).is_none());
+    }
+
+    #[test]
+    fn parse_plays_handles_suffixes_commas_views_and_invalid_inputs() {
+        assert_eq!(parse_plays("1.2B plays"), 1_200_000_000);
+        assert_eq!(parse_plays("1.2b plays"), 1_200_000_000);
+        assert_eq!(parse_plays("345M plays"), 345_000_000);
+        assert_eq!(parse_plays("2.5M views"), 2_500_000);
+        assert_eq!(parse_plays("2.5m views"), 2_500_000);
+        assert_eq!(parse_plays("12K plays"), 12_000);
+        assert_eq!(parse_plays("12k plays"), 12_000);
+        assert_eq!(parse_plays("999 plays"), 999);
+        assert_eq!(parse_plays("1,234 plays"), 1_234);
+        assert_eq!(parse_plays("1,234,567 views"), 1_234_567);
+        assert_eq!(parse_plays(""), 0);
+        assert_eq!(parse_plays("plays"), 0);
+        assert_eq!(parse_plays("N/A"), 0);
+        assert_eq!(parse_plays("1.2.3M plays"), 0);
+        assert_eq!(parse_plays("-5K plays"), 0);
+    }
+
+    #[test]
+    fn order_by_popularity_deduplicates_orders_scored_first_and_preserves_ties_and_unscored() {
+        let releases = vec![
+            ("unscored-1".to_string(), "Unscored 1"),
+            ("mid-a".to_string(), "Mid A (first)"),
+            ("high".to_string(), "High"),
+            ("mid-b".to_string(), "Mid B (tied)"),
+            ("mid-a".to_string(), "Mid A (duplicate)"),
+            ("unscored-2".to_string(), "Unscored 2"),
+            ("zero".to_string(), "Zero score"),
+            ("low".to_string(), "Low"),
+            ("unscored-1".to_string(), "Unscored 1 (duplicate)"),
+        ];
+        let plays = HashMap::from([
+            ("high".to_string(), 5_000_000),
+            ("mid-a".to_string(), 200_000),
+            ("mid-b".to_string(), 200_000),
+            ("low".to_string(), 1_500),
+            ("zero".to_string(), 0),
+        ]);
+        let ordered = order_by_popularity(releases, &plays);
+        assert_eq!(
+            ordered,
+            vec![
+                "High",
+                "Mid A (first)",
+                "Mid B (tied)",
+                "Low",
+                "Unscored 1",
+                "Unscored 2",
+                "Zero score",
+            ]
+        );
     }
 }

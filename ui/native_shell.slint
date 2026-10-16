@@ -2205,7 +2205,7 @@ export component NativeShellWindow inherits Window {
                             HorizontalLayout {
                                 height: 40px; spacing: 8px; alignment: start;
                                 for category in ["All", "Albums", "Singles"]: TabPill {
-                                    label: category; active: discography-filter == category;
+                                    label: category == "Singles" ? "Singles & EPs" : category; active: discography-filter == category;
                                     clicked => { discography-filter = category; discography-category(category); }
                                 }
                             }
@@ -2482,7 +2482,7 @@ export component NativeShellWindow inherits Window {
                                         Rectangle { horizontal-stretch: 1; }
                                     }
                                 }
-                                if artist-view-albums.length > 0 || artist-view-singles.length > 0: VerticalLayout {
+                                if artist-view-albums.length > 0: VerticalLayout {
                                     height: self.preferred-height; alignment: start;
                                     padding-left: 32px; padding-right: 32px; padding-top: Theme.section-gap; spacing: Theme.heading-gap;
                                     HorizontalLayout {
@@ -2538,56 +2538,6 @@ export component NativeShellWindow inherits Window {
                                             }
                                         }
                                         EdgeFade { scroll-x: disco-fl.viewport-x; }
-                                    }
-                                }
-                                // Singles & EPs
-                                if artist-view-singles.length > 0: VerticalLayout {
-                                    height: self.preferred-height; alignment: start;
-                                    padding-left: 32px; padding-right: 32px; padding-top: Theme.section-gap; spacing: Theme.heading-gap;
-                                    Text { text: "Singles & EPs"; font-size: 22px; font-weight: 700; color: Theme.text; }
-                                    Rectangle {
-                                        height: 230px; clip: true;
-                                        singles-fl := SmoothFlickable {
-                                            width: parent.width; height: parent.height;
-                                            viewport-width: singles-row.preferred-width + 16px;
-                                            singles-row := HorizontalLayout {
-                                                spacing: 16px;
-                                                for single[i] in artist-view-singles: Rectangle {
-                                                    width: 176px; height: 220px; border-radius: Theme.radius;
-                                                    background: single-card-ta.has-hover ? Theme.glass-hover : transparent;
-                                                    VerticalLayout {
-                                                        padding: 8px; spacing: 8px;
-                                                        Rectangle {
-                                                            width: 160px; height: 160px; border-radius: Theme.radius-sm; clip: true;
-                                                            background: Theme.art-placeholder;
-                                                            if single.has-thumbnail: Image {
-                                                                source: single.thumbnail;
-                                                                width: parent.width; height: parent.height; image-fit: cover;
-                                                            }
-                                                            if !single.has-thumbnail: Image {
-                                                                source: @image-url("icons/album.svg"); width: 40px; height: 40px; colorize: Theme.text-dim;
-                                                                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-                                                            }
-                                                        }
-                                                        VerticalLayout {
-                                                            spacing: 2px; padding-left: 4px;
-                                                            Text { text: single.title; font-size: 13px; font-weight: 600; color: Theme.text; overflow: elide; }
-                                                            Text { text: single.year; font-size: 12px; color: Theme.text-muted; }
-                                                        }
-                                                    }
-                                                    single-card-ta := TouchArea {
-                                                        clicked => { navigate-to-album(single.browse-id); }
-                                                        pointer-event(event) => {
-                                                            if event.button == PointerEventButton.right && event.kind == PointerEventKind.up {
-                                                                open-entity-ctx("Album", single.browse-id, single.title, single.artist,
-                                                                    self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        EdgeFade { scroll-x: singles-fl.viewport-x; }
                                     }
                                 }
                                 // Videos

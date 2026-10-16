@@ -3265,45 +3265,44 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                     });
                                 }
 
-                                // Convert albums
-                                let mut album_thumb_urls: Vec<(usize, String)> = vec![];
-                                let albums: Vec<AlbumItem> = artist.top_releases.albums.iter()
+                                // Convert releases (albums + singles ordered by popularity)
+                                let mut plays_by_release: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+                                for s in artist.top_releases.songs.iter().flat_map(|section| section.results.iter()) {
+                                    let album_id = ytmapi_rs::common::YoutubeID::get_raw(&s.album.id);
+                                    if !album_id.is_empty() {
+                                        let entry = plays_by_release.entry(album_id.to_string()).or_insert(0);
+                                        *entry = entry.saturating_add(discography_ui::parse_plays(&s.plays));
+                                    }
+                                }
+                                let combined_releases: Vec<(String, (AlbumItem, Option<String>))> = artist.top_releases.albums.iter()
+                                    .chain(artist.top_releases.singles.iter())
                                     .flat_map(|section| section.results.iter())
-                                    .enumerate()
-                                    .map(|(i, a)| {
-                                        if let Some(t) = pick_thumb(&a.thumbnails) {
-                                            album_thumb_urls.push((i, t.url.clone()));
-                                        }
-                                        AlbumItem {
+                                    .map(|a| {
+                                        let browse_id = a.album_id.get_raw().to_string();
+                                        let thumb_url = pick_thumb(&a.thumbnails).map(|t| t.url.clone());
+                                        let item = AlbumItem {
                                             title: SharedString::from(a.title.as_str()),
-                                            browse_id: SharedString::from(a.album_id.get_raw()),
+                                            browse_id: SharedString::from(browse_id.as_str()),
                                             artist: SharedString::from(artist.name.as_str()),
                                             year: SharedString::from(a.year.as_str()),
                                             thumbnail: Default::default(),
                                             has_thumbnail: false,
+                                        };
+                                        (browse_id, (item, thumb_url))
+                                    })
+                                    .collect();
+                                let mut album_thumb_urls: Vec<(String, String)> = vec![];
+                                let albums: Vec<AlbumItem> = discography_ui::order_by_popularity(combined_releases, &plays_by_release)
+                                    .into_iter()
+                                    .map(|(item, thumb_url)| {
+                                        if let Some(url) = thumb_url {
+                                            album_thumb_urls.push((item.browse_id.to_string(), url));
                                         }
-                                    }).collect();
+                                        item
+                                    })
+                                    .collect();
                                 ui.set_artist_view_albums(ModelRc::new(VecModel::from(albums)));
-
-                                // Convert singles
-                                let mut single_thumb_urls: Vec<(usize, String)> = vec![];
-                                let singles: Vec<AlbumItem> = artist.top_releases.singles.iter()
-                                    .flat_map(|section| section.results.iter())
-                                    .enumerate()
-                                    .map(|(i, a)| {
-                                        if let Some(t) = pick_thumb(&a.thumbnails) {
-                                            single_thumb_urls.push((i, t.url.clone()));
-                                        }
-                                        AlbumItem {
-                                            title: SharedString::from(a.title.as_str()),
-                                            browse_id: SharedString::from(a.album_id.get_raw()),
-                                            artist: SharedString::from(artist.name.as_str()),
-                                            year: SharedString::from(a.year.as_str()),
-                                            thumbnail: Default::default(),
-                                            has_thumbnail: false,
-                                        }
-                                    }).collect();
-                                ui.set_artist_view_singles(ModelRc::new(VecModel::from(singles)));
+                                ui.set_artist_view_singles(ModelRc::new(VecModel::from(Vec::<AlbumItem>::new())));
 
                                 // Convert videos
                                 let mut video_thumb_urls: Vec<(usize, String)> = vec![];
@@ -3393,7 +3392,6 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
 
                                 // Fetch artist thumbnail
                                 let ui_w_albums = ui_weak3.clone();
-                                let ui_w_singles = ui_weak3.clone();
                                 let ui_w_videos = ui_weak3.clone();
                                 let ui_w_related = ui_weak3.clone();
                                 let ui_w_latest = ui_weak3.clone();
@@ -3425,69 +3423,36 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                 // Fetch album thumbnails in artist view
                                 if !album_thumb_urls.is_empty() {
                                     let ui_w = ui_w_albums;
+                                    let thumb_path = |id: &str| {
+                                        let safe: String = id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+                                        std::env::temp_dir().join(format!("ytm_artist_release_{safe}.jpg"))
+                                    };
                                     std::thread::spawn(move || {
                                         if let Ok(client) = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(5)).build() {
-                                            for (idx, url) in &album_thumb_urls {
-                                                let path = std::env::temp_dir().join(format!("ytm_artist_album_{}.jpg", idx));
-                                                if let Ok(resp) = client.get(url).send() {
-                                                    if resp.status().is_success() {
-                                                        if let Ok(bytes) = resp.bytes() {
-                                                            let _ = std::fs::write(&path, &bytes);
-                                                        }
-                                                    }
+                                            let mut loaded: Vec<String> = Vec::new();
+                                            for (id, url) in &album_thumb_urls {
+                                                let path = thumb_path(id);
+                                                if !path.exists() {
+                                                    let Ok(resp) = client.get(url).send() else { continue };
+                                                    if !resp.status().is_success() { continue; }
+                                                    let Ok(bytes) = resp.bytes() else { continue };
+                                                    if std::fs::write(&path, &bytes).is_err() { continue; }
                                                 }
+                                                loaded.push(id.clone());
                                             }
-                                            let indices: Vec<usize> = album_thumb_urls.iter().map(|(i, _)| *i).collect();
                                             slint::invoke_from_event_loop(move || {
                                                 if let Some(ui) = ui_w.upgrade() {
                                                     let model = ui.get_artist_view_albums();
-                                                    let mut items: Vec<AlbumItem> = (0..model.row_count()).map(|i| model.row_data(i).unwrap()).collect();
-                                                    for idx in indices {
-                                                        let path = std::env::temp_dir().join(format!("ytm_artist_album_{}.jpg", idx));
-                                                        if path.exists() {
-                                                            if let Ok(img) = slint::Image::load_from_path(&path) {
-                                                                items[idx].thumbnail = img;
-                                                                items[idx].has_thumbnail = true;
-                                                            }
+                                                    // Match by browse id: the model may already belong to another artist.
+                                                    for row in 0..model.row_count() {
+                                                        let Some(mut item) = model.row_data(row) else { continue };
+                                                        if item.has_thumbnail || !loaded.iter().any(|id| id.as_str() == item.browse_id.as_str()) { continue; }
+                                                        if let Ok(img) = slint::Image::load_from_path(&thumb_path(item.browse_id.as_str())) {
+                                                            item.thumbnail = img;
+                                                            item.has_thumbnail = true;
+                                                            model.set_row_data(row, item);
                                                         }
                                                     }
-                                                    ui.set_artist_view_albums(ModelRc::new(VecModel::from(items)));
-                                                }
-                                            }).ok();
-                                        }
-                                    });
-                                }
-
-                                // Fetch single thumbnails
-                                if !single_thumb_urls.is_empty() {
-                                    let ui_w = ui_w_singles;
-                                    std::thread::spawn(move || {
-                                        if let Ok(client) = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(5)).build() {
-                                            for (idx, url) in &single_thumb_urls {
-                                                let path = std::env::temp_dir().join(format!("ytm_artist_single_{}.jpg", idx));
-                                                if let Ok(resp) = client.get(url).send() {
-                                                    if resp.status().is_success() {
-                                                        if let Ok(bytes) = resp.bytes() {
-                                                            let _ = std::fs::write(&path, &bytes);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            let indices: Vec<usize> = single_thumb_urls.iter().map(|(i, _)| *i).collect();
-                                            slint::invoke_from_event_loop(move || {
-                                                if let Some(ui) = ui_w.upgrade() {
-                                                    let model = ui.get_artist_view_singles();
-                                                    let mut items: Vec<AlbumItem> = (0..model.row_count()).map(|i| model.row_data(i).unwrap()).collect();
-                                                    for idx in indices {
-                                                        let path = std::env::temp_dir().join(format!("ytm_artist_single_{}.jpg", idx));
-                                                        if path.exists() {
-                                                            if let Ok(img) = slint::Image::load_from_path(&path) {
-                                                                items[idx].thumbnail = img;
-                                                                items[idx].has_thumbnail = true;
-                                                            }
-                                                        }
-                                                    }
-                                                    ui.set_artist_view_singles(ModelRc::new(VecModel::from(items)));
                                                 }
                                             }).ok();
                                         }
