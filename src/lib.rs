@@ -4460,6 +4460,8 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             let mut last_sidebar_album_sig = String::new(); // dedupes the sidebar album rebuild
             let mut thumb_refresh_counter: u32 = 0;
             let mut thumb_fetch_done: Option<std::sync::mpsc::Receiver<()>> = None;
+            #[cfg(target_os = "windows")]
+            let mut smtc_attached = false;
 
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(500));
@@ -4499,6 +4501,80 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                             app_hwnd.store(found, std::sync::atomic::Ordering::Relaxed);
                             hwnd_val = found;
                         }
+                    }
+
+                    if !smtc_attached && hwnd_val != 0 {
+                        smtc_attached = true;
+                        let ui_w_smtc = ui_weak.clone();
+                        slint::invoke_from_event_loop(move || {
+                            let ui_w_act = ui_w_smtc.clone();
+                            crate::core::media_controls::attach(hwnd_val, move |action| {
+                                let ui_w = ui_w_act.clone();
+                                slint::invoke_from_event_loop(move || {
+                                    let Some(ui) = ui_w.upgrade() else { return; };
+                                    let playback = crate::core::bridge::playback_core();
+                                    match action {
+                                        crate::core::media_controls::MediaAction::PlayPause => {
+                                            ui.invoke_toggle_play_pause();
+                                        }
+                                        crate::core::media_controls::MediaAction::Play => {
+                                            if !playback.is_playing() {
+                                                ui.invoke_toggle_play_pause();
+                                            }
+                                        }
+                                        crate::core::media_controls::MediaAction::Pause => {
+                                            if playback.is_playing() {
+                                                ui.invoke_toggle_play_pause();
+                                            }
+                                        }
+                                        crate::core::media_controls::MediaAction::Next => {
+                                            ui.invoke_next_track();
+                                        }
+                                        crate::core::media_controls::MediaAction::Previous => {
+                                            ui.invoke_prev_track();
+                                        }
+                                        crate::core::media_controls::MediaAction::SeekTo(secs) => {
+                                            let dur = playback.track_duration_secs() as f64;
+                                            if dur > 0.0 {
+                                                let fraction = (secs / dur).clamp(0.0, 1.0) as f32;
+                                                ui.invoke_seek(fraction);
+                                            } else {
+                                                playback.seek_to_secs(secs);
+                                            }
+                                        }
+                                        crate::core::media_controls::MediaAction::SeekBy(delta_secs) => {
+                                            let target = (playback.elapsed_secs() + delta_secs).max(0.0);
+                                            let dur = playback.track_duration_secs() as f64;
+                                            if dur > 0.0 {
+                                                let fraction = (target / dur).clamp(0.0, 1.0) as f32;
+                                                ui.invoke_seek(fraction);
+                                            } else {
+                                                playback.seek_to_secs(target);
+                                            }
+                                        }
+                                    }
+                                    let np = playback.now_playing();
+                                    let album = if !np.album.is_empty() {
+                                        np.album
+                                    } else {
+                                        crate::core::playback::get_song_meta(&np.video_id)
+                                            .map(|m| m.album)
+                                            .unwrap_or_default()
+                                    };
+                                    crate::core::media_controls::update(
+                                        crate::core::media_controls::MediaSnapshot {
+                                            video_id: np.video_id,
+                                            title: np.title,
+                                            artist: np.artist,
+                                            album,
+                                            duration_secs: playback.track_duration_secs(),
+                                            elapsed_secs: playback.elapsed_secs(),
+                                            is_playing: playback.is_playing(),
+                                        },
+                                    );
+                                }).ok();
+                            });
+                        }).ok();
                     }
 
                     let settings = core::persistence::load_settings();
@@ -4813,6 +4889,26 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     }
                 }
 
+                #[cfg(target_os = "windows")]
+                let media_snap = {
+                    let album = if !track.album.is_empty() {
+                        track.album.clone()
+                    } else {
+                        crate::core::playback::get_song_meta(&track.video_id)
+                            .map(|m| m.album)
+                            .unwrap_or_default()
+                    };
+                    crate::core::media_controls::MediaSnapshot {
+                        video_id: track.video_id.clone(),
+                        title: track.title.clone(),
+                        artist: track.artist.clone(),
+                        album,
+                        duration_secs: dur,
+                        elapsed_secs: elapsed,
+                        is_playing,
+                    }
+                };
+
                 let ui_w = ui_weak.clone();
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_w.upgrade() {
@@ -4837,6 +4933,8 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                             ui.set_has_album_art(false);
                         }
                     }
+                    #[cfg(target_os = "windows")]
+                    crate::core::media_controls::update(media_snap);
                 }).ok();
             }
         });
