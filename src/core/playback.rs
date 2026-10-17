@@ -98,6 +98,7 @@ struct AudioEngine {
     _stream: OutputStream,
     handle: OutputStreamHandle,
     sink: Sink,
+    device_name: Option<String>,
     current_video_id: Option<String>,
     current_is_cached: bool,
     /// CDN URL of the currently streaming track (for Range-request seeks)
@@ -175,7 +176,19 @@ fn log_native_audio_timing(stage: &str, code: &str, video_id: &str, started: Ins
     eprintln!("{message}");
 }
 
+fn default_output_device_name() -> Option<String> {
+    use rodio::cpal::traits::{DeviceTrait, HostTrait};
+    rodio::cpal::default_host()
+        .default_output_device()
+        .and_then(|d| d.name().ok())
+}
+
+fn device_changed(current: Option<&str>, recorded: Option<&str>) -> bool {
+    matches!(current, Some(cur) if Some(cur) != recorded)
+}
+
 fn create_audio_engine(duration_out: Arc<AtomicU32>) -> Result<AudioEngine, String> {
+    let device_name = default_output_device_name();
     let (_stream, handle) = OutputStream::try_default()
         .map_err(|err| format!("Failed to open native audio output: {err}"))?;
     let sink = Sink::try_new(&handle)
@@ -184,6 +197,7 @@ fn create_audio_engine(duration_out: Arc<AtomicU32>) -> Result<AudioEngine, Stri
         _stream,
         handle,
         sink,
+        device_name,
         current_video_id: None,
         current_is_cached: false,
         stream_url: None,
@@ -191,6 +205,21 @@ fn create_audio_engine(duration_out: Arc<AtomicU32>) -> Result<AudioEngine, Stri
         volume: 1.0,
         duration_out,
     })
+}
+
+fn reopen_output_device(engine: &mut AudioEngine) -> Result<(), String> {
+    let (new_stream, new_handle) = OutputStream::try_default()
+        .map_err(|err| format!("Failed to reopen native audio output: {err}"))?;
+    let new_sink = Sink::try_new(&new_handle)
+        .map_err(|err| format!("Failed to create native audio sink: {err}"))?;
+    new_sink.set_volume(engine.volume);
+    engine.sink.stop();
+    engine.sink = new_sink;
+    engine.handle = new_handle;
+    let old_stream = std::mem::replace(&mut engine._stream, new_stream);
+    drop(old_stream);
+    engine.device_name = default_output_device_name();
+    Ok(())
 }
 
 fn spawn_stream_fetch(events: mpsc::Sender<AudioEvent>, request_id: u64, video_id: String, force_refresh: bool) {
@@ -355,6 +384,7 @@ fn spawn_audio_worker(
             // tell a mid-song stall (recover from cache) apart from the natural end
             // of the track (just advance).
             let mut current_duration_secs: f64 = 0.0;
+            let mut last_device_check = Instant::now();
 
             loop {
                 // Collect all immediately-available commands, then process them.
@@ -622,6 +652,106 @@ fn spawn_audio_worker(
                                         advance_pending.store(true, Ordering::Relaxed);
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+
+                // Default output device watch: check ~once per second and reopen the
+                // rodio OutputStream when Windows switches default output (e.g. earphones plugged in).
+                if last_device_check.elapsed() >= Duration::from_secs(1) {
+                    last_device_check = Instant::now();
+                    let current_device = default_output_device_name();
+                    if device_changed(current_device.as_deref(), engine.device_name.as_deref()) {
+                        let new_name = current_device.clone().unwrap_or_default();
+                        let old_name = engine.device_name.as_deref().unwrap_or("-");
+                        let log_vid = engine.current_video_id.as_deref()
+                            .or(requested_video.as_deref())
+                            .unwrap_or("-")
+                            .to_string();
+                        let message = format!(
+                            "[native-audio][stage=device][code=default-device-changed] video_id={log_vid} detail={old_name} -> {new_name}"
+                        );
+                        log::info!("{message}");
+                        eprintln!("{message}");
+
+                        match reopen_output_device(&mut engine) {
+                            Ok(()) => {
+                                if engine.device_name.is_none() {
+                                    engine.device_name = current_device;
+                                }
+                                if let Some(vid) = engine.current_video_id.clone() {
+                                    let elapsed = playback_base_secs
+                                        + if is_playing {
+                                            playback_started_at.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0)
+                                        } else {
+                                            0.0
+                                        };
+                                    let near_end = current_duration_secs > 0.0
+                                        && elapsed >= current_duration_secs - 2.0;
+                                    let reload_result = if near_end {
+                                        // Reloading past the end would fail and restart the song; just advance.
+                                        engine.current_video_id = None;
+                                        if is_playing { advance_pending.store(true, Ordering::Relaxed); }
+                                        Ok(())
+                                    } else if engine.current_is_cached {
+                                        match AudioCache::global().lock().ok().and_then(|mut c| c.get(&vid)) {
+                                            Some(path) => load_file_into_engine(&mut engine, &vid, &path, Some(elapsed)),
+                                            None => Err("Cached file not found in AudioCache".to_string()),
+                                        }
+                                    } else if let Some(url) = engine.stream_url.clone() {
+                                        let clen = engine.stream_content_len;
+                                        load_stream_into_engine(
+                                            &mut engine,
+                                            &vid,
+                                            &url,
+                                            clen,
+                                            Some(elapsed),
+                                            None,
+                                        )
+                                    } else {
+                                        Err("No stream URL or cached file available for reload".to_string())
+                                    };
+
+                                    match reload_result {
+                                        Ok(()) => {
+                                            playback_base_secs = elapsed;
+                                            playback_started_at = if is_playing { Some(Instant::now()) } else { None };
+                                            sink_empty_count = 0;
+                                            if !is_playing {
+                                                engine.sink.pause();
+                                            }
+                                        }
+                                        Err(err) => {
+                                            log_native_audio_error("device", "device-reload-failed", &vid, &err);
+                                            engine.current_video_id = None;
+                                            sink_empty_count = 0;
+                                            if is_playing {
+                                                if let Some(ref req_vid) = requested_video {
+                                                    audio_loading_flag.store(true, Ordering::Relaxed);
+                                                    audio_just_started_flag.store(false, Ordering::Relaxed);
+                                                    stream_retries = 0;
+                                                    latest_request_id = latest_request_id.saturating_add(1);
+                                                    spawn_stream_fetch(
+                                                        event_sender.clone(),
+                                                        latest_request_id,
+                                                        req_vid.clone(),
+                                                        true,
+                                                    );
+                                                } else {
+                                                    audio_loading_flag.store(false, Ordering::Relaxed);
+                                                }
+                                            } else {
+                                                audio_loading_flag.store(false, Ordering::Relaxed);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                log_native_audio_error("device", "device-reopen-failed", &log_vid, &err);
+                                // Back off so a device that isn't ready yet isn't retried (and logged) every second.
+                                last_device_check = Instant::now() + Duration::from_secs(4);
                             }
                         }
                     }
@@ -1456,6 +1586,15 @@ impl PlaybackCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_changed_detects_new_default_device() {
+        assert!(!device_changed(None, None));
+        assert!(!device_changed(None, Some("Speakers")));
+        assert!(!device_changed(Some("Speakers"), Some("Speakers")));
+        assert!(device_changed(Some("Headphones"), Some("Speakers")));
+        assert!(device_changed(Some("Headphones"), None));
+    }
 
     #[test]
     #[ignore = "requires an uncached AURICLE_TEST_VIDEO_ID, network, yt-dlp and an audio output device; writes tee staging audio"]
