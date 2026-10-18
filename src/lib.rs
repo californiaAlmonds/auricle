@@ -5491,5 +5491,14 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     // Populate the sidebar shortcuts (your artists + your playlists).
     refresh_sidebar(&ui);
 
-    ui.run()
+    // End the event loop explicitly on close; otherwise the process could outlive its window.
+    ui.window().on_close_requested(|| {
+        let _ = slint::quit_event_loop();
+        slint::CloseRequestResponse::HideWindow
+    });
+
+    let result = ui.run();
+    // Remove the tray icon, then exit without waiting on background work or destructors.
+    drop(_tray_icon);
+    std::process::exit(if result.is_ok() { 0 } else { 1 });
 }
