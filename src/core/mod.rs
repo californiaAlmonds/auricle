@@ -11,3 +11,4 @@ pub mod library;
 pub mod addons;
 pub mod updater;
 pub mod menu_metadata;
+pub mod release_rank;

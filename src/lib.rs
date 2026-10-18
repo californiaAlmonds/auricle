@@ -3130,6 +3130,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 ui.set_artist_view_related(ModelRc::new(VecModel::from(Vec::<ArtistItem>::new())));
                 ui.set_artist_view_videos(ModelRc::new(VecModel::from(Vec::<SongItem>::new())));
                 ui.set_artist_view_has_latest(false);
+                discography_ui::cancel_artist_row();
             }
 
             let cur_artist = cur_artist.clone();
@@ -3303,6 +3304,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                     .collect();
                                 ui.set_artist_view_albums(ModelRc::new(VecModel::from(albums)));
                                 ui.set_artist_view_singles(ModelRc::new(VecModel::from(Vec::<AlbumItem>::new())));
+                                discography_ui::rank_artist_row(&ui, &browse_id_c, &artist.name, artist.top_releases.songs.as_ref().map(|songs| songs.browse_id.get_raw().to_string()));
 
                                 // Convert videos
                                 let mut video_thumb_urls: Vec<(usize, String)> = vec![];

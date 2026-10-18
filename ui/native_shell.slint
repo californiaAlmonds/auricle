@@ -2204,7 +2204,7 @@ export component NativeShellWindow inherits Window {
                             Text { text: discography-title; color: Theme.text-muted; font-size: 16px; overflow: elide; }
                             HorizontalLayout {
                                 height: 40px; spacing: 8px; alignment: start;
-                                for category in ["All", "Albums", "Singles"]: TabPill {
+                                for category in ["All", "Albums", "Singles", "Compilations"]: TabPill {
                                     label: category == "Singles" ? "Singles & EPs" : category; active: discography-filter == category;
                                     clicked => { discography-filter = category; discography-category(category); }
                                 }
