@@ -914,6 +914,13 @@ pub(crate) fn rank_artist_row(
                 .enable_all()
                 .build()
             else {
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    if ROW_GENERATION.load(Ordering::SeqCst) == generation {
+                        ui.set_artist_row_sorting(false);
+                        ui.set_artist_view_albums(ui.get_artist_row_fallback());
+                    }
+                });
                 return;
             };
             let result = runtime.block_on(async {
@@ -965,6 +972,11 @@ pub(crate) fn rank_artist_row(
                                 item
                             })
                             .collect();
+                        ui.set_artist_row_sorting(false);
+                        if items.is_empty() {
+                            ui.set_artist_view_albums(ui.get_artist_row_fallback());
+                            return;
+                        }
                         ui.set_artist_view_albums(ModelRc::new(VecModel::from(items)));
                         for (id, url) in missing_thumbs {
                             let weak = ui.as_weak();
@@ -1021,6 +1033,16 @@ pub(crate) fn rank_artist_row(
                 Err(error) if error == "cancelled" => {}
                 Err(error) => {
                     log::warn!("Artist row ranking failed for {artist_id}: {error}");
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let Some(ui) = weak.upgrade() else { return };
+                        if ROW_GENERATION.load(Ordering::SeqCst) != generation
+                            || !current_artist_matches(&artist_id)
+                        {
+                            return;
+                        }
+                        ui.set_artist_row_sorting(false);
+                        ui.set_artist_view_albums(ui.get_artist_row_fallback());
+                    });
                 }
             }
         });

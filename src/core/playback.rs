@@ -1,5 +1,5 @@
-﻿use std::sync::{mpsc, Mutex, OnceLock};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{mpsc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -136,6 +136,9 @@ enum AudioSource {
     CachedFile(std::path::PathBuf),
 }
 
+pub const AUTOPLAY_TARGET: usize = 15;
+pub const AUTOPLAY_MAX: usize = 25;
+
 pub struct PlaybackCore {
     state: Mutex<PlaybackState>,
     advance_pending: Arc<AtomicBool>,
@@ -156,6 +159,9 @@ pub struct PlaybackCore {
     /// UI layer; folded in here so callers use methods instead of raw shared locks.
     autoplay_queue: Mutex<Vec<NowPlaying>>,
     autoplay_seed: Mutex<String>,
+    autoplay_refilling: AtomicBool,
+    autoplay_generation: AtomicU64,
+    pub(crate) autoplay_refill_empty: AtomicBool,
 }
 
 fn log_native_audio_error(stage: &str, code: &str, video_id: &str, detail: &str) {
@@ -742,6 +748,9 @@ impl PlaybackCore {
             detected_duration: Arc::new(AtomicU32::new(0)),
             autoplay_queue: Mutex::new(Vec::new()),
             autoplay_seed: Mutex::new(String::new()),
+            autoplay_refilling: AtomicBool::new(false),
+            autoplay_generation: AtomicU64::new(0),
+            autoplay_refill_empty: AtomicBool::new(false),
         }
     }
 
@@ -1179,7 +1188,9 @@ impl PlaybackCore {
 
     /// Replace the entire autoplay queue (e.g. after fetching a fresh radio batch).
     pub fn set_autoplay_queue(&self, songs: Vec<NowPlaying>) {
-        *self.autoplay_queue.lock().unwrap() = songs;
+        let mut q = self.autoplay_queue.lock().unwrap();
+        self.autoplay_generation.fetch_add(1, Ordering::AcqRel);
+        *q = songs;
     }
 
     /// Snapshot of the current autoplay queue.
@@ -1189,7 +1200,14 @@ impl PlaybackCore {
 
     /// Empty the autoplay queue.
     pub fn clear_autoplay_queue(&self) {
-        self.autoplay_queue.lock().unwrap().clear();
+        let mut q = self.autoplay_queue.lock().unwrap();
+        self.autoplay_generation.fetch_add(1, Ordering::AcqRel);
+        q.clear();
+    }
+
+    /// Current autoplay queue generation, incremented on replace or clear.
+    pub fn autoplay_generation(&self) -> u64 {
+        self.autoplay_generation.load(Ordering::Acquire)
     }
 
     /// Remove and return the next autoplay song (front of the queue).
@@ -1223,6 +1241,77 @@ impl PlaybackCore {
     /// Current autoplay seed video id.
     pub fn autoplay_seed(&self) -> String {
         self.autoplay_seed.lock().unwrap().clone()
+    }
+
+    /// Append songs to the autoplay queue, skipping empty ids and duplicates against
+    /// the autoplay queue, now-playing, the user queue, and the 30 most recent history
+    /// entries. Stops at `AUTOPLAY_MAX` total and returns how many were added.
+    pub fn append_autoplay(&self, songs: Vec<NowPlaying>, generation: u64) -> usize {
+        let mut excluded: std::collections::HashSet<String> = {
+            let state = self.state.lock().unwrap();
+            let mut set: std::collections::HashSet<String> = state
+                .history
+                .iter()
+                .take(30)
+                .map(|h| h.video_id.clone())
+                .collect();
+            for s in &state.queue {
+                set.insert(s.video_id.clone());
+            }
+            if !state.now_playing.video_id.is_empty() {
+                set.insert(state.now_playing.video_id.clone());
+            }
+            set
+        };
+        let mut q = self.autoplay_queue.lock().unwrap();
+        if self.autoplay_generation.load(Ordering::Acquire) != generation {
+            return 0;
+        }
+        for s in q.iter() {
+            excluded.insert(s.video_id.clone());
+        }
+        let mut added = 0;
+        for song in songs {
+            if q.len() >= AUTOPLAY_MAX {
+                break;
+            }
+            if song.video_id.is_empty() || excluded.contains(&song.video_id) {
+                continue;
+            }
+            excluded.insert(song.video_id.clone());
+            q.push(song);
+            added += 1;
+        }
+        added
+    }
+
+    /// Seed for topping up the autoplay queue: last autoplay entry, else current
+    /// now-playing id, else the stored autoplay seed.
+    pub fn autoplay_refill_seed(&self) -> String {
+        if let Some(last) = self.autoplay_queue.lock().unwrap().last() {
+            if !last.video_id.is_empty() && last.video_id != "native-prototype" {
+                return last.video_id.clone();
+            }
+        }
+        let np = self.now_playing().video_id;
+        if !np.is_empty() && np != "native-prototype" {
+            return np;
+        }
+        self.autoplay_seed()
+    }
+
+    pub fn try_begin_autoplay_refill(&self) -> bool {
+        self.autoplay_refilling
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub fn end_autoplay_refill(&self) {
+        self.autoplay_refilling.store(false, Ordering::Release);
+    }
+
+    pub fn last_autoplay_refill_empty(&self) -> bool {
+        self.autoplay_refill_empty.load(Ordering::Acquire)
     }
 
     /// Returns (and clears) a stream-detected duration in seconds, or 0 if none.
@@ -1580,5 +1669,134 @@ mod tests {
                 mpsc::RecvTimeoutError::Disconnected => "live-worker-disconnected",
             }, started.elapsed().as_millis()),
         }
+    }
+
+    fn test_core() -> PlaybackCore {
+        PlaybackCore {
+            state: Mutex::new(PlaybackState {
+                queue: Vec::new(),
+                queue_index: 0,
+                now_playing: NowPlaying::default(),
+                is_playing: false,
+                audio_enabled: false,
+                audio_worker: None,
+                track_started_at: None,
+                paused_elapsed: Duration::ZERO,
+                history: std::collections::VecDeque::new(),
+            }),
+            advance_pending: Arc::new(AtomicBool::new(false)),
+            liked_ids: Mutex::new(std::collections::HashSet::new()),
+            liked_songs: Mutex::new(Vec::new()),
+            disliked_ids: Mutex::new(std::collections::HashSet::new()),
+            current_is_cached: Arc::new(AtomicBool::new(false)),
+            audio_loading: Arc::new(AtomicBool::new(false)),
+            audio_just_started: Arc::new(AtomicBool::new(false)),
+            autoplay_needed: Arc::new(AtomicBool::new(false)),
+            detected_duration: Arc::new(AtomicU32::new(0)),
+            autoplay_queue: Mutex::new(Vec::new()),
+            autoplay_seed: Mutex::new(String::new()),
+            autoplay_refilling: AtomicBool::new(false),
+            autoplay_generation: AtomicU64::new(0),
+            autoplay_refill_empty: AtomicBool::new(false),
+        }
+    }
+
+    fn dummy_song(id: &str) -> NowPlaying {
+        NowPlaying {
+            video_id: id.to_string(),
+            title: format!("Title {id}"),
+            artist: "Artist".to_string(),
+            duration_secs: 180,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn append_autoplay_deduplicates_caps_and_checks_generation() {
+        let core = test_core();
+        assert_eq!(core.autoplay_generation(), 0);
+        {
+            let mut state = core.state.lock().unwrap();
+            state.now_playing = dummy_song("np_1");
+            state.queue = vec![dummy_song("np_1"), dummy_song("q_1")];
+            for i in 0..35 {
+                state.history.push_back(dummy_song(&format!("hist_{i}")));
+            }
+        }
+        core.set_autoplay_queue(vec![dummy_song("ap_existing")]);
+        let gen = core.autoplay_generation();
+        assert_eq!(gen, 1);
+
+        let added = core.append_autoplay(
+            vec![
+                dummy_song(""),
+                dummy_song("np_1"),
+                dummy_song("q_1"),
+                dummy_song("ap_existing"),
+                dummy_song("hist_0"),
+                dummy_song("hist_29"),
+                dummy_song("hist_30"), // beyond the 30 most recent history entries -> allowed
+                dummy_song("new_1"),
+                dummy_song("new_1"), // duplicate within batch -> skipped
+                dummy_song("new_2"),
+            ],
+            gen,
+        );
+        assert_eq!(added, 3);
+        let ids: Vec<String> = core.autoplay_queue().into_iter().map(|s| s.video_id).collect();
+        assert_eq!(ids, vec!["ap_existing", "hist_30", "new_1", "new_2"]);
+
+        let batch: Vec<NowPlaying> = (0..30).map(|i| dummy_song(&format!("fill_{i}"))).collect();
+        let added_more = core.append_autoplay(batch, gen);
+        assert_eq!(added_more, AUTOPLAY_MAX - 4);
+        assert_eq!(core.autoplay_queue().len(), AUTOPLAY_MAX);
+
+        // Stale generation after set_autoplay_queue must be ignored without changes
+        core.set_autoplay_queue(vec![dummy_song("fresh_seed")]);
+        let gen_after_set = core.autoplay_generation();
+        assert_eq!(gen_after_set, 2);
+        assert_eq!(core.append_autoplay(vec![dummy_song("stale_add")], gen), 0);
+        assert_eq!(
+            core.autoplay_queue().into_iter().map(|s| s.video_id).collect::<Vec<_>>(),
+            vec!["fresh_seed"]
+        );
+
+        // Stale generation after clear_autoplay_queue must also be ignored
+        core.clear_autoplay_queue();
+        let gen_after_clear = core.autoplay_generation();
+        assert_eq!(gen_after_clear, 3);
+        assert_eq!(
+            core.append_autoplay(vec![dummy_song("stale_after_clear")], gen_after_set),
+            0
+        );
+        assert!(core.autoplay_queue().is_empty());
+        assert_eq!(
+            core.append_autoplay(vec![dummy_song("valid_after_clear")], gen_after_clear),
+            1
+        );
+        assert_eq!(core.autoplay_queue().len(), 1);
+    }
+
+    #[test]
+    fn autoplay_refill_seed_and_guard_work() {
+        let core = test_core();
+        core.set_autoplay_seed("seed_fallback");
+        assert_eq!(core.autoplay_refill_seed(), "seed_fallback");
+
+        core.state.lock().unwrap().now_playing = dummy_song("now_vid");
+        assert_eq!(core.autoplay_refill_seed(), "now_vid");
+
+        core.set_autoplay_queue(vec![dummy_song("ap_1"), dummy_song("ap_2")]);
+        assert_eq!(core.autoplay_refill_seed(), "ap_2");
+
+        assert!(core.try_begin_autoplay_refill());
+        assert!(!core.try_begin_autoplay_refill());
+        core.end_autoplay_refill();
+        assert!(core.try_begin_autoplay_refill());
+        core.end_autoplay_refill();
+
+        assert!(!core.last_autoplay_refill_empty());
+        core.autoplay_refill_empty.store(true, Ordering::Release);
+        assert!(core.last_autoplay_refill_empty());
     }
 }

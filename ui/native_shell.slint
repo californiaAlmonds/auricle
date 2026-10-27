@@ -682,6 +682,7 @@ export component NativeShellWindow inherits Window {
     in-out property <[SongItem]> liked-songs: [];
     in-out property <bool> autoplay-enabled: true;
     in-out property <[SongItem]> autoplay-queue: [];
+    in-out property <[SongItem]> queue-history: [];
     callback set-autoplay-enabled(bool);
     callback play-autoplay-song(int);
     in-out property <[SongItem]> trending-songs: [];
@@ -707,6 +708,9 @@ export component NativeShellWindow inherits Window {
     in-out property <string> artist-view-name: "";
     in-out property <[SongItem]> artist-view-songs: [];
     in-out property <[AlbumItem]> artist-view-albums: [];
+    in-out property <bool> artist-row-sorting: false;
+    // Unranked releases shown only if ranking fails.
+    in-out property <[AlbumItem]> artist-row-fallback: [];
     in-out property <image> artist-view-thumbnail;
     in-out property <bool> artist-view-has-thumbnail: false;
     in-out property <string> artist-view-description: "";
@@ -2482,7 +2486,7 @@ export component NativeShellWindow inherits Window {
                                         Rectangle { horizontal-stretch: 1; }
                                     }
                                 }
-                                if artist-view-albums.length > 0: VerticalLayout {
+                                if artist-view-albums.length > 0 || artist-row-sorting: VerticalLayout {
                                     height: self.preferred-height; alignment: start;
                                     padding-left: 32px; padding-right: 32px; padding-top: Theme.section-gap; spacing: Theme.heading-gap;
                                     HorizontalLayout {
@@ -2495,7 +2499,12 @@ export component NativeShellWindow inherits Window {
                                             view-discography := TouchArea { clicked => { open-discography(); } }
                                         }
                                     }
-                                    Rectangle {
+                                    if artist-row-sorting: Rectangle {
+                                        height: 230px; border-radius: Theme.radius;
+                                        background: Theme.hover-veil;
+                                        Text { text: "Sorting releases by popularity…"; color: Theme.text-muted; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; width: parent.width; height: parent.height; }
+                                    }
+                                    if !artist-row-sorting: Rectangle {
                                         height: 230px; clip: true;
                                         disco-fl := SmoothFlickable {
                                             width: parent.width; height: parent.height;
@@ -3957,11 +3966,63 @@ export component NativeShellWindow inherits Window {
                         }
                         Rectangle { height: 12px; }
 
-                        SmoothFlickable {
+                        Rectangle {
+                            height: 0;
+                            property <string> now-playing-video-id: root.now-playing-video-id;
+                            init => { qpane-fl.viewport-y = queue-history.length > 0 ? -qp-history.height : 0px; }
+                            changed now-playing-video-id => { qpane-fl.viewport-y = queue-history.length > 0 ? -qp-history.height : 0px; }
+                        }
+
+                        qpane-fl := SmoothFlickable {
                             vertical-stretch: 1;
                             viewport-height: qpane-col.preferred-height;
                             qpane-col := VerticalLayout {
                                 spacing: 0px;
+
+                                // ── Recently played ──
+                                qp-history := VerticalLayout {
+                                    spacing: 0px;
+                                    if queue-history.length > 0: Text { text: "Recently played"; font-size: 14px; font-weight: 700; color: Theme.text; }
+                                    if queue-history.length > 0: Rectangle { height: 8px; }
+                                    for item[i] in queue-history: Rectangle {
+                                        height: 64px;
+                                        border-radius: Theme.radius-sm;
+                                        background: hrow-ta.has-hover ? Theme.hover-veil : transparent;
+                                        HorizontalLayout {
+                                            padding-left: 6px; padding-right: 8px; padding-top: 8px; padding-bottom: 8px; spacing: 12px;
+                                            Rectangle {
+                                                width: 48px; height: 48px; border-radius: 6px; clip: true;
+                                                background: Theme.art-placeholder;
+                                                if item.has-thumbnail: Image {
+                                                    source: item.thumbnail; width: parent.width; height: parent.height; image-fit: cover;
+                                                }
+                                                if !item.has-thumbnail: Text {
+                                                    text: item.avatar-letter;
+                                                    color: Theme.text-muted;
+                                                    font-size: 14px; font-weight: 700;
+                                                    width: parent.width; height: parent.height;
+                                                    horizontal-alignment: center; vertical-alignment: center;
+                                                }
+                                            }
+                                            VerticalLayout {
+                                                alignment: center; spacing: 3px; horizontal-stretch: 1;
+                                                Text { text: item.title; font-size: 14px; font-weight: 500; color: Theme.text-muted; overflow: elide; }
+                                                Text { text: item.artist; font-size: 12px; color: Theme.text-muted; overflow: elide; }
+                                            }
+                                        }
+                                        hrow-ta := TouchArea {
+                                            clicked => { play-song(item.video-id, item.title, item.artist, item.duration-secs); }
+                                            pointer-event(e) => {
+                                                if e.button == PointerEventButton.right && e.kind == PointerEventKind.up {
+                                                    open-ctx(item.video-id, item.title, item.artist, item.album, item.duration-secs,
+                                                        self.absolute-position.x + self.mouse-x,
+                                                        self.absolute-position.y + self.mouse-y);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if queue-history.length > 0: Rectangle { height: 16px; }
+                                }
 
                                 // ── Now Playing ──
                                 if now-playing-video-id != "": VerticalLayout {

@@ -757,16 +757,21 @@ fn spawn_artist_thumb_loader(ui_weak: slint::Weak<NativeShellWindow>) {
     });
 }
 
-fn fetch_autoplay_queue(
-    ui_weak: slint::Weak<NativeShellWindow>,
-    video_id: String,
-    resume: bool,
-) {
-    let seed_vid = video_id.clone();
-    let rt = tokio::runtime::Builder::new_current_thread()
+fn fetch_radio_songs(seed: &str) -> Vec<core::playback::NowPlaying> {
+    if seed.is_empty() {
+        return Vec::new();
+    }
+    let seed_vid = seed.to_string();
+    let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .unwrap();
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("[autoplay] failed to build runtime: {e}");
+            return Vec::new();
+        }
+    };
     let songs = rt.block_on(async {
         let api = match ytmapi_rs::YtMusic::new_unauthenticated().await {
             Ok(a) => a,
@@ -776,7 +781,7 @@ fn fetch_autoplay_queue(
             }
         };
         use ytmapi_rs::common::YoutubeID;
-        let vid = ytmapi_rs::common::VideoID::from_raw(video_id);
+        let vid = ytmapi_rs::common::VideoID::from_raw(seed_vid.clone());
         let tracks = match api.get_watch_playlist_from_video_id(vid).await {
             Ok(t) => t,
             Err(e) => {
@@ -815,25 +820,89 @@ fn fetch_autoplay_queue(
     // ordering: a familiar artist only nudges a song a few spots earlier, while
     // most of the queue stays whatever radio returned — so unfamiliar music keeps
     // coming through and discovery is preserved. `BIAS` is the one subtlety knob.
-    let songs: Vec<core::playback::NowPlaying> = {
-        let taste = TasteAffinity::build();
-        if taste.is_empty() {
-            songs
-        } else {
-            const BIAS: f32 = 2.5; // max spots a full-taste match can climb
-            let mut ranked: Vec<(f32, usize, core::playback::NowPlaying)> = songs
-                .into_iter()
-                .enumerate()
-                .map(|(i, s)| (i as f32 - BIAS * taste.score(&s.artist), i, s))
-                .collect();
-            ranked.sort_by(|a, b| a.0
-                .partial_cmp(&b.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.1.cmp(&b.1)));
-            ranked.into_iter().map(|(_, _, s)| s).collect()
-        }
-    };
+    let taste = TasteAffinity::build();
+    if taste.is_empty() {
+        songs
+    } else {
+        const BIAS: f32 = 2.5; // max spots a full-taste match can climb
+        let mut ranked: Vec<(f32, usize, core::playback::NowPlaying)> = songs
+            .into_iter()
+            .enumerate()
+            .map(|(i, s)| (i as f32 - BIAS * taste.score(&s.artist), i, s))
+            .collect();
+        ranked.sort_by(|a, b| a.0
+            .partial_cmp(&b.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.cmp(&b.1)));
+        ranked.into_iter().map(|(_, _, s)| s).collect()
+    }
+}
 
+fn spawn_autoplay_thumbnails(
+    ui_weak: slint::Weak<NativeShellWindow>,
+    songs: &[core::playback::NowPlaying],
+) {
+    let need_thumbs: Vec<String> = songs
+        .iter()
+        .filter(|s| {
+            !s.video_id.is_empty()
+                && !std::env::temp_dir().join(format!("ytm_thumb_{}.jpg", s.video_id)).exists()
+        })
+        .map(|s| s.video_id.clone())
+        .collect();
+    if need_thumbs.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || {
+        let http = match reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(8))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        for vid in need_thumbs {
+            let url = format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", vid);
+            let thumb_path = std::env::temp_dir().join(format!("ytm_thumb_{}.jpg", vid));
+            if let Ok(resp) = http.get(&url).send() {
+                if let Ok(bytes) = resp.bytes() {
+                    if let Ok(img) = image::load_from_memory(&bytes) {
+                        let rgba = img.to_rgba8();
+                        let (w, h) = (rgba.width(), rgba.height());
+                        // Save to disk for future use
+                        let _ = std::fs::write(&thumb_path, bytes.as_ref());
+                        let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(rgba.as_raw(), w, h);
+                        let ui_w = ui_weak.clone();
+                        let vid_copy = vid.clone();
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui_w.upgrade() {
+                                let slint_img = slint::Image::from_rgba8(buf);
+                                let model = ui.get_autoplay_queue();
+                                for i in 0..model.row_count() {
+                                    if let Some(mut row) = model.row_data(i) {
+                                        if row.video_id.as_str() == vid_copy {
+                                            row.thumbnail = slint_img;
+                                            row.has_thumbnail = true;
+                                            model.set_row_data(i, row);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }).ok();
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn fetch_autoplay_queue(
+    ui_weak: slint::Weak<NativeShellWindow>,
+    video_id: String,
+    resume: bool,
+) {
+    let songs = fetch_radio_songs(&video_id);
     if songs.is_empty() {
         eprintln!("[autoplay] watch playlist returned 0 songs");
         return;
@@ -848,64 +917,58 @@ fn fetch_autoplay_queue(
     if resume {
         crate::core::bridge::playback_core().request_autoplay();
     }
-    // Collect video IDs that need thumbnails
-    let need_thumbs: Vec<(usize, String)> = songs.iter().enumerate()
-        .filter(|(_, s)| {
-            !s.video_id.is_empty()
-                && !std::env::temp_dir().join(format!("ytm_thumb_{}.jpg", s.video_id)).exists()
-        })
-        .map(|(i, s)| (i, s.video_id.clone()))
-        .collect();
 
     let ui_weak2 = ui_weak.clone();
     // Update UI model
     slint::invoke_from_event_loop(move || {
         if let Some(ui) = ui_weak.upgrade() {
-            let items: Vec<SongItem> = songs.iter().map(|np| make_song_item(np)).collect();
+            let current = crate::core::bridge::playback_core().autoplay_queue();
+            let items: Vec<SongItem> = current.iter().map(make_song_item).collect();
             ui.set_autoplay_queue(ModelRc::new(VecModel::from(items)));
         }
     }).ok();
 
-    // Fetch thumbnails in background using the standard thumbnail CDN URL
-    if !need_thumbs.is_empty() {
-        std::thread::spawn(move || {
-            let http = match reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(8))
-                .build() {
-                Ok(c) => c,
-                Err(_) => return,
-            };
-            for (idx, vid) in &need_thumbs {
-                let url = format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", vid);
-                let thumb_path = std::env::temp_dir().join(format!("ytm_thumb_{}.jpg", vid));
-                if let Ok(resp) = http.get(&url).send() {
-                    if let Ok(bytes) = resp.bytes() {
-                        if let Ok(img) = image::load_from_memory(&bytes) {
-                            let rgba = img.to_rgba8();
-                            let (w, h) = (rgba.width(), rgba.height());
-                            // Save to disk for future use
-                            let _ = std::fs::write(&thumb_path, bytes.as_ref());
-                            let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(rgba.as_raw(), w, h);
-                            let ui_w = ui_weak2.clone();
-                            let idx_copy = *idx;
-                            slint::invoke_from_event_loop(move || {
-                                if let Some(ui) = ui_w.upgrade() {
-                                    let slint_img = slint::Image::from_rgba8(buf);
-                                    let model = ui.get_autoplay_queue();
-                                    if let Some(row) = model.row_data(idx_copy) {
-                                        let mut updated = row;
-                                        updated.thumbnail = slint_img;
-                                        updated.has_thumbnail = true;
-                                        model.set_row_data(idx_copy, updated);
-                                    }
-                                }
-                            }).ok();
-                        }
-                    }
-                }
-            }
-        });
+    spawn_autoplay_thumbnails(ui_weak2, &songs);
+}
+
+fn refill_autoplay_queue(ui_weak: slint::Weak<NativeShellWindow>) {
+    let pb = crate::core::bridge::playback_core();
+    if !pb.try_begin_autoplay_refill() {
+        return;
     }
+    std::thread::spawn(move || {
+        struct RefillGuard(&'static core::playback::PlaybackCore);
+        impl Drop for RefillGuard {
+            fn drop(&mut self) {
+                self.0.end_autoplay_refill();
+            }
+        }
+        let pb = crate::core::bridge::playback_core();
+        let _guard = RefillGuard(pb);
+        let generation = pb.autoplay_generation();
+        let seed = pb.autoplay_refill_seed();
+        let added = if seed.is_empty() {
+            0
+        } else {
+            let songs = fetch_radio_songs(&seed);
+            pb.append_autoplay(songs, generation)
+        };
+        pb.autoplay_refill_empty
+            .store(added == 0, std::sync::atomic::Ordering::Release);
+        drop(_guard);
+        if added > 0 {
+            let full = pb.autoplay_queue();
+            let ui_w = ui_weak.clone();
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_w.upgrade() {
+                    let current = crate::core::bridge::playback_core().autoplay_queue();
+                    let items: Vec<SongItem> = current.iter().map(make_song_item).collect();
+                    ui.set_autoplay_queue(ModelRc::new(VecModel::from(items)));
+                }
+            }).ok();
+            spawn_autoplay_thumbnails(ui_weak, &full);
+        }
+    });
 }
 
 fn refresh_native_shell_ui(ui: &NativeShellWindow, playback: &'static core::playback::PlaybackCore) {
@@ -924,16 +987,26 @@ fn refresh_native_shell_ui(ui: &NativeShellWindow, playback: &'static core::play
     // missing-thumbnail scan below.
     let upcoming = playback.queue_upcoming();
     let liked = playback.get_liked_songs();
+    let mut history: Vec<core::playback::NowPlaying> = playback
+        .get_history()
+        .into_iter()
+        .take(20)
+        .filter(|h| !h.video_id.is_empty() && h.video_id != track.video_id && h.video_id != "native-prototype")
+        .collect();
+    history.reverse();
 
     let queue_items: Vec<SongItem> = upcoming.iter().map(make_song_item).collect();
     ui.set_queue(ModelRc::new(VecModel::from(queue_items)));
+
+    let history_items: Vec<SongItem> = history.iter().map(make_song_item).collect();
+    ui.set_queue_history(ModelRc::new(VecModel::from(history_items)));
 
     let liked_items: Vec<SongItem> = liked.iter().map(make_song_item).collect();
     ui.set_liked_songs(ModelRc::new(VecModel::from(liked_items)));
 
     // Spawn background thumbnail fetch for items missing thumbnails
     let mut missing_vids: Vec<String> = Vec::new();
-    for np in upcoming.iter().chain(liked.iter()) {
+    for np in upcoming.iter().chain(history.iter()).chain(liked.iter()) {
         if np.video_id.is_empty() || missing_vids.contains(&np.video_id) {
             continue;
         }
@@ -986,6 +1059,28 @@ fn refresh_native_shell_ui(ui: &NativeShellWindow, playback: &'static core::play
                         }
                         if changed {
                             ui.set_queue(ModelRc::new(VecModel::from(items)));
+                        }
+                        // Refresh queue history thumbnails
+                        let model = ui.get_queue_history();
+                        let count = model.row_count();
+                        let mut items: Vec<SongItem> = Vec::with_capacity(count);
+                        let mut changed = false;
+                        for i in 0..count {
+                            let mut item = model.row_data(i).unwrap();
+                            if !item.has_thumbnail {
+                                let tp = std::env::temp_dir().join(format!("ytm_thumb_{}.jpg", item.video_id.as_str()));
+                                if tp.exists() {
+                                    if let Ok(img) = slint::Image::load_from_path(&tp) {
+                                        item.thumbnail = img;
+                                        item.has_thumbnail = true;
+                                        changed = true;
+                                    }
+                                }
+                            }
+                            items.push(item);
+                        }
+                        if changed {
+                            ui.set_queue_history(ModelRc::new(VecModel::from(items)));
                         }
                         // Refresh liked songs thumbnails
                         let model = ui.get_liked_songs();
@@ -3130,6 +3225,8 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 ui.set_artist_view_related(ModelRc::new(VecModel::from(Vec::<ArtistItem>::new())));
                 ui.set_artist_view_videos(ModelRc::new(VecModel::from(Vec::<SongItem>::new())));
                 ui.set_artist_view_has_latest(false);
+                ui.set_artist_row_sorting(false);
+                ui.set_artist_row_fallback(ModelRc::new(VecModel::from(Vec::<AlbumItem>::new())));
                 discography_ui::cancel_artist_row();
             }
 
@@ -3302,7 +3399,10 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                         item
                                     })
                                     .collect();
-                                ui.set_artist_view_albums(ModelRc::new(VecModel::from(albums)));
+                                // The ranked row replaces this list; it is only the fallback.
+                                ui.set_artist_row_sorting(!albums.is_empty());
+                                ui.set_artist_view_albums(ModelRc::new(VecModel::from(Vec::<AlbumItem>::new())));
+                                ui.set_artist_row_fallback(ModelRc::new(VecModel::from(albums)));
                                 ui.set_artist_view_singles(ModelRc::new(VecModel::from(Vec::<AlbumItem>::new())));
                                 discography_ui::rank_artist_row(&ui, &browse_id_c, &artist.name, artist.top_releases.songs.as_ref().map(|songs| songs.browse_id.get_raw().to_string()));
 
@@ -3444,8 +3544,8 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                             }
                                             slint::invoke_from_event_loop(move || {
                                                 if let Some(ui) = ui_w.upgrade() {
-                                                    let model = ui.get_artist_view_albums();
                                                     // Match by browse id: the model may already belong to another artist.
+                                                    for model in [ui.get_artist_view_albums(), ui.get_artist_row_fallback()] {
                                                     for row in 0..model.row_count() {
                                                         let Some(mut item) = model.row_data(row) else { continue };
                                                         if item.has_thumbnail || !loaded.iter().any(|id| id.as_str() == item.browse_id.as_str()) { continue; }
@@ -3454,6 +3554,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                                             item.has_thumbnail = true;
                                                             model.set_row_data(row, item);
                                                         }
+                                                    }
                                                     }
                                                 }
                                             }).ok();
@@ -4427,6 +4528,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             let mut last_sidebar_album_sig = String::new(); // dedupes the sidebar album rebuild
             let mut thumb_refresh_counter: u32 = 0;
             let mut thumb_fetch_done: Option<std::sync::mpsc::Receiver<()>> = None;
+            let mut last_autoplay_refill: Option<std::time::Instant> = None;
 
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(500));
@@ -4534,6 +4636,25 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                         }
                     }
                     // If autoplay disabled, do nothing — playback stops
+                }
+
+                if autoplay_enabled.load(std::sync::atomic::Ordering::Relaxed)
+                    && playback.is_playing()
+                {
+                    let np_id = playback.now_playing().video_id;
+                    let cooldown = if playback.last_autoplay_refill_empty() {
+                        std::time::Duration::from_secs(60)
+                    } else {
+                        std::time::Duration::from_secs(10)
+                    };
+                    if !np_id.is_empty()
+                        && np_id != "native-prototype"
+                        && playback.autoplay_queue().len() < core::playback::AUTOPLAY_TARGET
+                        && last_autoplay_refill.map_or(true, |t| t.elapsed() >= cooldown)
+                    {
+                        last_autoplay_refill = Some(std::time::Instant::now());
+                        refill_autoplay_queue(ui_weak.clone());
+                    }
                 }
 
                 // Start the playback timer the moment audio actually begins playing.
