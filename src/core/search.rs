@@ -178,7 +178,11 @@ impl SearchClient {
                 }
             }
         }
-        page.top = resolve_top(identity.as_ref(), &page, query);
+        page.top = resolve_top(identity.as_ref(), &page, query).or_else(|| {
+            allows_fallback(identity.as_ref())
+                .then(|| fallback_top(identity.as_ref(), &page, query))
+                .flatten()
+        });
         page.intent = page
             .top
             .as_ref()
@@ -259,47 +263,69 @@ impl SearchClient {
         Ok(page)
     }
 
-    pub async fn enrich(&mut self, page: &SearchPage) -> Result<SearchPage, String> {
-        let Some(top) = page.top.as_ref().filter(|top| !top.id.trim().is_empty()) else {
-            return Ok(page.clone());
-        };
-        if !matches!(top.kind.as_str(), "Artist" | "Album") {
-            return Ok(page.clone());
-        }
-        let key = CacheKey::Enrich {
-            kind: top.kind.clone(),
-            id: top.id.clone(),
-        };
-        let catalogue = if let Some(CachedValue::Catalogue(catalogue)) = self.cache.get(&key, Instant::now()) {
-            catalogue
-        } else {
-            let mut catalogue = if top.kind == "Artist" {
-                let artist = self
-                    .api
-                    .query(GetArtistQuery::new(ArtistChannelID::from_raw(
-                        top.id.as_str(),
-                    )))
-                    .await
-                    .map_err(|error| format!("Artist catalogue: {error}"))?;
-                artist_catalogue(artist)
-            } else {
-                let album = self
-                    .api
-                    .query(GetAlbumQuery::new(AlbumID::from_raw(top.id.as_str())))
-                    .await
-                    .map_err(|error| format!("Album tracks: {error}"))?;
-                album_catalogue(album, &top.id)
+    pub async fn enrich(&mut self, page: &SearchPage, query: &str) -> Result<SearchPage, String> {
+        if let Some(top) = page
+            .top
+            .as_ref()
+            .filter(|top| !top.id.trim().is_empty() && matches!(top.kind.as_str(), "Artist" | "Album"))
+        {
+            let key = CacheKey::Enrich {
+                kind: top.kind.clone(),
+                id: top.id.clone(),
             };
-            clean_page(&mut catalogue);
-            self.cache
-                .insert(key, CachedValue::Catalogue(catalogue.clone()), Instant::now());
-            catalogue
-        };
-        let mut enriched = merge_catalogue(page, &catalogue);
-        if top.kind == "Artist" && page.playlists.is_empty() {
-            merge_playlist_supplement(&mut enriched, self.filtered(effective_query(&top.title, page), "playlists").await);
+            let catalogue = if let Some(CachedValue::Catalogue(catalogue)) = self.cache.get(&key, Instant::now()) {
+                catalogue
+            } else {
+                let mut catalogue = if top.kind == "Artist" {
+                    let artist = self
+                        .api
+                        .query(GetArtistQuery::new(ArtistChannelID::from_raw(
+                            top.id.as_str(),
+                        )))
+                        .await
+                        .map_err(|error| format!("Artist catalogue: {error}"))?;
+                    artist_catalogue(artist)
+                } else {
+                    let album = self
+                        .api
+                        .query(GetAlbumQuery::new(AlbumID::from_raw(top.id.as_str())))
+                        .await
+                        .map_err(|error| format!("Album tracks: {error}"))?;
+                    album_catalogue(album, &top.id)
+                };
+                clean_page(&mut catalogue);
+                self.cache
+                    .insert(key, CachedValue::Catalogue(catalogue.clone()), Instant::now());
+                catalogue
+            };
+            let mut enriched = merge_catalogue(page, &catalogue);
+            if top.kind == "Artist" && page.playlists.is_empty() {
+                merge_playlist_supplement(&mut enriched, self.filtered(effective_query(&top.title, page), "playlists").await);
+            }
+            return Ok(enriched);
         }
-        Ok(enriched)
+        if page.songs.len() >= 10 {
+            return Ok(page.clone());
+        }
+        let fallback_query = page.top.as_ref().map(|top| top.title.as_str()).unwrap_or_default();
+        let base_query = if query.trim().is_empty() { fallback_query } else { query };
+        let effective = effective_query(base_query, page).to_string();
+        if effective.trim().is_empty() {
+            return Ok(page.clone());
+        }
+        let key = CacheKey::EnrichSongs(normalize(&effective));
+        let supplement = if let Some(CachedValue::Catalogue(cached)) = self.cache.get(&key, Instant::now()) {
+            cached
+        } else {
+            let fetched = self.filtered(&effective, "songs").await?;
+            self.cache.insert(
+                key,
+                CachedValue::Catalogue(fetched.clone()),
+                Instant::now(),
+            );
+            fetched
+        };
+        Ok(merge_song_supplement(page, &supplement.songs))
     }
 
     pub async fn completions(&mut self, query: &str) -> Result<Vec<String>, String> {
@@ -656,7 +682,11 @@ fn card_identity(results: &SearchResults, card: Option<&serde_json::Value>) -> O
             return None;
         }
         let card = card?;
-        let video_id = card_endpoint(card, "Video")?;
+        let video_id = match card_endpoint(card, "Video") {
+            Some(id) => id,
+            None if top.result_type == Some(TopResultType::Video) => "",
+            None => return None,
+        };
         if top.result_type.is_none() {
             if let Some(song) = results.songs.iter().find(|song| song.video_id.get_raw() == video_id) {
                 return Some(TopIdentity {
@@ -1059,6 +1089,24 @@ fn merge_catalogue(page: &SearchPage, catalogue: &SearchPage) -> SearchPage {
     }
 }
 
+fn merge_song_supplement(page: &SearchPage, supplement: &[SearchEntry]) -> SearchPage {
+    let mut enriched = page.clone();
+    let mut seen: HashSet<String> = enriched
+        .songs
+        .iter()
+        .map(|song| song.id.clone())
+        .collect();
+    for song in supplement {
+        if enriched.songs.len() >= 20 {
+            break;
+        }
+        if !song.id.trim().is_empty() && seen.insert(song.id.clone()) {
+            enriched.songs.push(song.clone());
+        }
+    }
+    enriched
+}
+
 fn needs_spaced_query(identity: Option<&TopIdentity>, query: &str, spaced_query: &str) -> bool {
     spaced_query != query
         && identity.map_or(true, |identity| {
@@ -1094,6 +1142,7 @@ fn normalize(value: &str) -> String {
 enum CacheKey {
     Search { category: String, query: String },
     Enrich { kind: String, id: String },
+    EnrichSongs(String),
     Completions(String),
 }
 
@@ -1328,15 +1377,18 @@ fn resolve_top(
 ) -> Option<SearchEntry> {
     if let Some(identity) = identity {
         if identity.kind == "Video" {
-            return resolve_music_video(identity, page, query);
-        }
-        match resolve_identity(identity, page) {
-            Resolution::Unique(entry) => return Some(entry),
-            Resolution::Ambiguous => return None,
-            Resolution::Missing => {}
-        }
-        if let Some(entry) = provider_entry(identity) {
-            return Some(entry);
+            if !identity.id.is_empty() || identity.music_video {
+                return resolve_music_video(identity, page, query);
+            }
+        } else {
+            match resolve_identity(identity, page) {
+                Resolution::Unique(entry) => return Some(entry),
+                Resolution::Ambiguous => return None,
+                Resolution::Missing => {}
+            }
+            if let Some(entry) = provider_entry(identity) {
+                return Some(entry);
+            }
         }
     }
     let query = normalize(query);
@@ -1360,6 +1412,274 @@ fn resolve_top(
         }
         _ => None,
     }
+}
+
+fn remove_bracketed(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        let close = match ch {
+            '(' => Some(')'),
+            '[' => Some(']'),
+            _ => None,
+        };
+        if let Some(close) = close {
+            let rest: String = chars.clone().collect();
+            if let Some(pos) = rest.find(close) {
+                for _ in 0..=pos {
+                    chars.next();
+                }
+                out.push(' ');
+                continue;
+            }
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn strip_brackets(value: &str) -> String {
+    let stripped = normalize(&remove_bracketed(value));
+    if stripped.is_empty() {
+        normalize(value)
+    } else {
+        stripped
+    }
+}
+
+fn strip_decoration_words(value: &str) -> String {
+    let clean_token = |token: &str| {
+        token
+            .trim_matches(|ch: char| matches!(ch, ':' | '-' | '–' | '—' | ','))
+            .to_lowercase()
+    };
+    let raw_tokens: Vec<&str> = value.split_whitespace().collect();
+    let mut kept = Vec::with_capacity(raw_tokens.len());
+    let mut index = 0;
+    while index < raw_tokens.len() {
+        let first = clean_token(raw_tokens[index]);
+        if index + 1 < raw_tokens.len() {
+            let second = clean_token(raw_tokens[index + 1]);
+            if matches!(
+                (first.as_str(), second.as_str()),
+                ("full", "song")
+                    | ("full", "video")
+                    | ("official", "video")
+                    | ("official", "audio")
+                    | ("lyric", "video")
+                    | ("lyrical", "video")
+                    | ("music", "video")
+                    | ("video", "song")
+                    | ("audio", "song")
+            ) {
+                index += 2;
+                continue;
+            }
+        }
+        if first.is_empty()
+            || (index > 0
+                && !kept.is_empty()
+                && matches!(first.as_str(), "song" | "lyrical" | "official"))
+        {
+            index += 1;
+            continue;
+        }
+        kept.push(raw_tokens[index]);
+        index += 1;
+    }
+    normalize(
+        kept.join(" ")
+            .trim_matches(|ch: char| matches!(ch, ':' | '-' | '–' | '—' | ',' | ' ')),
+    )
+}
+
+fn strip_card_decorations(title: &str) -> String {
+    let before_pipe = title
+        .split(" | ")
+        .next()
+        .unwrap_or(title)
+        .split('|')
+        .next()
+        .unwrap_or(title);
+    let without_brackets = remove_bracketed(before_pipe);
+    let before_channel = without_brackets
+        .split(" - ")
+        .next()
+        .filter(|left| !strip_decoration_words(left).is_empty())
+        .unwrap_or(&without_brackets);
+    let stripped = strip_decoration_words(before_channel);
+    if stripped.is_empty() {
+        normalize(&without_brackets)
+    } else {
+        stripped
+    }
+}
+
+fn matches_whole_word_prefix(a: &str, b: &str) -> bool {
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if a == b {
+        return true;
+    }
+    let (shorter, longer) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    let shorter_words = shorter.split_whitespace().count();
+    let longer_words = longer.split_whitespace().count();
+    shorter.chars().count() >= 3
+        && shorter_words * 2 >= longer_words
+        && longer
+            .strip_prefix(shorter)
+            .is_some_and(|rest| rest.starts_with(' '))
+}
+
+fn title_matches_core(song_title: &str, core: &str) -> bool {
+    if core.is_empty() {
+        return false;
+    }
+    let normalized = normalize(song_title);
+    let clean = strip_brackets(song_title);
+    matches_whole_word_prefix(&normalized, core) || matches_whole_word_prefix(&clean, core)
+}
+
+fn artist_overlaps(song_artist: &str, card_credits: &[String]) -> bool {
+    let split_artists = |text: &str| -> Vec<String> {
+        text.split([',', '&'])
+            .map(normalize)
+            .filter(|part| !part.is_empty())
+            .collect()
+    };
+    let song_artists = split_artists(song_artist);
+    if song_artists.is_empty() {
+        return false;
+    }
+    card_credits
+        .iter()
+        .flat_map(|credit| split_artists(credit))
+        .any(|credit| {
+            song_artists
+                .iter()
+                .any(|artist| artist == &credit || has_artist_credit(song_artist, &credit))
+        })
+}
+
+fn identity_credits(identity: &TopIdentity) -> Vec<String> {
+    let mut credits = identity.artist_credits.clone();
+    if !identity.artist.trim().is_empty() {
+        credits.push(identity.artist.clone());
+    }
+    if credits.is_empty() && !identity.subtitle.trim().is_empty() {
+        if let Some(first_group) = identity.subtitle.split('\u{2022}').next() {
+            let candidate = first_group.split(" - ").next().unwrap_or(first_group).trim();
+            if !candidate.is_empty()
+                && duration_secs(candidate) == 0
+                && !candidate.ends_with(" views")
+                && !candidate.ends_with(" view")
+            {
+                credits.push(candidate.to_string());
+            }
+        }
+    }
+    credits
+}
+
+fn fallback_card_song(
+    card_title: &str,
+    card_credits: &[String],
+    songs: &[SearchEntry],
+) -> Option<SearchEntry> {
+    let core = strip_card_decorations(card_title);
+    if core.is_empty() {
+        return None;
+    }
+    let valid_songs = || {
+        songs
+            .iter()
+            .filter(|song| song.kind == "Song" && !song.id.trim().is_empty())
+    };
+    let matching: Vec<&SearchEntry> = valid_songs()
+        .filter(|song| title_matches_core(&song.title, &core))
+        .collect();
+    if let Some(song) = matching
+        .iter()
+        .find(|song| artist_overlaps(&song.artist, card_credits))
+        .or_else(|| matching.first())
+    {
+        return Some((*song).clone());
+    }
+    let before_pipe = remove_bracketed(card_title.split('|').next().unwrap_or(card_title));
+    for separator in [" - ", " \u{2013} ", " \u{2014} "] {
+        if let Some((left, right)) = before_pipe.split_once(separator) {
+            let right_core = strip_card_decorations(right);
+            if !right_core.is_empty() {
+                let artist_hint = vec![left.to_string()];
+                if let Some(song) = valid_songs().find(|song| {
+                    title_matches_core(&song.title, &right_core)
+                        && (artist_overlaps(&song.artist, &artist_hint)
+                            || artist_overlaps(&song.artist, card_credits))
+                }) {
+                    return Some(song.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn contains_whole_words(haystack: &str, needle: &str) -> bool {
+    if needle.chars().count() < 3 || haystack.is_empty() {
+        return false;
+    }
+    if haystack == needle {
+        return true;
+    }
+    haystack.match_indices(needle).any(|(start, _)| {
+        let end = start + needle.len();
+        let left_ok = start == 0 || haystack.as_bytes()[start - 1] == b' ';
+        let right_ok = end == haystack.len() || haystack.as_bytes()[end] == b' ';
+        left_ok && right_ok
+    })
+}
+
+fn fallback_query_song(query: &str, songs: &[SearchEntry]) -> Option<SearchEntry> {
+    let first = songs
+        .first()
+        .filter(|song| song.kind == "Song" && !song.id.trim().is_empty())?;
+    let song_title = strip_brackets(&first.title);
+    let query = normalize(query);
+    if contains_whole_words(&query, &song_title) || contains_whole_words(&song_title, &query) {
+        Some(first.clone())
+    } else {
+        None
+    }
+}
+
+fn allows_fallback(identity: Option<&TopIdentity>) -> bool {
+    match identity {
+        None => true,
+        Some(identity) => {
+            identity.kind == "Song"
+                || (identity.kind == "Video"
+                    && identity.id.trim().is_empty()
+                    && !identity.music_video)
+        }
+    }
+}
+
+fn fallback_top(
+    identity: Option<&TopIdentity>,
+    page: &SearchPage,
+    query: &str,
+) -> Option<SearchEntry> {
+    if !allows_fallback(identity) {
+        return None;
+    }
+    if let Some(identity) = identity.filter(|id| matches!(id.kind.as_str(), "Video" | "Song")) {
+        let credits = identity_credits(identity);
+        if let Some(song) = fallback_card_song(&identity.title, &credits, &page.songs) {
+            return Some(song);
+        }
+    }
+    fallback_query_song(query, &page.songs)
 }
 
 fn deduplicate(entries: &mut Vec<SearchEntry>) {
@@ -2579,7 +2899,7 @@ mod tests {
                 let artist = client.api.query(GetArtistQuery::new(ArtistChannelID::from_raw(top.id.as_str())))
                     .await.expect("provider artist catalogue");
                 let expected = artist_catalogue(artist);
-                let enriched = client.enrich(&base).await.expect("artist catalogue and public playlists");
+                let enriched = client.enrich(&base, query).await.expect("artist catalogue and public playlists");
                 assert_eq!(enriched.top.as_ref().unwrap().id, top.id);
                 assert_eq!(enriched.songs.len(), expected.songs.len());
                 assert_eq!(enriched.albums.len(), expected.albums.len());
@@ -2589,8 +2909,8 @@ mod tests {
                 assert!(entries(&enriched).all(|entry| !entry.id.trim().is_empty()));
                 let stamps: Vec<_> = client.cache.entries.iter().map(|entry| entry.inserted).collect();
                 let repeated = client.preview(query).await.unwrap();
-                let cached = client.enrich(&base).await.unwrap();
-                let with_playlists = client.enrich(&preview).await.unwrap();
+                let cached = client.enrich(&base, query).await.unwrap();
+                let with_playlists = client.enrich(&preview, query).await.unwrap();
                 assert_eq!(cached.playlists.len(), enriched.playlists.len());
                 assert_eq!(with_playlists.playlists.len(), preview.playlists.len());
                 assert_eq!(repeated.playlists.len(), preview.playlists.len());
@@ -2746,8 +3066,11 @@ mod tests {
                             if identity.kind == "Video" && expected_kind == "Song" {
                                 assert!(page.songs.iter().any(|song| song.kind == "Song" && song.id == top.id));
                                 assert!(filtered.songs.iter().any(|song| song.id == top.id), "query: {query}; selected typed audio");
-                                let matched = resolve_music_video(identity, &filtered, query).expect("strong typed Song match");
-                                assert_eq!(top.id, matched.id, "query: {query}; matched audio, not provider Video endpoint");
+                                if resolve_top(Some(identity), &page, query).is_some() {
+                                    let matched = resolve_music_video(identity, &filtered, query)
+                                        .expect("strong typed Song match");
+                                    assert_eq!(top.id, matched.id, "query: {query}; matched audio, not provider Video endpoint");
+                                }
                             } else if matches!(top.kind.as_str(), "Artist" | "Album")
                                 && needs_spaced_query(Some(identity), query, &space_title_number(query))
                             {
@@ -2766,7 +3089,7 @@ mod tests {
                                 assert_eq!(top.id, identity.id, "query: {query}; selected provider endpoint");
                             }
                         }
-                        let enriched = client.enrich(&page).await.expect("real catalogue metadata");
+                        let enriched = client.enrich(&page, query).await.expect("real catalogue metadata");
                         assert_eq!(enriched.top.as_ref().unwrap().id, top.id);
                         assert!(!enriched.songs.is_empty(), "query: {query}");
                         assert!(enriched.songs.iter().all(|entry| !entry.id.is_empty()));
@@ -3089,6 +3412,172 @@ mod tests {
     }
 
     #[test]
+    fn card_title_decoration_stripping_and_fallback_song_selection() {
+        assert_eq!(
+            strip_card_decorations(
+                "Tujhe Dekha Toh Song | Dilwale Dulhania Le Jayenge | Shah Rukh Khan - YRF"
+            ),
+            "tujhe dekha toh"
+        );
+        assert_eq!(
+            strip_card_decorations("O Maahi (Official Video) [Lyric Video] - T-Series"),
+            "o maahi"
+        );
+        assert_eq!(
+            strip_card_decorations("Satranga Full Song Lyrical Official | Animal - T-Series"),
+            "satranga"
+        );
+        assert_eq!(strip_decoration_words("Song 2"), "song 2");
+        assert_eq!(strip_card_decorations("Song 2"), "song 2");
+        assert_eq!(
+            strip_brackets("Kesariya (From \"Brahmastra\") [Official]"),
+            "kesariya"
+        );
+        assert!(!title_matches_core("Tum", "tum hi ho"));
+        assert!(!title_matches_core("Love", "lovely"));
+
+        let raw = response_with_songs(
+            card_response(
+                "Video",
+                "Tujhe Dekha Toh Song | Dilwale Dulhania Le Jayenge | Shah Rukh Khan - YRF",
+                serde_json::Value::Null,
+            ),
+            &[
+                ("ddlj-audio", "Tujhe Dekha Toh (From \"DDLJ\")"),
+                ("other-song", "Other Title"),
+            ],
+        );
+        let (results, identity) =
+            parse_unfiltered_results("is this a lyric query", raw).unwrap();
+        let page = unfiltered_page(results);
+        assert!(resolve_top(identity.as_ref(), &page, "is this a lyric query").is_none());
+        assert_eq!(
+            resolve_top(identity.as_ref(), &page, "Other Title")
+                .unwrap()
+                .id,
+            "other-song"
+        );
+        let top = fallback_top(identity.as_ref(), &page, "is this a lyric query").unwrap();
+        assert_eq!((top.kind.as_str(), top.id.as_str()), ("Song", "ddlj-audio"));
+
+        let songs = vec![
+            credited_song("cover-id", "Kesariya (From \"Brahmastra\")", "Cover Singer"),
+            credited_song("arijit-id", "Kesariya (From \"Brahmastra\")", "Pritam, Arijit Singh"),
+        ];
+        let card_identity = TopIdentity {
+            kind: "Video".into(),
+            id: String::new(),
+            title: "Kesariya Official Video | Brahmastra - Sony Music".into(),
+            artist_credits: vec!["Arijit Singh".into()],
+            ..Default::default()
+        };
+        let page_with_credits = SearchPage {
+            songs,
+            ..Default::default()
+        };
+        let preferred =
+            fallback_top(Some(&card_identity), &page_with_credits, "unrelated lyric").unwrap();
+        assert_eq!(preferred.id, "arijit-id");
+    }
+
+    #[test]
+    fn allows_fallback_rejects_ambiguous_music_videos_and_typed_entities() {
+        assert!(allows_fallback(None));
+        assert!(allows_fallback(Some(&TopIdentity {
+            kind: "Song".into(),
+            id: "song-id".into(),
+            title: "Song".into(),
+            ..Default::default()
+        })));
+        assert!(allows_fallback(Some(&TopIdentity {
+            kind: "Video".into(),
+            id: String::new(),
+            title: "Endpointless Video".into(),
+            music_video: false,
+            ..Default::default()
+        })));
+        assert!(!allows_fallback(Some(&TopIdentity {
+            kind: "Video".into(),
+            id: "video-id".into(),
+            title: "Video With Endpoint".into(),
+            music_video: false,
+            ..Default::default()
+        })));
+        let ambiguous_mv = music_identity("Mera Yaar (Official Video)", "");
+        assert!(!allows_fallback(Some(&ambiguous_mv)));
+        let page = SearchPage {
+            songs: vec![
+                credited_song("cover", "Mera Yaar", "Cover Artist"),
+                credited_song("original", "Mera Yaar", "B Praak"),
+            ],
+            ..Default::default()
+        };
+        assert!(fallback_top(Some(&ambiguous_mv), &page, "Mera Yaar").is_none());
+
+        for kind in ["Artist", "Album", "Playlist"] {
+            let identity = TopIdentity {
+                kind: kind.into(),
+                title: "Mera Yaar".into(),
+                ..Default::default()
+            };
+            assert!(!allows_fallback(Some(&identity)));
+            assert!(fallback_top(Some(&identity), &page, "Mera Yaar").is_none());
+        }
+    }
+
+    #[test]
+    fn first_song_query_containment_fallback_rejects_unrelated_songs() {
+        let page = SearchPage {
+            songs: vec![
+                credited_song("starboy-id", "Starboy (Official Audio)", "The Weeknd"),
+                credited_song("other-id", "Blinding Lights", "The Weeknd"),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            fallback_top(None, &page, "weeknd starboy").unwrap().id,
+            "starboy-id"
+        );
+        assert!(fallback_top(None, &page, "star").is_none());
+        assert!(fallback_top(
+            None,
+            &SearchPage {
+                songs: vec![credited_song("lovely-id", "Lovely", "Billie Eilish")],
+                ..Default::default()
+            },
+            "Love"
+        )
+        .is_none());
+        assert!(fallback_top(None, &page, "completely unrelated query").is_none());
+    }
+
+    #[test]
+    fn song_supplement_preserves_existing_order_deduplicates_and_caps_at_twenty() {
+        let base = SearchPage {
+            top: Some(credited_song("song-1", "First", "Artist")),
+            intent: "Song".into(),
+            corrected_query: "corrected".into(),
+            songs: vec![
+                credited_song("song-1", "First", "Artist"),
+                credited_song("song-2", "Second", "Artist"),
+            ],
+            artists: vec![entry("Artist", "artist-1", "Artist")],
+            ..Default::default()
+        };
+        let supplement: Vec<_> = (1..=25)
+            .map(|index| credited_song(&format!("song-{index}"), &format!("Title {index}"), "Artist"))
+            .collect();
+        let enriched = merge_song_supplement(&base, &supplement);
+        assert_eq!(enriched.songs.len(), 20);
+        assert_eq!(enriched.songs[0].id, "song-1");
+        assert_eq!(enriched.songs[1].id, "song-2");
+        assert_eq!(enriched.songs[2].id, "song-3");
+        assert_eq!(enriched.songs[19].id, "song-20");
+        assert_eq!(enriched.top.as_ref().unwrap().id, "song-1");
+        assert_eq!(enriched.artists.len(), 1);
+    }
+
+    #[test]
     #[ignore = "Requires live YouTube Music access; run manually with --ignored --nocapture"]
     fn live_baarish_and_tum_hi_ho_all_results() {
         tokio::runtime::Builder::new_current_thread()
@@ -3117,6 +3606,96 @@ mod tests {
                 })
                 .await
                 .expect("live baarish and tum hi ho check timed out");
+            });
+    }
+
+    #[test]
+    #[ignore = "Requires live YouTube Music access; run manually with --ignored --nocapture"]
+    fn live_lyrics_queries_find_the_song() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                tokio::time::timeout(Duration::from_secs(90), async {
+                    let mut client = SearchClient::new().await.expect("unauthenticated client");
+                    for (q, expected) in [
+                        ("is this the real life is this just fantasy", "Bohemian Rhapsody"),
+                        ("i got my peaches out in georgia", "Peaches"),
+                        ("we were both young when i first saw you", "Love Story"),
+                        ("tujhe dekha to ye jaana sanam", "Tujhe Dekha"),
+                    ] {
+                        let mut page = client.search(q, "All").await.expect("All search");
+                        if page
+                            .top
+                            .as_ref()
+                            .is_some_and(|top| matches!(top.kind.as_str(), "Artist" | "Album"))
+                            || page.songs.len() < 10
+                        {
+                            if let Ok(enriched) = client.enrich(&page, q).await {
+                                page = enriched;
+                            }
+                        }
+                        let expected_norm = normalize(expected);
+                        let found = page
+                            .top
+                            .iter()
+                            .chain(page.songs.iter().take(5))
+                            .any(|entry| normalize(&entry.title).contains(&expected_norm));
+                        assert!(
+                            found,
+                            "query={q:?} expected {expected:?} in top={:?} or first 5 songs={:?}",
+                            page.top.as_ref().map(|top| &top.title),
+                            page.songs.iter().take(5).map(|song| &song.title).collect::<Vec<_>>()
+                        );
+                    }
+                })
+                .await
+                .expect("live lyrics queries check timed out");
+            });
+    }
+
+    #[test]
+    #[ignore = "Live probe; run manually with --ignored --nocapture"]
+    fn live_search_probe() {
+        let queries: Vec<String> = std::env::var("AURICLE_PROBE_QUERIES")
+            .unwrap_or_default()
+            .split('|')
+            .map(str::trim)
+            .filter(|q| !q.is_empty())
+            .map(str::to_string)
+            .collect();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut client = SearchClient::new().await.expect("unauthenticated client");
+                for query in &queries {
+                    let started = Instant::now();
+                    match client.search(query, "All").await {
+                        Ok(page) => {
+                            eprintln!(
+                                "\n### {query:?} ({} ms) corrected={:?} top={:?}",
+                                started.elapsed().as_millis(),
+                                page.corrected_query,
+                                page.top.as_ref().map(|t| format!("{} | {} | {}", t.kind, t.title, t.artist)),
+                            );
+                            for s in page.songs.iter().take(5) {
+                                eprintln!("  song: {} | {}", s.title, s.artist);
+                            }
+                            for a in page.artists.iter().take(2) {
+                                eprintln!("  artist: {}", a.title);
+                            }
+                            for a in page.albums.iter().take(2) {
+                                eprintln!("  album: {} | {}", a.title, a.artist);
+                            }
+                            eprintln!("  counts songs={} artists={} albums={} playlists={}",
+                                page.songs.len(), page.artists.len(), page.albums.len(), page.playlists.len());
+                        }
+                        Err(e) => eprintln!("\n### {query:?} ERROR {e}"),
+                    }
+                }
             });
     }
 }

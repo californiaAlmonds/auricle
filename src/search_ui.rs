@@ -797,10 +797,11 @@ fn map_playlist(entry: &Entry) -> PlaylistItem {
 
 fn needs_detail(request: &Request, page: &SearchPage) -> bool {
     request.category == "All"
-        && page
+        && (page
             .top
             .as_ref()
             .is_some_and(|top| matches!(top.kind.as_str(), "Artist" | "Album"))
+            || page.songs.len() < 10)
 }
 
 fn detail_result(base: &SearchPage, result: Result<SearchPage, String>) -> (SearchPage, String) {
@@ -863,7 +864,7 @@ async fn worker(mut receiver: UnboundedReceiver<Command>, bridge: Bridge) {
             Work::Main(main) => {
                 let future = async {
                     match &main.base {
-                        Some(base) => client.enrich(base).await,
+                        Some(base) => client.enrich(base, &main.request.query).await,
                         None => {
                             client
                                 .search(&main.request.query, &main.request.category)
@@ -1527,18 +1528,32 @@ mod tests {
             top: Some(entry("Artist", "artist")),
             intent: "Artist".into(),
             corrected_query: String::new(),
-            songs: vec![entry("Song", "query-song")],
+            songs: (0..12).map(|index| entry("Song", &format!("song-{index}"))).collect(),
             artists: vec![entry("Artist", "query-artist")],
             albums: vec![entry("Album", "query-album")],
             playlists: vec![entry("Playlist", "query-playlist")],
         };
         assert!(needs_detail(&request(1), &page));
+        let short_song_page = SearchPage {
+            top: Some(entry("Song", "song-0")),
+            intent: "Song".into(),
+            songs: vec![entry("Song", "song-0")],
+            ..SearchPage::default()
+        };
+        assert!(needs_detail(&request(1), &short_song_page));
+        let full_song_page = SearchPage {
+            top: Some(entry("Song", "song-0")),
+            intent: "Song".into(),
+            songs: (0..10).map(|index| entry("Song", &format!("song-{index}"))).collect(),
+            ..SearchPage::default()
+        };
+        assert!(!needs_detail(&request(1), &full_song_page));
         assert!(!needs_detail(
             &Request {
                 category: "Songs".into(),
                 ..request(1)
             },
-            &page
+            &short_song_page
         ));
     }
 
