@@ -409,6 +409,10 @@ fn parse_unfiltered_results(
                 if let Some(card) = card.as_object_mut() {
                     card.remove("contents");
                 }
+            } else if let Some(row) = section.pointer(
+                "/itemSectionRenderer/contents/0/musicResponsiveListItemRenderer",
+            ) {
+                extract_list_item(row, None, &mut previews);
             }
         }
     }
@@ -422,80 +426,171 @@ fn parse_unfiltered_results(
     .map_err(|error| error.to_string())?;
     results.songs.extend(previews.songs);
     results.albums.extend(previews.albums);
+    results.artists.extend(previews.artists);
+    results.featured_playlists.extend(previews.featured_playlists);
     let identity = card_identity(&results, card_metadata.as_ref());
+    if identity.as_ref().is_some_and(|identity| identity.kind == "Song") {
+        if let Some(song) = card_metadata.as_ref().and_then(card_audio_song) {
+            if !results.songs.iter().any(|existing| existing.video_id == song.video_id) {
+                results.songs.insert(0, song);
+            }
+        }
+    }
     Ok((results, identity))
+}
+
+/// The top card's own track, only when the provider marks it as an audio track (ATV).
+fn card_audio_song(card: &serde_json::Value) -> Option<SearchResultSong> {
+    let endpoint = card.pointer("/title/runs/0/navigationEndpoint/watchEndpoint")?;
+    if endpoint.pointer("/watchEndpointMusicSupportedConfigs/watchEndpointMusicConfig/musicVideoType")
+        .and_then(serde_json::Value::as_str) != Some("MUSIC_VIDEO_TYPE_ATV")
+    {
+        return None;
+    }
+    let id = endpoint["videoId"].as_str().filter(|id| !id.trim().is_empty())?;
+    let title = card.pointer("/title/runs").and_then(serde_json::Value::as_array)?
+        .iter().filter_map(|run| run["text"].as_str()).collect::<String>();
+    let runs = card.pointer("/subtitle/runs").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+    let is_artist = |run: &serde_json::Value| run.pointer("/navigationEndpoint/browseEndpoint/browseEndpointContextSupportedConfigs/browseEndpointContextMusicConfig/pageType")
+        .and_then(serde_json::Value::as_str) == Some("MUSIC_PAGE_TYPE_ARTIST");
+    let mut artist = runs.iter().filter(|run| is_artist(run))
+        .filter_map(|run| run["text"].as_str()).collect::<Vec<_>>().join(", ");
+    let duration = runs.iter().filter_map(|run| run["text"].as_str())
+        .find(|text| duration_secs(text) > 0).unwrap_or_default();
+    if artist.is_empty() {
+        // Unlinked credits: the group right after the type label.
+        artist = metadata_groups(&runs).get(1).cloned().unwrap_or_default();
+    }
+    let thumbnails = card.pointer("/thumbnail/musicThumbnailRenderer/thumbnail/thumbnails")
+        .cloned().unwrap_or_else(|| serde_json::json!([]));
+    serde_json::from_value(serde_json::json!({
+        "title": title, "artist": artist, "album": null, "duration": duration,
+        "plays": "", "explicit": "NotExplicit", "video_id": id, "thumbnails": thumbnails,
+    })).ok()
+}
+
+/// Metadata runs joined into the " • "-separated groups the provider displays.
+fn metadata_groups(runs: &[serde_json::Value]) -> Vec<String> {
+    runs.split(|run| run["text"].as_str().map(str::trim) == Some("\u{2022}"))
+        .map(|group| group.iter().filter_map(|run| run["text"].as_str()).collect::<String>().trim().to_string())
+        .filter(|group| !group.is_empty())
+        .collect()
 }
 
 fn extract_card_previews(card: &serde_json::Value, results: &mut SearchResults) {
     for child in card["contents"].as_array().into_iter().flatten() {
-        let Some(row) = child.get("musicResponsiveListItemRenderer") else { continue };
-        let Some(title_runs) = row.pointer("/flexColumns/0/musicResponsiveListItemFlexColumnRenderer/text/runs")
-            .and_then(serde_json::Value::as_array) else { continue };
-        let Some(metadata) = row.pointer("/flexColumns/1/musicResponsiveListItemFlexColumnRenderer/text/runs")
-            .and_then(serde_json::Value::as_array) else { continue };
-        let kind = metadata.first().and_then(|run| run["text"].as_str()).unwrap_or_default();
-        if !matches!(kind, "Song" | "Album" | "Single" | "EP") { continue; }
-        let title = title_runs.iter().filter_map(|run| run["text"].as_str()).collect::<String>();
-        if title.trim().is_empty() { continue; }
-        let endpoints: Vec<_> = title_runs.iter().filter_map(|run| run.get("navigationEndpoint"))
-            .chain([
-                row.get("navigationEndpoint"), row.get("onTap"),
-                row.pointer("/overlay/musicItemThumbnailOverlayRenderer/content/musicPlayButtonRenderer/playNavigationEndpoint"),
-            ].into_iter().flatten()).collect();
-        let browse_run = |page_type: &str| {
-            metadata.iter().find(|run| run.pointer("/navigationEndpoint/browseEndpoint/browseEndpointContextSupportedConfigs/browseEndpointContextMusicConfig/pageType")
-                .and_then(serde_json::Value::as_str) == Some(page_type))
-        };
-        let mut artist = metadata.iter().filter(|run| run.pointer("/navigationEndpoint/browseEndpoint/browseEndpointContextSupportedConfigs/browseEndpointContextMusicConfig/pageType")
-            .and_then(serde_json::Value::as_str) == Some("MUSIC_PAGE_TYPE_ARTIST"))
-            .filter_map(|run| run["text"].as_str()).collect::<Vec<_>>().join(", ");
-        if artist.is_empty() && card.pointer("/subtitle/runs/0/text").and_then(serde_json::Value::as_str) == Some("Artist") {
-            artist = card.pointer("/title/runs").and_then(serde_json::Value::as_array)
-                .into_iter().flatten().filter_map(|run| run["text"].as_str()).collect();
+        if let Some(row) = child.get("musicResponsiveListItemRenderer") {
+            extract_list_item(row, Some(card), results);
         }
-        let thumbnails = row.pointer("/thumbnail/musicThumbnailRenderer/thumbnail/thumbnails")
-            .cloned().unwrap_or_else(|| serde_json::json!([]));
-        if kind == "Song" {
-            if endpoints.iter().any(|endpoint| matches!(endpoint.pointer("/watchEndpoint/watchEndpointMusicSupportedConfigs/watchEndpointMusicConfig/musicVideoType")
-                .and_then(serde_json::Value::as_str), Some(video_type) if video_type != "MUSIC_VIDEO_TYPE_ATV")) {
-                continue;
-            }
-            let id = row.pointer("/playlistItemData/videoId").and_then(serde_json::Value::as_str)
-                .filter(|id| !id.trim().is_empty())
-                .or_else(|| endpoints.iter().find_map(|endpoint| endpoint.pointer("/watchEndpoint/videoId")
-                    .and_then(serde_json::Value::as_str).filter(|id| !id.trim().is_empty())));
-            let Some(id) = id else { continue };
-            let album = browse_run("MUSIC_PAGE_TYPE_ALBUM").and_then(|run| Some(serde_json::json!({
-                "name": run["text"].as_str()?,
-                "id": run.pointer("/navigationEndpoint/browseEndpoint/browseId")?.as_str()?,
-            })));
-            let duration = metadata.iter().filter_map(|run| run["text"].as_str())
-                .find(|text| duration_secs(text) > 0).unwrap_or_default();
-            if let Ok(song) = serde_json::from_value(serde_json::json!({
-                "title": title, "artist": artist, "album": album, "duration": duration,
-                "plays": "", "explicit": "NotExplicit", "video_id": id, "thumbnails": thumbnails,
-            })) {
-                results.songs.push(song);
-            }
-        } else {
-            let id = endpoints.iter().find_map(|endpoint| {
-                let browse = endpoint.get("browseEndpoint")?;
-                if browse.pointer("/browseEndpointContextSupportedConfigs/browseEndpointContextMusicConfig/pageType")
-                    .and_then(serde_json::Value::as_str).is_some_and(|kind| kind != "MUSIC_PAGE_TYPE_ALBUM") {
-                    return None;
+    }
+}
+
+fn extract_list_item(
+    row: &serde_json::Value,
+    card: Option<&serde_json::Value>,
+    results: &mut SearchResults,
+) {
+    let Some(title_runs) = row.pointer("/flexColumns/0/musicResponsiveListItemFlexColumnRenderer/text/runs")
+        .and_then(serde_json::Value::as_array) else { return };
+    let Some(metadata) = row.pointer("/flexColumns/1/musicResponsiveListItemFlexColumnRenderer/text/runs")
+        .and_then(serde_json::Value::as_array) else { return };
+    let title = title_runs.iter().filter_map(|run| run["text"].as_str()).collect::<String>();
+    if title.trim().is_empty() { return; }
+    let label_hint = metadata.first().and_then(|run| run["text"].as_str()).unwrap_or_default();
+    let endpoints: Vec<_> = title_runs.iter().filter_map(|run| run.get("navigationEndpoint"))
+        .chain([
+            row.get("navigationEndpoint"), row.get("onTap"),
+            row.pointer("/overlay/musicItemThumbnailOverlayRenderer/content/musicPlayButtonRenderer/playNavigationEndpoint"),
+        ].into_iter().flatten()).collect();
+    let browse_run = |page_type: &str| {
+        metadata.iter().find(|run| run.pointer("/navigationEndpoint/browseEndpoint/browseEndpointContextSupportedConfigs/browseEndpointContextMusicConfig/pageType")
+            .and_then(serde_json::Value::as_str) == Some(page_type))
+    };
+    let mut artist = metadata.iter().filter(|run| run.pointer("/navigationEndpoint/browseEndpoint/browseEndpointContextSupportedConfigs/browseEndpointContextMusicConfig/pageType")
+        .and_then(serde_json::Value::as_str) == Some("MUSIC_PAGE_TYPE_ARTIST"))
+        .filter_map(|run| run["text"].as_str()).collect::<Vec<_>>().join(", ");
+    if artist.is_empty() && card.and_then(|card| card.pointer("/subtitle/runs/0/text")).and_then(serde_json::Value::as_str) == Some("Artist") {
+        artist = card.and_then(|card| card.pointer("/title/runs")).and_then(serde_json::Value::as_array)
+            .into_iter().flatten().filter_map(|run| run["text"].as_str()).collect();
+    }
+    let thumbnails = row.pointer("/thumbnail/musicThumbnailRenderer/thumbnail/thumbnails")
+        .cloned().unwrap_or_else(|| serde_json::json!([]));
+    if let Some(browse) = [row.get("navigationEndpoint"), row.get("onTap")]
+        .into_iter()
+        .flatten()
+        .chain(title_runs.iter().filter_map(|run| run.get("navigationEndpoint")))
+        .find_map(|endpoint| endpoint.get("browseEndpoint"))
+    {
+        let Some(id) = browse["browseId"].as_str().filter(|id| !id.trim().is_empty()) else { return };
+        let page_type = browse.pointer("/browseEndpointContextSupportedConfigs/browseEndpointContextMusicConfig/pageType")
+            .and_then(serde_json::Value::as_str);
+        match page_type {
+            Some("MUSIC_PAGE_TYPE_ALBUM") | None if page_type.is_some() || matches!(label_hint, "Album" | "Single" | "EP") => {
+                let album_type = if matches!(label_hint, "Album" | "Single" | "EP") { label_hint } else { "Album" };
+                let year = metadata.iter().filter_map(|run| run["text"].as_str())
+                    .find(|text| text.len() == 4 && text.bytes().all(|byte| byte.is_ascii_digit())).unwrap_or_default();
+                if let Ok(album) = serde_json::from_value(serde_json::json!({
+                    "title": title, "artist": artist, "year": year, "explicit": "NotExplicit",
+                    "album_id": id, "album_type": album_type, "thumbnails": thumbnails,
+                })) {
+                    results.albums.push(album);
                 }
-                browse["browseId"].as_str().filter(|id| !id.trim().is_empty())
-            });
-            let Some(id) = id else { continue };
-            let year = metadata.iter().filter_map(|run| run["text"].as_str())
-                .find(|text| text.len() == 4 && text.bytes().all(|byte| byte.is_ascii_digit())).unwrap_or_default();
-            if let Ok(album) = serde_json::from_value(serde_json::json!({
-                "title": title, "artist": artist, "year": year, "explicit": "NotExplicit",
-                "album_id": id, "album_type": kind, "thumbnails": thumbnails,
-            })) {
-                results.albums.push(album);
             }
+            Some("MUSIC_PAGE_TYPE_ARTIST") => {
+                let subscribers = metadata.iter().filter_map(|run| run["text"].as_str().map(str::trim))
+                    .find(|text| !text.is_empty() && !matches!(*text, "Artist" | "\u{2022}" | "-" | "|"))
+                    .map(str::to_string);
+                if let Ok(artist_item) = serde_json::from_value(serde_json::json!({
+                    "artist": title, "subscribers": subscribers, "browse_id": id, "thumbnails": thumbnails,
+                })) {
+                    results.artists.push(artist_item);
+                }
+            }
+            Some("MUSIC_PAGE_TYPE_PLAYLIST") => {
+                let groups = metadata_groups(metadata);
+                let is_count = |text: &str| [" song", " songs", " view", " views"].iter().any(|suffix| text.ends_with(suffix));
+                let songs = groups.iter().find(|text| text.ends_with(" song") || text.ends_with(" songs"))
+                    .cloned().unwrap_or_default();
+                let author = groups.iter().find(|text| text.as_str() != "Playlist" && !is_count(text))
+                    .cloned().unwrap_or_default();
+                if let Ok(playlist) = serde_json::from_value(serde_json::json!({
+                    "title": title, "author": author, "songs": songs, "playlist_id": id, "thumbnails": thumbnails,
+                })) {
+                    results.featured_playlists.push(playlist);
+                }
+            }
+            _ => {}
         }
+        return;
+    }
+    let video_types: Vec<_> = endpoints.iter().filter_map(|endpoint| {
+        endpoint.pointer("/watchEndpoint/watchEndpointMusicSupportedConfigs/watchEndpointMusicConfig/musicVideoType")
+            .and_then(serde_json::Value::as_str)
+    }).chain([
+        row.pointer("/playlistItemData/musicVideoType"),
+        row.pointer("/playlistItemData/watchEndpointMusicSupportedConfigs/watchEndpointMusicConfig/musicVideoType"),
+    ].into_iter().flatten().filter_map(serde_json::Value::as_str)).collect();
+    if video_types.iter().any(|&video_type| video_type != "MUSIC_VIDEO_TYPE_ATV")
+        || (video_types.is_empty() && label_hint != "Song")
+    {
+        return;
+    }
+    let id = row.pointer("/playlistItemData/videoId").and_then(serde_json::Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .or_else(|| endpoints.iter().find_map(|endpoint| endpoint.pointer("/watchEndpoint/videoId")
+            .and_then(serde_json::Value::as_str).filter(|id| !id.trim().is_empty())));
+    let Some(id) = id else { return };
+    let album = browse_run("MUSIC_PAGE_TYPE_ALBUM").and_then(|run| Some(serde_json::json!({
+        "name": run["text"].as_str()?,
+        "id": run.pointer("/navigationEndpoint/browseEndpoint/browseId")?.as_str()?,
+    })));
+    let duration = metadata.iter().filter_map(|run| run["text"].as_str())
+        .find(|text| duration_secs(text) > 0).unwrap_or_default();
+    if let Ok(song) = serde_json::from_value(serde_json::json!({
+        "title": title, "artist": artist, "album": album, "duration": duration,
+        "plays": "", "explicit": "NotExplicit", "video_id": id, "thumbnails": thumbnails,
+    })) {
+        results.songs.push(song);
     }
 }
 
@@ -1772,6 +1867,21 @@ mod tests {
     }
 
     #[test]
+    fn audio_track_card_becomes_top_song() {
+        let endpoint = serde_json::json!({ "watchEndpoint": { "videoId": "card-audio",
+            "watchEndpointMusicSupportedConfigs": { "watchEndpointMusicConfig": { "musicVideoType": "MUSIC_VIDEO_TYPE_ATV" } } } });
+        let mut raw = card_response("Song", "Baarish", endpoint);
+        raw.pointer_mut("/contents/tabbedSearchResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/0/musicCardShelfRenderer/subtitle/runs")
+            .unwrap().as_array_mut().unwrap()
+            .extend(["\u{2022}", "First", " & ", "Second", " \u{2022} ", "Some Album", " \u{2022} ", "6:15"].map(|text| serde_json::json!({ "text": text })));
+        let (results, identity) = parse_unfiltered_results("Baarish", raw).unwrap();
+        let song = results.songs.first().unwrap();
+        assert_eq!((song.video_id.get_raw(), song.artist.as_str(), song.duration.as_str()), ("card-audio", "First & Second", "6:15"));
+        let page = unfiltered_page(results);
+        assert_eq!(resolve_top(identity.as_ref(), &page, "Baarish").unwrap().id, "card-audio");
+    }
+
+    #[test]
     fn compact_card_preserves_provider_endpoint_and_resolves_duplicate_names() {
         for (kind, title, id) in [
             ("Artist", "Arijit Singh", "UC-real-artist"),
@@ -2683,6 +2793,330 @@ mod tests {
                 })
                 .await
                 .expect("live metadata check timed out");
+            });
+    }
+
+    fn item_section(row: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "itemSectionRenderer": {
+                "contents": [{ "musicResponsiveListItemRenderer": row }]
+            }
+        })
+    }
+
+    fn artist_run(name: &str, id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "text": name,
+            "navigationEndpoint": {
+                "browseEndpoint": {
+                    "browseId": id,
+                    "browseEndpointContextSupportedConfigs": {
+                        "browseEndpointContextMusicConfig": { "pageType": "MUSIC_PAGE_TYPE_ARTIST" }
+                    }
+                }
+            }
+        })
+    }
+
+    fn browse_endpoint(id: &str, page_type: &str) -> serde_json::Value {
+        serde_json::json!({
+            "browseEndpoint": {
+                "browseId": id,
+                "browseEndpointContextSupportedConfigs": {
+                    "browseEndpointContextMusicConfig": { "pageType": page_type }
+                }
+            }
+        })
+    }
+
+    fn watch_endpoint(id: &str, video_type: &str) -> serde_json::Value {
+        serde_json::json!({
+            "watchEndpoint": {
+                "videoId": id,
+                "watchEndpointMusicSupportedConfigs": {
+                    "watchEndpointMusicConfig": { "musicVideoType": video_type }
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn flat_item_sections_parse_labelled_with_suggestions_variant() {
+        let mut raw = card_response(
+            "Song",
+            "Baarish",
+            watch_endpoint("CrL3h1Bq0Iw", "MUSIC_VIDEO_TYPE_ATV"),
+        );
+        let sections = raw
+            .pointer_mut("/contents/tabbedSearchResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents")
+            .unwrap()
+            .as_array_mut()
+            .unwrap();
+        sections.extend([
+            item_section(serde_json::json!({
+                "flexColumns": [
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{
+                        "text": "Baarish",
+                        "navigationEndpoint": watch_endpoint("CrL3h1Bq0Iw", "MUSIC_VIDEO_TYPE_ATV")
+                    }] } } },
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [
+                        { "text": "Song" }, { "text": " \u{2022} " },
+                        artist_run("Mohammed Irfan", "UC-irfan"),
+                        { "text": " & " },
+                        artist_run("Mithoon", "UC-mithoon")
+                    ] } } }
+                ],
+                "playlistItemData": { "videoId": "CrL3h1Bq0Iw" }
+            })),
+            item_section(serde_json::json!({
+                "navigationEndpoint": browse_endpoint("MPREb_VkXszlVoqiT", "MUSIC_PAGE_TYPE_ALBUM"),
+                "flexColumns": [
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Baarish" }] } } },
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [
+                        { "text": "Single" }, { "text": " \u{2022} " },
+                        artist_run("Happy Raikoti", "UC-happy"),
+                        { "text": " \u{2022} " }, { "text": "2024" }
+                    ] } } }
+                ]
+            })),
+            item_section(serde_json::json!({
+                "flexColumns": [
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{
+                        "text": "Baarish Live UGC",
+                        "navigationEndpoint": watch_endpoint("nDZG0BzS_Rs", "MUSIC_VIDEO_TYPE_UGC")
+                    }] } } },
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [
+                        { "text": "Video" }, { "text": " \u{2022} " }, { "text": "4.1K views" }
+                    ] } } }
+                ],
+                "playlistItemData": { "videoId": "nDZG0BzS_Rs" }
+            })),
+            item_section(serde_json::json!({
+                "navigationEndpoint": browse_endpoint("UCdWuR07og626xwU93eSCh9A", "MUSIC_PAGE_TYPE_ARTIST"),
+                "flexColumns": [
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Jubin Nautiyal" }] } } },
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [
+                        { "text": "Artist" }, { "text": " \u{2022} " }, { "text": "487M monthly audience" }
+                    ] } } }
+                ]
+            })),
+            item_section(serde_json::json!({
+                "navigationEndpoint": browse_endpoint("VLRDCLAK5uy_chill", "MUSIC_PAGE_TYPE_PLAYLIST"),
+                "flexColumns": [
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Baarish aur Chill" }] } } },
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [
+                        { "text": "Playlist" }, { "text": " \u{2022} " },
+                        { "text": "YouTube Music" }, { "text": " \u{2022} " }, { "text": "60 songs" }
+                    ] } } }
+                ]
+            })),
+            item_section(serde_json::json!({
+                "navigationEndpoint": browse_endpoint("UCkpwgXBcZWA2UQ4YUg1onIA", "MUSIC_PAGE_TYPE_USER_CHANNEL"),
+                "flexColumns": [
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "barish Yadav33" }] } } },
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [
+                        { "text": "Profile" }, { "text": " \u{2022} " }, { "text": "@youngcricketar33" }
+                    ] } } }
+                ]
+            })),
+            item_section(serde_json::json!({
+                "flexColumns": [
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{
+                        "text": "Weather Report Episode",
+                        "navigationEndpoint": browse_endpoint("MPEDhMTSqy_cJtM", "MUSIC_PAGE_TYPE_NON_MUSIC_AUDIO_TRACK_PAGE")
+                    }] } } },
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [
+                        { "text": "Episode" }, { "text": " \u{2022} " }, { "text": "1d ago" }
+                    ] } } }
+                ],
+                "overlay": { "musicItemThumbnailOverlayRenderer": { "content": { "musicPlayButtonRenderer": {
+                    "playNavigationEndpoint": watch_endpoint("hMTSqy_cJtM", "MUSIC_VIDEO_TYPE_PODCAST_EPISODE")
+                } } } },
+                "playlistItemData": { "videoId": "hMTSqy_cJtM" }
+            })),
+            item_section(serde_json::json!({
+                "navigationEndpoint": browse_endpoint("MPSPPLeYg6zNh5", "MUSIC_PAGE_TYPE_PODCAST_SHOW_DETAIL_PAGE"),
+                "flexColumns": [
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Baarish Ki Raat" }] } } },
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [
+                        { "text": "Podcast" }, { "text": " \u{2022} " }, { "text": "Hooked" }
+                    ] } } }
+                ]
+            })),
+        ]);
+
+        let (results, identity) = parse_unfiltered_results("baarish", raw).unwrap();
+        assert_eq!(results.songs.len(), 1);
+        assert_eq!(results.songs[0].video_id.get_raw(), "CrL3h1Bq0Iw");
+        assert_eq!(results.songs[0].title, "Baarish");
+        assert_eq!(results.songs[0].artist, "Mohammed Irfan, Mithoon");
+
+        assert_eq!(results.albums.len(), 1);
+        assert_eq!(results.albums[0].album_id.get_raw(), "MPREb_VkXszlVoqiT");
+        assert_eq!(results.albums[0].title, "Baarish");
+        assert_eq!(results.albums[0].artist, "Happy Raikoti");
+        assert_eq!(results.albums[0].year, "2024");
+        assert_eq!(
+            serde_json::to_value(&results.albums[0].album_type).unwrap(),
+            serde_json::json!("Single")
+        );
+
+        assert_eq!(results.artists.len(), 1);
+        assert_eq!(results.artists[0].browse_id.get_raw(), "UCdWuR07og626xwU93eSCh9A");
+        assert_eq!(results.artists[0].artist, "Jubin Nautiyal");
+        assert_eq!(
+            results.artists[0].subscribers.as_deref(),
+            Some("487M monthly audience")
+        );
+
+        assert_eq!(results.featured_playlists.len(), 1);
+        assert_eq!(
+            results.featured_playlists[0].playlist_id.get_raw(),
+            "VLRDCLAK5uy_chill"
+        );
+        assert_eq!(results.featured_playlists[0].title, "Baarish aur Chill");
+        assert_eq!(results.featured_playlists[0].author, "YouTube Music");
+        assert_eq!(results.featured_playlists[0].songs, "60 songs");
+
+        let page = unfiltered_page(results);
+        let top = resolve_top(identity.as_ref(), &page, "baarish").unwrap();
+        assert_eq!((top.kind.as_str(), top.id.as_str()), ("Song", "CrL3h1Bq0Iw"));
+    }
+
+    #[test]
+    fn flat_item_sections_parse_unlabelled_exact_match_variant() {
+        let mut raw = card_response(
+            "Mohammed Irfan",
+            "Baarish",
+            watch_endpoint("4ZfATiCxsmw", "MUSIC_VIDEO_TYPE_ATV"),
+        );
+        let sections = raw
+            .pointer_mut("/contents/tabbedSearchResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents")
+            .unwrap()
+            .as_array_mut()
+            .unwrap();
+        sections.extend([
+            item_section(serde_json::json!({
+                "flexColumns": [
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{
+                        "text": "Baarish",
+                        "navigationEndpoint": watch_endpoint("4ZfATiCxsmw", "MUSIC_VIDEO_TYPE_ATV")
+                    }] } } },
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [
+                        artist_run("Ash King", "UC-ash"),
+                        { "text": " & " },
+                        artist_run("Shashaa Tirupati", "UC-shashaa"),
+                        { "text": " \u{2022} " },
+                        {
+                            "text": "Half Girlfriend",
+                            "navigationEndpoint": browse_endpoint("MPREb_NmNFFAVBaLr", "MUSIC_PAGE_TYPE_ALBUM")
+                        },
+                        { "text": " \u{2022} " },
+                        { "text": "4:37" }
+                    ] } } }
+                ],
+                "playlistItemData": { "videoId": "4ZfATiCxsmw" }
+            })),
+            item_section(serde_json::json!({
+                "flexColumns": [
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{
+                        "text": "Unlabelled Video",
+                        "navigationEndpoint": watch_endpoint("nDZG0BzS_Rs", "MUSIC_VIDEO_TYPE_UGC")
+                    }] } } },
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [
+                        { "text": "Uploader" }, { "text": " \u{2022} " }, { "text": "4:08" }
+                    ] } } }
+                ],
+                "playlistItemData": { "videoId": "nDZG0BzS_Rs" }
+            })),
+            item_section(serde_json::json!({
+                "navigationEndpoint": browse_endpoint("MPREb_unlabelled", "MUSIC_PAGE_TYPE_ALBUM"),
+                "flexColumns": [
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Monsoon Vibes" }] } } },
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [
+                        artist_run("Rahul Dutta", "UC-rahul"),
+                        { "text": " \u{2022} " }, { "text": "2023" }
+                    ] } } }
+                ]
+            })),
+            item_section(serde_json::json!({
+                "navigationEndpoint": browse_endpoint("VLPLcoGNhzpmB1E", "MUSIC_PAGE_TYPE_PLAYLIST"),
+                "flexColumns": [
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [{ "text": "Baarish all song" }] } } },
+                    { "musicResponsiveListItemFlexColumnRenderer": { "text": { "runs": [
+                        {
+                            "text": "Suraj Kumar Sa",
+                            "navigationEndpoint": browse_endpoint("UCL6xDN2d", "MUSIC_PAGE_TYPE_USER_CHANNEL")
+                        },
+                        { "text": " \u{2022} " },
+                        { "text": "95 views" }
+                    ] } } }
+                ]
+            })),
+        ]);
+
+        let (results, identity) = parse_unfiltered_results("baarish", raw).unwrap();
+        assert_eq!(results.songs.len(), 1);
+        assert_eq!(results.songs[0].video_id.get_raw(), "4ZfATiCxsmw");
+        assert_eq!(results.songs[0].title, "Baarish");
+        assert_eq!(results.songs[0].artist, "Ash King, Shashaa Tirupati");
+        assert_eq!(results.songs[0].duration, "4:37");
+        let parsed_album = results.songs[0].album.as_ref().unwrap();
+        assert_eq!(parsed_album.name, "Half Girlfriend");
+        assert_eq!(parsed_album.id.get_raw(), "MPREb_NmNFFAVBaLr");
+
+        assert_eq!(results.albums.len(), 1);
+        assert_eq!(results.albums[0].album_id.get_raw(), "MPREb_unlabelled");
+        assert_eq!(results.albums[0].title, "Monsoon Vibes");
+        assert_eq!(results.albums[0].artist, "Rahul Dutta");
+        assert_eq!(
+            serde_json::to_value(&results.albums[0].album_type).unwrap(),
+            serde_json::json!("Album")
+        );
+
+        assert_eq!(results.featured_playlists.len(), 1);
+        assert_eq!(
+            results.featured_playlists[0].playlist_id.get_raw(),
+            "VLPLcoGNhzpmB1E"
+        );
+        assert_eq!(results.featured_playlists[0].title, "Baarish all song");
+        assert_eq!(results.featured_playlists[0].author, "Suraj Kumar Sa");
+        assert_eq!(results.featured_playlists[0].songs, "");
+
+        let page = unfiltered_page(results);
+        let top = resolve_top(identity.as_ref(), &page, "baarish").unwrap();
+        assert_eq!((top.kind.as_str(), top.id.as_str()), ("Song", "4ZfATiCxsmw"));
+    }
+
+    #[test]
+    #[ignore = "Requires live YouTube Music access; run manually with --ignored --nocapture"]
+    fn live_baarish_and_tum_hi_ho_all_results() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                tokio::time::timeout(Duration::from_secs(90), async {
+                    let mut client = SearchClient::new().await.expect("unauthenticated client");
+                    for query in ["baarish", "tum hi ho"] {
+                        let page = client.search(query, "All").await.expect("All search");
+                        eprintln!(
+                            "query={query:?} top={:?} songs={} albums={} artists={} playlists={}",
+                            page.top.as_ref().map(|top| (&top.kind, &top.id, &top.title)),
+                            page.songs.len(),
+                            page.albums.len(),
+                            page.artists.len(),
+                            page.playlists.len()
+                        );
+                        assert!(!page.songs.is_empty(), "query={query:?} must return non-empty songs");
+                        // "tum hi ho" currently gets a podcast-episode card, so no top is resolved there.
+                        if query == "baarish" {
+                            assert!(page.top.is_some(), "query={query:?} must return a non-None top");
+                        }
+                    }
+                })
+                .await
+                .expect("live baarish and tum hi ho check timed out");
             });
     }
 }
