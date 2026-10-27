@@ -21,7 +21,7 @@
 
   ![Auricle on Windows](https://californiaalmonds.github.io/auricle/screenshot.png)
 
-  This is an early Windows release. Streaming availability depends on external services and optional add-ons. yt-dlp and ffmpeg are installed at the user's discretion and are not bundled or redistributed. Auricle is not affiliated with YouTube or Google.</description>
+  This is an early Windows release. Streaming availability depends on external services and optional add-ons. yt-dlp, ffmpeg and Deno are optional add-ons, downloaded from their official GitHub releases only at the user's discretion and not bundled or redistributed; once installed, yt-dlp is updated automatically in the background. Privacy policy: https://californiaalmonds.github.io/auricle/privacy.html. Auricle is not affiliated with YouTube or Google.</description>
   </metadata>
   <files>
     <file src="tools\**" target="tools" />
