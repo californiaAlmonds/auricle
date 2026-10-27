@@ -31,20 +31,33 @@ Microsoft Visual C++ Redistributable, which is no longer required. Streaming dep
 and optional add-ons, and availability can change. Auricle is not affiliated with
 YouTube or Google. The only supported UI is the native Slint shell.
 
-## Essential add-ons (yt-dlp & ffmpeg)
+## Essential add-ons (yt-dlp, ffmpeg & Deno)
 
 Auricle does **not** bundle or redistribute third-party media tools. Audio
-extraction relies on [`yt-dlp`](https://github.com/yt-dlp/yt-dlp), and some cache
-operations use [`ffmpeg`](https://ffmpeg.org/). On first run, Auricle offers an
-optional **"Install essential add-ons"** step that can download these tools into a
-per-user application directory.
+extraction relies on [`yt-dlp`](https://github.com/yt-dlp/yt-dlp), some cache
+operations use [`ffmpeg`](https://ffmpeg.org/), and yt-dlp can use
+[`Deno`](https://deno.com/) as a JavaScript runtime for YouTube. On first run, Auricle
+offers an optional **"Install essential add-ons"** step that can download these tools
+from their official GitHub releases into `%LOCALAPPDATA%\auricle\bin`.
 
 Installing them is entirely at your own discretion and choice. You may also install
 them yourself and make them available on your `PATH`. Auricle will detect existing
 installations and skip them.
 
+Once yt-dlp is installed, Auricle keeps it current automatically: it runs
+`yt-dlp -U` in the background at most once a week (falling back to downloading the
+latest release), and once per session if playback starts failing because yt-dlp is out
+of date. When resolving audio, Auricle asks yt-dlp to use cookies from Edge, Chrome
+or Firefox if one is present, then retries without cookies.
+
 These tools are licensed by their respective authors; Auricle is not affiliated with
 them and does not distribute them.
+
+## Privacy
+
+Auricle has no accounts, telemetry or analytics, and keeps your library and history on
+your PC. See the [privacy policy](https://californiaalmonds.github.io/auricle/privacy.html)
+for what is stored locally and what is sent to YouTube, Google and GitHub.
 
 ## Prerequisites
 
