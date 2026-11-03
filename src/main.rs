@@ -2,7 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-  if let Err(err) = auricle_lib::run_native_shell() {
-    eprintln!("Failed to launch native shell: {err}");
-  }
+  auricle_lib::launch();
 }

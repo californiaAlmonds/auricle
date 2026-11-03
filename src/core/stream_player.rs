@@ -842,6 +842,21 @@ fn run_extraction_command(
     result
 }
 
+/// Whether the user has opted in to letting yt-dlp use local browser cookies.
+pub fn browser_cookies_enabled() -> bool {
+    crate::core::persistence::load_settings().use_browser_cookies
+}
+
+/// Bumped whenever cookie consent is withdrawn, so in-flight extractions that
+/// used cookies don't repopulate the stream-link cache afterwards.
+static COOKIE_CONSENT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Called when the user turns browser cookies off.
+pub fn revoke_browser_cookies() {
+    COOKIE_CONSENT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    clear_url_cache();
+}
+
 /// Names of browsers whose cookie database exists on this machine, in priority order.
 /// Shared by the streaming path and the cache download path.
 pub fn detected_cookie_browsers() -> Vec<&'static str> {
@@ -860,10 +875,13 @@ pub fn detected_cookie_browsers() -> Vec<&'static str> {
     out
 }
 
-/// Returns the best-available `--cookies-from-browser` args for yt-dlp,
-/// based on which browser databases actually exist on this machine.
+/// Returns the best-available `--cookies-from-browser` args for yt-dlp, or none
+/// unless the user has opted in to browser cookies in Settings.
 /// Used by both the streaming path and the cache download path.
 pub fn cookie_args() -> Vec<String> {
+    if !browser_cookies_enabled() {
+        return vec![];
+    }
     match detected_cookie_browsers().first() {
         Some(browser) => vec!["--cookies-from-browser".to_string(), browser.to_string()],
         None => vec![],
@@ -917,20 +935,29 @@ pub fn get_stream_url(video_id: &str) -> Result<String, String> {
     let start = std::time::Instant::now();
     let deadline = start + EXTRACTION_TIMEOUT;
 
-    // Build a list of browsers to try based on whether their cookie DB exists.
-    let mut browser_attempts: Vec<Option<&str>> =
-        detected_cookie_browsers().into_iter().map(Some).collect();
+    // Build a list of browsers to try based on whether their cookie DB exists,
+    // only when the user has opted in to browser cookies.
+    let cookies_enabled = browser_cookies_enabled();
+    let consent_generation = COOKIE_CONSENT_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
+    let mut browser_attempts: Vec<Option<&str>> = if cookies_enabled {
+        detected_cookie_browsers().into_iter().map(Some).collect()
+    } else {
+        Vec::new()
+    };
     browser_attempts.push(None); // bare fallback (no cookies)
 
     let mut last_err = format!("yt-dlp not available at {}", ytdlp.display());
 
     for &cookie_opt in &browser_attempts {
+        if cookie_opt.is_some() && !browser_cookies_enabled() {
+            continue; // consent withdrawn mid-extraction
+        }
         let mut cmd = std::process::Command::new(&ytdlp);
         cmd.args([
+            "--ignore-config",
             "-g", "-f", "140/bestaudio[ext=m4a]/bestaudio",
             "--no-playlist",
             "--force-ipv4",
-            "--no-check-certificates",
             "--no-warnings",
             "--extractor-retries", "2",
             "--socket-timeout", "10",
@@ -964,7 +991,11 @@ pub fn get_stream_url(video_id: &str) -> Result<String, String> {
             if !url.is_empty() {
                 let elapsed = start.elapsed().as_millis();
                 eprintln!("[yt-dlp] resolved {video_id} in {elapsed}ms");
-                store_cached_url(video_id, url.clone());
+                let revoked = cookie_opt.is_some()
+                    && COOKIE_CONSENT_GENERATION.load(std::sync::atomic::Ordering::SeqCst) != consent_generation;
+                if !revoked {
+                    store_cached_url(video_id, url.clone());
+                }
                 return Ok(url);
             }
         }
@@ -975,6 +1006,9 @@ pub fn get_stream_url(video_id: &str) -> Result<String, String> {
         // Only retry different cookie sources on auth/bot errors
         if !stderr.contains("Sign in") && !stderr.contains("bot") && !stderr.contains("cookies database") {
             break;
+        }
+        if !cookies_enabled {
+            eprintln!("[yt-dlp] {video_id}: YouTube asked to sign in; browser cookies are off (Settings > Privacy)");
         }
     }
 
