@@ -26,8 +26,9 @@ Downloads are also mirrored on [SourceForge](https://sourceforge.net/projects/au
 
 ## Status
 
-Version 0.1.5 is an early Windows release. It fixes startup on PCs without the
-Microsoft Visual C++ Redistributable, which is no longer required. Streaming depends on external services
+Version 0.1.6 is an early Windows release. Browser cookies are now strictly opt-in,
+yt-dlp always verifies TLS certificates, and Auricle keeps a local diagnostic log with a
+**Report a problem** option. No Visual C++ Redistributable is required. Streaming depends on external services
 and optional add-ons, and availability can change. Auricle is not affiliated with
 YouTube or Google. The only supported UI is the native Slint shell.
 
@@ -47,17 +48,30 @@ installations and skip them.
 Once yt-dlp is installed, Auricle keeps it current automatically: it runs
 `yt-dlp -U` in the background at most once a week (falling back to downloading the
 latest release), and once per session if playback starts failing because yt-dlp is out
-of date. When resolving audio, Auricle asks yt-dlp to use cookies from Edge, Chrome
-or Firefox if one is present, then retries without cookies.
+of date.
+
+By default Auricle never uses your browser cookies. If YouTube asks you to sign in to
+confirm you're not a bot, you can turn on **Use browser cookies for YouTube** in
+Settings > Privacy & diagnostics. After you accept the explanation, yt-dlp may read your
+YouTube cookies from Edge, Chrome or Firefox and send them only to YouTube; you can turn
+it off again at any time.
 
 These tools are licensed by their respective authors; Auricle is not affiliated with
 them and does not distribute them.
 
 ## Privacy
 
-Auricle has no accounts, telemetry or analytics, and keeps your library and history on
-your PC. See the [privacy policy](https://californiaalmonds.github.io/auricle/privacy.html)
+Auricle has no accounts, telemetry, analytics or automatic crash reporting, and keeps your
+library, history and logs on your PC. See the [privacy policy](https://californiaalmonds.github.io/auricle/privacy.html)
 for what is stored locally and what is sent to YouTube, Google and GitHub.
+
+## Troubleshooting
+
+Auricle writes a diagnostic log to `%LOCALAPPDATA%\auricle\logs\auricle.log`. If it
+can't start, it shows an error with an option to report it. You can also use
+**Settings > Privacy & diagnostics > Report a problem**, which opens a prefilled GitHub
+issue for you to review and submit, plus the log folder so you can attach the log.
+`auricle.exe --version` and `auricle.exe --help` print to the console and exit.
 
 ## Prerequisites
 
