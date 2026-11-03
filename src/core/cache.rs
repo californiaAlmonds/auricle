@@ -249,7 +249,8 @@ fn download_audio(video_id: &str, staging: &Path) -> Result<(), String> {
     //    HTTP GET can't, so un-streamable songs still get cached for next time).
     let yt_dlp = find_yt_dlp();
     let watch_url = format!("https://www.youtube.com/watch?v={}", video_id);
-    let mut args = crate::core::stream_player::cookie_args();
+    let mut args = vec!["--ignore-config".to_string()];
+    args.extend(crate::core::stream_player::cookie_args());
     args.extend([
         "-f".to_string(), "bestaudio[ext=m4a]/bestaudio/best".to_string(),
         "--no-playlist".to_string(),

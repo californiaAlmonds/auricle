@@ -1000,6 +1000,12 @@ export component NativeShellWindow inherits Window {
     in-out property <bool> can-go-back: false;
     in-out property <bool> can-go-forward: false;
     in-out property <bool> minimize-to-tray: true;
+    // Privacy & diagnostics. Browser cookies are off until the user accepts the consent dialog.
+    in-out property <bool> use-browser-cookies: false;
+    in-out property <bool> show-cookie-consent: false;
+    callback set-browser-cookies(bool);
+    callback open-log-folder();
+    callback report-problem();
     // Cache
     in-out property <int> cache-limit-mb: 500;
     in-out property <int> cache-used-mb: 0;
@@ -3765,8 +3771,8 @@ export component NativeShellWindow inherits Window {
                                         }
                                         Rectangle { height: 1px; background: Theme.border; }
                                         HorizontalLayout { alignment: space-between;
-                                            Text { text: "Cookie auth"; font-size: 14px; color: Theme.text; vertical-alignment: center; }
-                                            Text { text: "Auto: Edge ? Chrome ? Firefox"; font-size: 13px; color: Theme.text-muted; vertical-alignment: center; }
+                                            Text { text: "Browser cookies"; font-size: 14px; color: Theme.text; vertical-alignment: center; }
+                                            Text { text: use-browser-cookies ? "On (Privacy & diagnostics)" : "Off (Privacy & diagnostics)"; font-size: 13px; color: Theme.text-muted; vertical-alignment: center; }
                                         }
                                     }
                                 }
@@ -3887,6 +3893,70 @@ export component NativeShellWindow inherits Window {
                                                     }
                                                     TouchArea { clicked => { set-prefetch-depth(n); } }
                                                 }
+                                            }
+                                        }
+                                    }
+                                }
+                                // Privacy & diagnostics
+                                Text { text: "Privacy & diagnostics"; font-size: 14px; font-weight: 600; color: Theme.text-muted; }
+                                Rectangle {
+                                    border-radius: Theme.radius; background: Theme.surface; border-color: Theme.border; border-width: 1px;
+                                    VerticalLayout { padding: 18px; spacing: 14px;
+                                        HorizontalLayout { alignment: space-between; spacing: 12px;
+                                            VerticalLayout { spacing: 4px; horizontal-stretch: 1;
+                                                Text { text: "Use browser cookies for YouTube"; font-size: 14px; color: Theme.text; }
+                                                Text {
+                                                    text: use-browser-cookies
+                                                        ? "On: yt-dlp loads your browser's cookies on this PC and sends the YouTube ones to YouTube when finding audio. Turn off at any time."
+                                                        : "Off: Auricle never reads your browser cookies. Turning this on can help when YouTube asks you to sign in.";
+                                                    font-size: 12px; color: Theme.text-muted; wrap: word-wrap;
+                                                }
+                                            }
+                                            Rectangle {
+                                                width: 44px; height: 24px; border-radius: 12px;
+                                                background: use-browser-cookies ? Theme.accent : Theme.surface-hover;
+                                                animate background { duration: 150ms; }
+                                                Rectangle {
+                                                    x: use-browser-cookies ? parent.width - self.width - 2px : 2px;
+                                                    y: 2px; width: 20px; height: 20px; border-radius: 10px;
+                                                    background: use-browser-cookies ? Theme.on-accent : Theme.text-muted;
+                                                    animate x { duration: 150ms; easing: ease-out; }
+                                                }
+                                                TouchArea {
+                                                    clicked => {
+                                                        if use-browser-cookies {
+                                                            use-browser-cookies = false;
+                                                            set-browser-cookies(false);
+                                                        } else {
+                                                            show-cookie-consent = true;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Rectangle { height: 1px; background: Theme.border; }
+                                        VerticalLayout { spacing: 4px;
+                                            Text { text: "Diagnostics"; font-size: 14px; color: Theme.text; }
+                                            Text {
+                                                text: "Auricle keeps a local log of startup and playback events to help fix problems. It is never sent automatically. Report a problem opens a GitHub issue you can review before submitting.";
+                                                font-size: 12px; color: Theme.text-muted; wrap: word-wrap;
+                                            }
+                                        }
+                                        HorizontalLayout { spacing: 8px; alignment: start;
+                                            Rectangle {
+                                                width: logs-txt.preferred-width + 28px; height: 34px; border-radius: Theme.radius-sm;
+                                                background: logs-ta.has-hover ? Theme.surface-hover : transparent;
+                                                border-color: Theme.border; border-width: 1px;
+                                                logs-txt := Text { text: "Open log folder"; font-size: 13px; font-weight: 600; color: Theme.text;
+                                                    horizontal-alignment: center; vertical-alignment: center; }
+                                                logs-ta := TouchArea { clicked => { open-log-folder(); } }
+                                            }
+                                            Rectangle {
+                                                width: report-txt.preferred-width + 28px; height: 34px; border-radius: Theme.radius-sm;
+                                                background: report-ta.has-hover ? Theme.accent-strong : Theme.accent;
+                                                report-txt := Text { text: "Report a problem"; font-size: 13px; font-weight: 600; color: Theme.on-accent;
+                                                    horizontal-alignment: center; vertical-alignment: center; }
+                                                report-ta := TouchArea { clicked => { report-problem(); } }
                                             }
                                         }
                                     }
@@ -4715,6 +4785,64 @@ export component NativeShellWindow inherits Window {
                             horizontal-alignment: center; vertical-alignment: center;
                         }
                         ob-done-ta := TouchArea { clicked => { if !addon-busy { dismiss-onboarding(); } } }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Browser-cookie consent (explicit opt-in) ─────────────────────────────────
+    if show-cookie-consent: Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height;
+        background: #000000a0;
+        TouchArea { }
+
+        cc-card := Rectangle {
+            width: min(500px, root.width - 48px);
+            height: cc-layout.preferred-height;
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            border-radius: 18px;
+            background: Theme.glass-strong;
+            border-color: Theme.border; border-width: 1px;
+            drop-shadow-blur: 40px; drop-shadow-color: #000000c0; drop-shadow-offset-y: 16px;
+
+            cc-layout := VerticalLayout {
+                padding: 28px; spacing: 14px;
+                Text { text: "Use your browser cookies for YouTube?"; font-size: 18px; font-weight: 700; color: Theme.text; wrap: word-wrap; }
+                Text {
+                    text: "What is accessed: when finding a song's audio, yt-dlp will open the cookie store of Microsoft Edge, Google Chrome or Mozilla Firefox on this PC (whichever is found first) and load its cookies locally.";
+                    font-size: 13px; color: Theme.text-muted; wrap: word-wrap;
+                }
+                Text {
+                    text: "Why and where it goes: only the cookies for YouTube and Google sign-in are sent, and only to YouTube, over a verified HTTPS connection, so YouTube treats the request like your browser. This can help when YouTube asks you to sign in to confirm you're not a bot. YouTube may link these requests to the Google account signed in to that browser.";
+                    font-size: 13px; color: Theme.text-muted; wrap: word-wrap;
+                }
+                Text {
+                    text: "Auricle does not save your cookies or send them anywhere else. You can turn this off at any time in Settings > Privacy & diagnostics.";
+                    font-size: 13px; color: Theme.text-muted; wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    alignment: end; spacing: 10px;
+                    Rectangle {
+                        width: cc-no-txt.preferred-width + 32px; height: 36px; border-radius: Theme.radius-sm;
+                        background: cc-no-ta.has-hover ? Theme.hover-veil : transparent;
+                        cc-no-txt := Text { text: "Keep off"; font-size: 13px; font-weight: 600; color: Theme.text;
+                            horizontal-alignment: center; vertical-alignment: center; }
+                        cc-no-ta := TouchArea { clicked => { show-cookie-consent = false; } }
+                    }
+                    Rectangle {
+                        width: cc-yes-txt.preferred-width + 32px; height: 36px; border-radius: Theme.radius-sm;
+                        background: cc-yes-ta.has-hover ? Theme.accent-strong : Theme.accent;
+                        cc-yes-txt := Text { text: "Allow browser cookies"; font-size: 13px; font-weight: 600; color: Theme.on-accent;
+                            horizontal-alignment: center; vertical-alignment: center; }
+                        cc-yes-ta := TouchArea {
+                            clicked => {
+                                use-browser-cookies = true;
+                                show-cookie-consent = false;
+                                set-browser-cookies(true);
+                            }
+                        }
                     }
                 }
             }

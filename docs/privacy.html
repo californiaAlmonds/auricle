@@ -60,10 +60,10 @@
 <main>
   <div class="label">Privacy</div>
   <h1>Auricle Privacy Policy</h1>
-  <p class="meta">Effective October 27, 2026 · Applies to Auricle 0.1.5 for Windows</p>
+  <p class="meta">Effective November 3, 2026 · Applies to Auricle 0.1.6 and later for Windows</p>
 
   <div class="summary">
-    <p><strong>In short:</strong> Auricle has no accounts, servers, analytics, telemetry, advertising or crash reporting. The developer does not receive any of your data. Your library, history and settings stay on your PC. To search and play music, Auricle and its optional add-ons talk directly to YouTube and Google services, and they download add-ons and update checks from GitHub. Those services receive the requests described below under their own privacy policies.</p>
+    <p><strong>In short:</strong> Auricle has no accounts, servers, analytics, telemetry, advertising or automatic crash reporting. The developer receives nothing unless you choose to submit a problem report. Your library, history, settings and logs stay on your PC. To search and play music, Auricle and its optional add-ons talk directly to YouTube and Google services, and they download add-ons and update checks from GitHub. Auricle never uses your browser cookies unless you turn that on yourself.</p>
   </div>
 
   <p>Auricle is an open-source music player published by californiaAlmonds under the GPL-3.0 license. This policy explains what the app stores, what it sends over the network and why, which third parties are involved, how long data is kept, and how you can delete it. The source code is available at <a href="https://github.com/californiaAlmonds/auricle">github.com/californiaAlmonds/auricle</a> if you want to verify any of it.</p>
@@ -75,10 +75,11 @@
       <tr><th>Location</th><th>Contents</th><th>Retention</th></tr>
       <tr><td><code>%LOCALAPPDATA%\auricle\user_data.json</code></td><td>Listening history, liked songs and disliked songs. Each entry holds the song's video ID, title, artist, album, related IDs and duration.</td><td>History keeps the most recent 200 songs. Likes and dislikes stay until you remove them.</td></tr>
       <tr><td><code>%LOCALAPPDATA%\auricle\library.json</code></td><td>Followed artists, saved albums and playlists (names, IDs, artwork links), and playlists you create, including their creation time and songs.</td><td>Until you remove the items or delete the file.</td></tr>
-      <tr><td><code>%LOCALAPPDATA%\auricle\settings.json</code></td><td>Preferences (theme, tray behavior, prefetch), the last song played, whether onboarding was shown, and when yt-dlp was last checked for updates.</td><td>Until you delete the file.</td></tr>
+      <tr><td><code>%LOCALAPPDATA%\auricle\settings.json</code></td><td>Preferences (theme, tray behavior, prefetch, whether browser cookies are allowed), the last song played, whether onboarding was shown, and when yt-dlp was last checked for updates.</td><td>Until you delete the file.</td></tr>
       <tr><td><code>%LOCALAPPDATA%\auricle\url_cache.json</code></td><td>Temporary audio stream links keyed by video ID, with the time they were fetched.</td><td>Entries expire after 6 hours.</td></tr>
       <tr><td><code>%LOCALAPPDATA%\auricle\cache\</code></td><td>Audio for recently played songs, plus <code>cache_index.json</code> listing each file's video ID, title, artist, size, and when it was added and last played.</td><td>Size-limited (500 MB by default, adjustable in Settings); the least recently played files are removed first.</td></tr>
       <tr><td><code>%LOCALAPPDATA%\auricle\bin\</code></td><td>Optional add-ons you choose to install: yt-dlp, ffmpeg and Deno.</td><td>Until you delete them.</td></tr>
+      <tr><td><code>%LOCALAPPDATA%\auricle\logs\</code></td><td>Diagnostic log (<code>auricle.log</code>): app and Windows version, startup steps, window state, errors and crash details, and playback and search events, which can include song titles, video IDs, search terms and yt-dlp messages. It never contains your browser cookies.</td><td>About 1 MB; when full it becomes <code>auricle.1.log</code>, replacing the previous one.</td></tr>
       <tr><td>Windows temp folder, files named <code>ytm_*.jpg</code></td><td>Album, artist, playlist and song artwork downloaded for display.</td><td>Until cleared by Clear Cache (song artwork), Windows temp cleanup, or you.</td></tr>
     </table>
   </div>
@@ -88,12 +89,13 @@
   <ul>
     <li><strong>YouTube Music (Google).</strong> To show search results, suggestions, artist, album and playlist pages, and autoplay recommendations, Auricle sends your search text and the IDs of the items you open to YouTube Music, as an anonymous guest.</li>
     <li><strong>YouTube and Google media servers.</strong> To play and cache audio and show artwork, Auricle downloads audio from Google's video servers (googlevideo.com) and images from i.ytimg.com and Google image hosts. These requests include the song or image being fetched.</li>
-    <li><strong>yt-dlp and your browser cookies.</strong> Auricle uses the optional yt-dlp add-on to find a song's audio stream. If Microsoft Edge, Google Chrome or Mozilla Firefox data is present on your PC, Auricle asks yt-dlp to use that browser's cookies (<code>--cookies-from-browser</code>) and, if that fails, retries without cookies. yt-dlp reads those cookies on your PC and sends them only to YouTube, so YouTube may associate those requests with the Google account signed in to that browser. Auricle itself does not read, store or transmit your cookies. Version 0.1.5 has no setting to turn this off.</li>
+    <li><strong>yt-dlp and browser cookies (off by default).</strong> Auricle uses the optional yt-dlp add-on to find a song's audio stream, normally without any cookies. Only if you turn on <strong>Use browser cookies for YouTube</strong> in Settings &gt; Privacy &amp; diagnostics and accept the explanation shown, Auricle asks yt-dlp to use cookies from Microsoft Edge, Google Chrome or Mozilla Firefox (<code>--cookies-from-browser</code>), retrying without cookies if that fails. yt-dlp opens that browser's cookie store on your PC and loads its cookies locally, then sends only the cookies for YouTube and Google sign-in, and only to YouTube, over HTTPS with normal certificate verification. This can help when YouTube asks you to sign in to confirm you're not a bot, and YouTube may associate those requests with the Google account signed in to that browser. Auricle ignores any external yt-dlp configuration file, so cookies can't be enabled behind your back, and Auricle does not store or transmit your cookies itself. You can turn this off at any time in the same place; doing so also discards stream links obtained with cookies.</li>
     <li><strong>GitHub (add-on downloads).</strong> When you choose to install an add-on, Auricle downloads it from its official GitHub releases: <a href="https://github.com/yt-dlp/yt-dlp">yt-dlp/yt-dlp</a>, <a href="https://github.com/BtbN/FFmpeg-Builds">BtbN/FFmpeg-Builds</a> (ffmpeg) and <a href="https://github.com/denoland/deno">denoland/deno</a>.</li>
     <li><strong>Automatic yt-dlp updates.</strong> If yt-dlp is installed, Auricle updates it in the background at most once a week (<code>yt-dlp -U</code>, falling back to downloading the latest release from GitHub). It also triggers one immediate update per session if playback starts failing in a way that indicates an outdated yt-dlp. You can also update manually in Settings.</li>
     <li><strong>App update checks (portable build only).</strong> The portable ZIP checks the latest Auricle release on GitHub when it starts and when you click “Check for updates”, and it can download an update you choose to install. The installer, WinGet, Scoop and Chocolatey builds do not check for or install app updates; your package manager handles updates.</li>
+    <li><strong>Problem reports (only when you choose).</strong> Settings &gt; Privacy &amp; diagnostics &gt; <strong>Report a problem</strong>, or the error dialog shown if Auricle fails to start, opens a new GitHub issue form in your browser prefilled with the app version, Windows version and, for errors, the error message (your Windows user folder and account name are masked). Opening the form sends that prefilled text to GitHub as part of the page address; the issue itself is created only if you submit it, and GitHub issues are public. The log folder also opens so you can decide whether to attach <code>auricle.log</code>; the log is never uploaded unless you attach it.</li>
   </ul>
-  <p>Auricle does not send your library, history, likes, playlists or settings to anyone, and the developer operates no server that receives data from the app.</p>
+  <p>Auricle does not send your library, history, likes, playlists, settings or logs to anyone on its own, and the developer operates no server that receives data from the app.</p>
 
   <h2>3. Third parties</h2>
   <p>The services above process requests under their own policies, which Auricle does not control:</p>
@@ -105,16 +107,18 @@
 
   <h2>4. Your controls and deleting data</h2>
   <ul>
+    <li><strong>Use browser cookies for YouTube</strong> (Settings &gt; Privacy &amp; diagnostics) is off by default; you can turn it on or off at any time.</li>
+    <li><strong>Open log folder</strong> (same section) shows the diagnostic log; you can delete <code>%LOCALAPPDATA%\auricle\logs\</code> whenever Auricle is closed.</li>
     <li><strong>Clear Cache</strong> (Settings) deletes cached audio and song artwork. You can also lower the cache size limit there.</li>
     <li>You can unlike songs, unfollow artists, unsave albums and playlists, remove songs from your playlists, and delete playlists you created in the app.</li>
-    <li>Version 0.1.5 has no button to clear listening history or dislikes. To remove them, close Auricle and delete <code>%LOCALAPPDATA%\auricle\user_data.json</code>.</li>
+    <li>There is no button yet to clear listening history or dislikes. To remove them, close Auricle and delete <code>%LOCALAPPDATA%\auricle\user_data.json</code>.</li>
     <li>Add-ons are optional. You can skip installing them, use your own copies on <code>PATH</code>, or delete <code>%LOCALAPPDATA%\auricle\bin\</code>.</li>
     <li><strong>To delete everything:</strong> close Auricle, delete the <code>%LOCALAPPDATA%\auricle</code> folder, and delete <code>ytm_*.jpg</code> files from your temp folder (<code>%TEMP%</code>). Uninstalling Auricle removes the program but does not delete this data.</li>
   </ul>
 
   <h2>5. Security</h2>
   <ul>
-    <li>Network connections from Auricle use HTTPS. When resolving audio streams, Auricle runs yt-dlp with <code>--no-check-certificates</code>, so those yt-dlp requests to YouTube do not verify TLS certificates.</li>
+    <li>Network connections from Auricle and the yt-dlp requests it starts use HTTPS with normal TLS certificate verification.</li>
     <li>Add-on downloads come over HTTPS from the official GitHub release pages listed above, but Auricle does not separately verify their checksums or signatures.</li>
     <li>Locally stored data is not encrypted. Anyone with access to your Windows account can read it.</li>
   </ul>
