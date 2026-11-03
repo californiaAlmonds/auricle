@@ -3771,8 +3771,8 @@ export component NativeShellWindow inherits Window {
                                         }
                                         Rectangle { height: 1px; background: Theme.border; }
                                         HorizontalLayout { alignment: space-between;
-                                            Text { text: "Cookie auth"; font-size: 14px; color: Theme.text; vertical-alignment: center; }
-                                            Text { text: "Auto: Edge ? Chrome ? Firefox"; font-size: 13px; color: Theme.text-muted; vertical-alignment: center; }
+                                            Text { text: "Browser cookies"; font-size: 14px; color: Theme.text; vertical-alignment: center; }
+                                            Text { text: use-browser-cookies ? "On (Privacy & diagnostics)" : "Off (Privacy & diagnostics)"; font-size: 13px; color: Theme.text-muted; vertical-alignment: center; }
                                         }
                                     }
                                 }
