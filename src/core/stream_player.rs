@@ -935,14 +935,15 @@ pub fn get_stream_url(video_id: &str) -> Result<String, String> {
     let start = std::time::Instant::now();
     let deadline = start + EXTRACTION_TIMEOUT;
 
-    // Build a list of browsers to try based on whether their cookie DB exists.
-    let mut browser_attempts: Vec<Option<&str>> =
-        detected_cookie_browsers().into_iter().map(Some).collect();
-    browser_attempts.push(None); // bare fallback (no cookies)
+    // VisionOS URLs need no JS challenge and have no available_at delay (~2s faster
+    // extraction, ~4s less wait); yt-dlp's default clients remain the fallback.
+    let mut attempts: Vec<(Option<&str>, Option<&str>)> = vec![(Some("visionos"), None)];
+    attempts.extend(detected_cookie_browsers().into_iter().map(|browser| (None, Some(browser))));
+    attempts.push((None, None)); // bare fallback (no cookies)
 
     let mut last_err = format!("yt-dlp not available at {}", ytdlp.display());
 
-    for &cookie_opt in &browser_attempts {
+    for &(client_opt, cookie_opt) in &attempts {
         let mut cmd = std::process::Command::new(&ytdlp);
         cmd.args([
             "-f", "140/bestaudio[ext=m4a]/bestaudio",
@@ -959,6 +960,9 @@ pub fn get_stream_url(video_id: &str) -> Result<String, String> {
         // they're not on the system PATH.
         crate::core::addons::set_addon_path_env(&mut cmd);
 
+        if let Some(client) = client_opt {
+            cmd.arg("--extractor-args").arg(format!("youtube:player_client={client}"));
+        }
         if let Some(browser) = cookie_opt {
             cmd.arg("--cookies-from-browser").arg(browser);
         }
@@ -988,7 +992,8 @@ pub fn get_stream_url(video_id: &str) -> Result<String, String> {
             if url.starts_with("http") {
                 let elapsed = start.elapsed().as_millis();
                 let delay = available_at.saturating_sub(unix_now());
-                eprintln!("[yt-dlp] resolved {video_id} in {elapsed}ms (available in {delay}s)");
+                let client = client_opt.unwrap_or("default");
+                eprintln!("[yt-dlp] resolved {video_id} in {elapsed}ms via {client} client (available in {delay}s)");
                 store_cached_url(video_id, url.clone(), available_at);
                 wait_until_available(available_at);
                 return Ok(url);
@@ -998,6 +1003,10 @@ pub fn get_stream_url(video_id: &str) -> Result<String, String> {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         last_err = format!("yt-dlp -g failed: {stderr}");
 
+        if client_opt.is_some() {
+            eprintln!("[yt-dlp] {video_id}: preferred client failed, falling back to defaults");
+            continue;
+        }
         // Only retry different cookie sources on auth/bot errors
         if !stderr.contains("Sign in") && !stderr.contains("bot") && !stderr.contains("cookies database") {
             break;
