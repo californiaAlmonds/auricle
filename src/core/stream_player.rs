@@ -1010,12 +1010,7 @@ pub fn get_stream_url(video_id: &str) -> Result<String, String> {
         };
 
         if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let mut lines = stdout.lines().map(str::trim).filter(|line| !line.is_empty());
-            // Prints "NA" when YouTube gives no availability delay.
-            let available_at = lines.next().and_then(|line| line.parse::<u64>().ok()).unwrap_or(0);
-            let url = lines.next().unwrap_or_default().to_string();
-            if url.starts_with("http") {
+            if let Some((available_at, url)) = parse_extraction_output(&String::from_utf8_lossy(&output.stdout)) {
                 let elapsed = start.elapsed().as_millis();
                 let delay = available_at.saturating_sub(unix_now());
                 let client = client_opt.unwrap_or("default");
@@ -1049,9 +1044,43 @@ pub fn get_stream_url(video_id: &str) -> Result<String, String> {
     Err(last_err)
 }
 
+/// Parses `--print available_at --print url` output into (available_at, url).
+/// yt-dlp prints "NA" for available_at when YouTube imposes no delay.
+fn parse_extraction_output(stdout: &str) -> Option<(u64, String)> {
+    let mut lines = stdout.lines().map(str::trim).filter(|line| !line.is_empty());
+    let available_at = lines.next()?.parse::<u64>().unwrap_or(0);
+    let url = lines.find(|line| line.starts_with("https://"))?;
+    Some((available_at, url.to_string()))
+}
+
 #[cfg(test)]
 mod extraction_tests {
-    use super::{run_extraction_command, EXTRACTION_TIMEOUT};
+    use super::{parse_extraction_output, run_extraction_command, EXTRACTION_TIMEOUT};
+
+    #[test]
+    fn parses_available_at_and_url() {
+        let out = "1793772491\nhttps://rr5---sn.googlevideo.com/videoplayback?x=1\n";
+        assert_eq!(parse_extraction_output(out), Some((1793772491, "https://rr5---sn.googlevideo.com/videoplayback?x=1".to_string())));
+    }
+
+    #[test]
+    fn na_available_at_means_no_delay() {
+        let out = "NA\r\nhttps://example.googlevideo.com/v\r\n";
+        assert_eq!(parse_extraction_output(out), Some((0, "https://example.googlevideo.com/v".to_string())));
+    }
+
+    #[test]
+    fn rejects_empty_or_url_less_output() {
+        assert_eq!(parse_extraction_output(""), None);
+        assert_eq!(parse_extraction_output("1793772491\n"), None);
+        assert_eq!(parse_extraction_output("NA\nnot a url\n"), None);
+    }
+
+    #[test]
+    fn skips_unexpected_extra_lines() {
+        let out = "NA\nsomething else\nhttps://example.googlevideo.com/v\n";
+        assert_eq!(parse_extraction_output(out), Some((0, "https://example.googlevideo.com/v".to_string())));
+    }
     use std::io::Write;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
