@@ -7,7 +7,6 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use ytmapi_rs::common::{AlbumID, YoutubeID};
 use ytmapi_rs::parse::{GetAlbum, ParsedSongArtist};
 use ytmapi_rs::query::{search::ArtistsFilter, GetAlbumQuery, SearchQuery};
-use ytmapi_rs::YtMusic;
 
 use crate::core::{bridge::playback_core, library, menu_metadata, net, playback};
 use crate::NativeShellWindow;
@@ -149,7 +148,7 @@ fn saved(kind: &str, id: &str) -> bool {
 }
 
 async fn resolve_artist(name: String) -> Result<String, &'static str> {
-    let api = YtMusic::new_unauthenticated().await.map_err(|_| "Artist lookup unavailable. Please try again.")?;
+    let api = crate::core::net::ytmusic().await.map_err(|_| "Artist lookup unavailable. Please try again.")?;
     let results = api.query(SearchQuery::new(name.clone()).with_filter(ArtistsFilter)).await
         .map_err(|_| "Artist lookup unavailable. Please try again.")?;
     let id = unique_artist(&name, results.iter().map(|artist| (artist.artist.as_str(), artist.browse_id.get_raw())))?;
@@ -365,7 +364,7 @@ pub(crate) fn wire(ui: &NativeShellWindow, artist: Arc<Mutex<library::SavedArtis
             "play" | "queue" if kind == "Album" && !id.trim().is_empty() => {
                 ui.set_ctx_status("Loading album...".into());
                 background(&ui, target, async move {
-                    let api = YtMusic::new_unauthenticated().await.map_err(|_| "Album unavailable. Please try again.")?;
+                    let api = crate::core::net::ytmusic().await.map_err(|_| "Album unavailable. Please try again.")?;
                     let mut album = api.query(GetAlbumQuery::new(AlbumID::from_raw(id.as_str()))).await
                         .map_err(|_| "Album unavailable. Please try again.")?;
                     let songs = album_tracks(&mut album, &id);

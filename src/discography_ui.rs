@@ -925,7 +925,7 @@ pub(crate) fn rank_artist_row(
             };
             let result = runtime.block_on(async {
                 tokio::time::timeout(FETCH_TIMEOUT, async {
-                    let api = YtMusic::new_unauthenticated()
+                    let api = crate::core::net::ytmusic()
                         .await
                         .map_err(|error| error.to_string())?;
                     compute_artist_row(
@@ -1116,7 +1116,7 @@ fn start_worker(ui: &NativeShellWindow, state: Arc<State>) -> mpsc::UnboundedSen
                         let client = match &api {
                             Some(client) => client,
                             None => {
-                                let created = YtMusic::new_unauthenticated().await.map_err(|error| error.to_string())?;
+                                let created = crate::core::net::ytmusic().await.map_err(|error| error.to_string())?;
                                 api.insert(created)
                             }
                         };
@@ -1387,7 +1387,7 @@ mod tests {
         runtime.block_on(async {
             tokio::time::timeout(Duration::from_secs(120), async {
                 let artist_id = "UCDxKh1gFWeYsqePvgVzmPoQ";
-                let api = YtMusic::new_unauthenticated().await.unwrap();
+                let api = crate::core::net::ytmusic().await.unwrap();
                 let json = query_json(
                     &api,
                     GetArtistQuery::new(ArtistChannelID::from_raw(artist_id)),
@@ -1540,7 +1540,7 @@ mod tests {
             .unwrap();
         runtime.block_on(async {
             let artist_id = "UCDxKh1gFWeYsqePvgVzmPoQ";
-            let api = YtMusic::new_unauthenticated().await.unwrap();
+            let api = crate::core::net::ytmusic().await.unwrap();
             let artist = api
                 .get_artist(ArtistChannelID::from_raw(artist_id))
                 .await

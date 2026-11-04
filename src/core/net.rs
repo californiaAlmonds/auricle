@@ -91,3 +91,14 @@ fn pool() -> &'static Sender<Job> {
 pub fn spawn(f: impl FnOnce() + Send + 'static) {
     let _ = pool().send(Box::new(f));
 }
+
+pub async fn ytmusic() -> ytmapi_rs::Result<ytmapi_rs::YtMusic<ytmapi_rs::auth::noauth::NoAuthToken>> {
+    // Raise the HTTP/2 header limit because YouTube Music's homepage response headers exceed reqwest's 16 KiB default.
+    let http = reqwest::Client::builder()
+        .http2_max_header_list_size(64 * 1024)
+        .build()?;
+    let client = ytmapi_rs::client::Client::new_from_reqwest_client(http);
+    ytmapi_rs::builder::YtMusicBuilder::new_with_client(client)
+        .build()
+        .await
+}

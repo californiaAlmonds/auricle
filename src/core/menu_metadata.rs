@@ -333,7 +333,7 @@ pub async fn resolve_artists(kind: &str, id: &str) -> Result<Vec<ArtistCredit>, 
         return Ok(credits);
     }
     let result = async {
-        let api = YtMusic::new_unauthenticated()
+        let api = crate::core::net::ytmusic()
             .await
             .map_err(|error| format!("Artist metadata client: {error}"))?;
         match parsed_kind {
@@ -439,7 +439,7 @@ pub async fn resolve_album(
             },
         ));
     }
-    let api = YtMusic::new_unauthenticated()
+    let api = crate::core::net::ytmusic()
         .await
         .map_err(|error| format!("Album metadata client: {error}"))?;
     let mut errors = Vec::new();

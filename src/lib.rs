@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use ytmapi_rs::YtMusic;
 use ytmapi_rs::query::{SearchQuery, search::SongsFilter};
 use ytmapi_rs::common::YoutubeID;
 
@@ -293,7 +292,7 @@ fn spawn_sidebar_artist_thumbs(ui_weak: slint::Weak<NativeShellWindow>) {
         // sidebar artists. Reusing it across `block_on` calls is safe because
         // they all run on this same, still-alive runtime.
         let api = rt.as_ref().and_then(|rt| {
-            rt.block_on(async { ytmapi_rs::YtMusic::new_unauthenticated().await.ok() })
+            rt.block_on(async { crate::core::net::ytmusic().await.ok() })
         });
         for (name, bid) in seeds {
             // Cache key: channel id when known, else the (lowercased) name.
@@ -403,7 +402,7 @@ fn spawn_sidebar_album_thumbs(ui_weak: slint::Weak<NativeShellWindow>) {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok();
         // One API handle for the whole batch — see spawn_sidebar_artist_thumbs.
         let api = rt.as_ref().and_then(|rt| {
-            rt.block_on(async { ytmapi_rs::YtMusic::new_unauthenticated().await.ok() })
+            rt.block_on(async { crate::core::net::ytmusic().await.ok() })
         });
         for id in ids {
             let path = library_thumb_path("album", &id);
@@ -642,7 +641,7 @@ fn spawn_album_thumb_loader(ui_weak: slint::Weak<NativeShellWindow>) {
                 if url.is_empty() {
                     if let Some(ref rt) = rt {
                         if api.is_none() {
-                            api = rt.block_on(async { ytmapi_rs::YtMusic::new_unauthenticated().await.ok() });
+                            api = rt.block_on(async { crate::core::net::ytmusic().await.ok() });
                         }
                         if let Some(api) = api.as_ref() {
                             url = rt.block_on(async {
@@ -702,7 +701,7 @@ fn spawn_artist_thumb_loader(ui_weak: slint::Weak<NativeShellWindow>) {
                 if url.is_empty() {
                     if let Some(ref rt) = rt {
                         if api.is_none() {
-                            api = rt.block_on(async { ytmapi_rs::YtMusic::new_unauthenticated().await.ok() });
+                            api = rt.block_on(async { crate::core::net::ytmusic().await.ok() });
                         }
                         if let Some(api) = api.as_ref() {
                             url = rt.block_on(async {
@@ -773,7 +772,7 @@ fn fetch_radio_songs(seed: &str) -> Vec<core::playback::NowPlaying> {
         }
     };
     let songs = rt.block_on(async {
-        let api = match ytmapi_rs::YtMusic::new_unauthenticated().await {
+        let api = match crate::core::net::ytmusic().await {
             Ok(a) => a,
             Err(e) => {
                 eprintln!("[autoplay] failed to init api: {e}");
@@ -1148,7 +1147,7 @@ fn fetch_trending_songs(ui_weak: slint::Weak<NativeShellWindow>) {
                 }
             };
 
-            let guest_api = ytmapi_rs::YtMusic::new_unauthenticated().await.ok()?;
+            let guest_api = crate::core::net::ytmusic().await.ok()?;
             let results = guest_api.query(
                 SearchQuery::new(query_string).with_filter(SongsFilter)
             ).await.ok()?;
@@ -1306,9 +1305,8 @@ fn fetch_followed_songs(ui_weak: slint::Weak<NativeShellWindow>) {
     core::net::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let raw: Vec<(String, String, String, u32, String)> = rt.block_on(async {
-            use ytmapi_rs::YtMusic;
             use ytmapi_rs::query::{SearchQuery, search::SongsFilter};
-            let api = match YtMusic::new_unauthenticated().await { Ok(a) => a, Err(_) => return Vec::new() };
+            let api = match crate::core::net::ytmusic().await { Ok(a) => a, Err(_) => return Vec::new() };
             let mut out: Vec<(String, String, String, u32, String)> = Vec::new();
             let mut seen = std::collections::HashSet::new();
             for a in followed.iter().take(8) {
@@ -1400,7 +1398,7 @@ fn fetch_personalized_songs(ui_weak: slint::Weak<NativeShellWindow>) {
     core::net::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let songs = rt.block_on(async {
-            let guest_api = ytmapi_rs::YtMusic::new_unauthenticated().await.ok()?;
+            let guest_api = crate::core::net::ytmusic().await.ok()?;
             let vid = ytmapi_rs::common::VideoID::from_raw(seed_vid);
             let tracks = guest_api.get_watch_playlist_from_video_id(vid).await.ok()?;
             Some(tracks.into_iter().take(15).map(|r| Song {
@@ -1593,10 +1591,9 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
         core::net::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             let albums = rt.block_on(async {
-                use ytmapi_rs::YtMusic;
                 use ytmapi_rs::common::ArtistChannelID;
                 use ytmapi_rs::query::{SearchQuery, search::ArtistsFilter};
-                let api = match YtMusic::new_unauthenticated().await {
+                let api = match crate::core::net::ytmusic().await {
                     Ok(a) => a,
                     Err(_) => return Vec::new(),
                 };
@@ -1712,9 +1709,8 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
         core::net::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             let (mix1, mix2, mix3, mix1_title, mix2_title, mix3_title) = rt.block_on(async {
-                use ytmapi_rs::YtMusic;
                 use ytmapi_rs::query::{SearchQuery, search::SongsFilter};
-                let api = match YtMusic::new_unauthenticated().await {
+                let api = match crate::core::net::ytmusic().await {
                     Ok(a) => a,
                     Err(_) => return (Vec::new(), Vec::new(), Vec::new(), String::new(), String::new(), String::new()),
                 };
@@ -1848,9 +1844,8 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
         core::net::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             let songs = rt.block_on(async {
-                use ytmapi_rs::YtMusic;
                 use ytmapi_rs::query::{SearchQuery, search::SongsFilter};
-                let api = match YtMusic::new_unauthenticated().await {
+                let api = match crate::core::net::ytmusic().await {
                     Ok(a) => a,
                     Err(_) => return Vec::new(),
                 };
@@ -1935,9 +1930,8 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
         core::net::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             let songs = rt.block_on(async {
-                use ytmapi_rs::YtMusic;
                 use ytmapi_rs::query::{SearchQuery, search::SongsFilter};
-                let api = match YtMusic::new_unauthenticated().await {
+                let api = match crate::core::net::ytmusic().await {
                     Ok(a) => a,
                     Err(_) => return Vec::new(),
                 };
@@ -2550,9 +2544,8 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     .build()
                     .unwrap();
                 let result = rt.block_on(async {
-                    use ytmapi_rs::YtMusic;
                     use ytmapi_rs::query::GetMoodCategoriesQuery;
-                    let api = YtMusic::new_unauthenticated().await.map_err(|e| e.to_string())?;
+                    let api = crate::core::net::ytmusic().await.map_err(|e| e.to_string())?;
                     api.query(GetMoodCategoriesQuery).await.map_err(|e| e.to_string())
                 });
                 slint::invoke_from_event_loop(move || {
@@ -2582,8 +2575,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     .build()
                     .unwrap();
                 let result = rt.block_on(async {
-                    use ytmapi_rs::YtMusic;
-                    let api = YtMusic::new_unauthenticated().await.map_err(|e| e.to_string())?;
+                    let api = crate::core::net::ytmusic().await.map_err(|e| e.to_string())?;
                     api.query(SearchQuery::new("new music 2026".to_string()).with_filter(SongsFilter)).await.map_err(|e| e.to_string())
                 });
                 slint::invoke_from_event_loop(move || {
@@ -2635,7 +2627,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 let result = rt.block_on(async {
                     use ytmapi_rs::query::GetMoodPlaylistsQuery;
                     use ytmapi_rs::common::{MoodCategoryParams, YoutubeID};
-                    let api = YtMusic::new_unauthenticated().await.map_err(|e| e.to_string())?;
+                    let api = crate::core::net::ytmusic().await.map_err(|e| e.to_string())?;
                     let params = MoodCategoryParams::from_raw(params_raw);
                     let categories = api.query(GetMoodPlaylistsQuery::new(params)).await.map_err(|e| e.to_string())?;
                     // Get the first playlist from the first category and fetch its tracks
@@ -3238,10 +3230,9 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     .unwrap();
 
                 let result = rt.block_on(async {
-                    use ytmapi_rs::YtMusic;
                     use ytmapi_rs::common::ArtistChannelID;
 
-                    let api = YtMusic::new_unauthenticated().await.map_err(|e| e.to_string())?;
+                    let api = crate::core::net::ytmusic().await.map_err(|e| e.to_string())?;
                     api.get_artist(ArtistChannelID::from_raw(&browse_id)).await.map_err(|e| e.to_string())
                 });
 
@@ -3690,9 +3681,8 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     .build()
                     .unwrap();
                 let result = rt.block_on(async {
-                    use ytmapi_rs::YtMusic;
                     use ytmapi_rs::common::VideoID;
-                    let api = YtMusic::new_unauthenticated().await.ok()?;
+                    let api = crate::core::net::ytmusic().await.ok()?;
                     let vid = VideoID::from_raw(&video_id);
                     api.get_watch_playlist_from_video_id(vid).await.ok()
                 });
@@ -4026,9 +4016,8 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
                 let raw: Vec<(String, String, String, u32)> = rt.block_on(async {
-                    use ytmapi_rs::YtMusic;
                     use ytmapi_rs::common::{VideoID, ArtistChannelID, YoutubeID};
-                    let api = match YtMusic::new_unauthenticated().await { Ok(a) => a, Err(_) => return vec![] };
+                    let api = match crate::core::net::ytmusic().await { Ok(a) => a, Err(_) => return vec![] };
                     // Resolve the artist's browse id: session metadata, else search by name.
                     let mut artist_id = core::playback::get_song_meta(&vid).map(|m| m.artist_id).unwrap_or_default();
                     if artist_id.is_empty() {
@@ -4166,10 +4155,9 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     .build()
                     .unwrap();
                 let browse_id = rt.block_on(async {
-                    use ytmapi_rs::YtMusic;
                     use ytmapi_rs::query::{SearchQuery, search::ArtistsFilter};
                     use ytmapi_rs::common::YoutubeID;
-                    let api = YtMusic::new_unauthenticated().await.ok()?;
+                    let api = crate::core::net::ytmusic().await.ok()?;
                     let results = api.query(SearchQuery::new(artist).with_filter(ArtistsFilter)).await.ok()?;
                     results.into_iter().next().map(|a| a.browse_id.get_raw().to_string())
                 });
@@ -4197,10 +4185,9 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     .build()
                     .unwrap();
                 let browse_id = rt.block_on(async {
-                    use ytmapi_rs::YtMusic;
                     use ytmapi_rs::query::{SearchQuery, search::AlbumsFilter};
                     use ytmapi_rs::common::YoutubeID;
-                    let api = YtMusic::new_unauthenticated().await.ok()?;
+                    let api = crate::core::net::ytmusic().await.ok()?;
                     let results = api.query(SearchQuery::new(album).with_filter(AlbumsFilter)).await.ok()?;
                     results.into_iter().next().map(|a| a.album_id.get_raw().to_string())
                 });
@@ -4250,10 +4237,9 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     .unwrap();
 
                 let result = rt.block_on(async {
-                    use ytmapi_rs::YtMusic;
                     use ytmapi_rs::common::AlbumID;
 
-                    let api = YtMusic::new_unauthenticated().await.map_err(|e| e.to_string())?;
+                    let api = crate::core::net::ytmusic().await.map_err(|e| e.to_string())?;
                     api.get_album(AlbumID::from_raw(&browse_id)).await.map_err(|e| e.to_string())
                 });
 
@@ -4347,11 +4333,10 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                         .build()
                                         .unwrap();
                                     rt.block_on(async {
-                                        use ytmapi_rs::YtMusic;
                                         use ytmapi_rs::common::ArtistChannelID;
                                         use ytmapi_rs::query::{SearchQuery, search::AlbumsFilter};
 
-                                        let api = match YtMusic::new_unauthenticated().await {
+                                        let api = match crate::core::net::ytmusic().await {
                                             Ok(a) => a,
                                             Err(_) => return,
                                         };
@@ -5242,10 +5227,9 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     .unwrap();
 
                 let result = rt.block_on(async {
-                    use ytmapi_rs::YtMusic;
                     use ytmapi_rs::common::PlaylistID;
 
-                    let api = YtMusic::new_unauthenticated().await.map_err(|e| e.to_string())?;
+                    let api = crate::core::net::ytmusic().await.map_err(|e| e.to_string())?;
                     let id = PlaylistID::from_raw(&playlist_id);
                     let tracks = api.get_playlist_tracks(id).await.map_err(|e| e.to_string())?;
                     Ok::<Vec<ytmapi_rs::parse::PlaylistItem>, String>(tracks)
@@ -5399,10 +5383,9 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                         .build()
                                         .unwrap();
                                     rt2.block_on(async {
-                                        use ytmapi_rs::YtMusic;
                                         use ytmapi_rs::query::{SearchQuery, search::PlaylistsFilter};
 
-                                        let api = match YtMusic::new_unauthenticated().await {
+                                        let api = match crate::core::net::ytmusic().await {
                                             Ok(a) => a,
                                             Err(_) => return,
                                         };
