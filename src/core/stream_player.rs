@@ -48,6 +48,9 @@ struct UrlCacheEntry {
     /// Wall-clock unix seconds when the URL was resolved. Persisted so the cache
     /// survives restarts (an `Instant` can't be meaningfully serialized).
     fetched_at_unix: u64,
+    /// Unix seconds before which the CDN answers 403 for this URL (yt-dlp `available_at`).
+    #[serde(default)]
+    available_at_unix: u64,
 }
 
 static URL_CACHE: OnceLock<Mutex<HashMap<String, UrlCacheEntry>>> = OnceLock::new();
@@ -101,20 +104,34 @@ fn url_cache() -> &'static Mutex<HashMap<String, UrlCacheEntry>> {
 
 /// Returns the cached CDN URL for `video_id` if it was fetched within the TTL.
 pub fn get_cached_url(video_id: &str) -> Option<String> {
+    cached_entry(video_id).map(|entry| entry.url)
+}
+
+fn cached_entry(video_id: &str) -> Option<UrlCacheEntry> {
     let cache = url_cache().lock().ok()?;
     let entry = cache.get(video_id)?;
     if unix_now().saturating_sub(entry.fetched_at_unix) < URL_CACHE_TTL_SECS {
-        Some(entry.url.clone())
+        Some(entry.clone())
     } else {
         None
     }
 }
 
-fn store_cached_url(video_id: &str, url: String) {
+/// YouTube now signs stream URLs that only become valid a few seconds after
+/// extraction; requesting earlier returns HTTP 403. Bounded so a bogus value can't stall playback.
+fn wait_until_available(available_at_unix: u64) {
+    let wait = available_at_unix.saturating_sub(unix_now()).min(15);
+    if wait > 0 {
+        std::thread::sleep(Duration::from_secs(wait + 1));
+    }
+}
+
+fn store_cached_url(video_id: &str, url: String, available_at_unix: u64) {
     if let Ok(mut cache) = url_cache().lock() {
         cache.insert(video_id.to_string(), UrlCacheEntry {
             url,
             fetched_at_unix: unix_now(),
+            available_at_unix,
         });
         save_url_cache(&cache);
     }
@@ -924,9 +941,10 @@ pub fn fetch_content_length(url: &str) -> Option<u64> {
 /// Order: cache → yt-dlp (with optimized flags).
 pub fn get_stream_url(video_id: &str) -> Result<String, String> {
     // Fast path: URL already cached from a recent play
-    if let Some(url) = get_cached_url(video_id) {
+    if let Some(entry) = cached_entry(video_id) {
         eprintln!("[url-cache] hit for {video_id}");
-        return Ok(url);
+        wait_until_available(entry.available_at_unix);
+        return Ok(entry.url);
     }
 
     let ytdlp = resolve_ytdlp();
@@ -955,7 +973,9 @@ pub fn get_stream_url(video_id: &str) -> Result<String, String> {
         let mut cmd = std::process::Command::new(&ytdlp);
         cmd.args([
             "--ignore-config",
-            "-g", "-f", "140/bestaudio[ext=m4a]/bestaudio",
+            "-f", "140/bestaudio[ext=m4a]/bestaudio",
+            "--print", "available_at",
+            "--print", "url",
             "--no-playlist",
             "--force-ipv4",
             "--no-warnings",
@@ -987,15 +1007,21 @@ pub fn get_stream_url(video_id: &str) -> Result<String, String> {
         };
 
         if output.status.success() {
-            let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !url.is_empty() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut lines = stdout.lines().map(str::trim).filter(|line| !line.is_empty());
+            // Prints "NA" when YouTube gives no availability delay.
+            let available_at = lines.next().and_then(|line| line.parse::<u64>().ok()).unwrap_or(0);
+            let url = lines.next().unwrap_or_default().to_string();
+            if url.starts_with("http") {
                 let elapsed = start.elapsed().as_millis();
-                eprintln!("[yt-dlp] resolved {video_id} in {elapsed}ms");
+                let delay = available_at.saturating_sub(unix_now());
+                eprintln!("[yt-dlp] resolved {video_id} in {elapsed}ms (available in {delay}s)");
                 let revoked = cookie_opt.is_some()
                     && COOKIE_CONSENT_GENERATION.load(std::sync::atomic::Ordering::SeqCst) != consent_generation;
                 if !revoked {
-                    store_cached_url(video_id, url.clone());
+                    store_cached_url(video_id, url.clone(), available_at);
                 }
+                wait_until_available(available_at);
                 return Ok(url);
             }
         }
