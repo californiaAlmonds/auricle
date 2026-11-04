@@ -48,6 +48,9 @@ struct UrlCacheEntry {
     /// Wall-clock unix seconds when the URL was resolved. Persisted so the cache
     /// survives restarts (an `Instant` can't be meaningfully serialized).
     fetched_at_unix: u64,
+    /// Unix seconds before which the CDN answers 403 for this URL (yt-dlp `available_at`).
+    #[serde(default)]
+    available_at_unix: u64,
 }
 
 static URL_CACHE: OnceLock<Mutex<HashMap<String, UrlCacheEntry>>> = OnceLock::new();
@@ -101,20 +104,34 @@ fn url_cache() -> &'static Mutex<HashMap<String, UrlCacheEntry>> {
 
 /// Returns the cached CDN URL for `video_id` if it was fetched within the TTL.
 pub fn get_cached_url(video_id: &str) -> Option<String> {
+    cached_entry(video_id).map(|entry| entry.url)
+}
+
+fn cached_entry(video_id: &str) -> Option<UrlCacheEntry> {
     let cache = url_cache().lock().ok()?;
     let entry = cache.get(video_id)?;
     if unix_now().saturating_sub(entry.fetched_at_unix) < URL_CACHE_TTL_SECS {
-        Some(entry.url.clone())
+        Some(entry.clone())
     } else {
         None
     }
 }
 
-fn store_cached_url(video_id: &str, url: String) {
+/// YouTube now signs stream URLs that only become valid a few seconds after
+/// extraction; requesting earlier returns HTTP 403. Bounded so a bogus value can't stall playback.
+fn wait_until_available(available_at_unix: u64) {
+    let wait = available_at_unix.saturating_sub(unix_now()).min(15);
+    if wait > 0 {
+        std::thread::sleep(Duration::from_secs(wait + 1));
+    }
+}
+
+fn store_cached_url(video_id: &str, url: String, available_at_unix: u64) {
     if let Ok(mut cache) = url_cache().lock() {
         cache.insert(video_id.to_string(), UrlCacheEntry {
             url,
             fetched_at_unix: unix_now(),
+            available_at_unix,
         });
         save_url_cache(&cache);
     }
@@ -924,9 +941,10 @@ pub fn fetch_content_length(url: &str) -> Option<u64> {
 /// Order: cache → yt-dlp (with optimized flags).
 pub fn get_stream_url(video_id: &str) -> Result<String, String> {
     // Fast path: URL already cached from a recent play
-    if let Some(url) = get_cached_url(video_id) {
+    if let Some(entry) = cached_entry(video_id) {
         eprintln!("[url-cache] hit for {video_id}");
-        return Ok(url);
+        wait_until_available(entry.available_at_unix);
+        return Ok(entry.url);
     }
 
     let ytdlp = resolve_ytdlp();
@@ -935,27 +953,29 @@ pub fn get_stream_url(video_id: &str) -> Result<String, String> {
     let start = std::time::Instant::now();
     let deadline = start + EXTRACTION_TIMEOUT;
 
-    // Build a list of browsers to try based on whether their cookie DB exists,
-    // only when the user has opted in to browser cookies.
+    // VisionOS URLs need no JS challenge and have no available_at delay (~2s faster
+    // extraction, ~4s less wait); yt-dlp's default clients remain the fallback.
+    // Browser cookies are only tried when the user has opted in.
     let cookies_enabled = browser_cookies_enabled();
     let consent_generation = COOKIE_CONSENT_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
-    let mut browser_attempts: Vec<Option<&str>> = if cookies_enabled {
-        detected_cookie_browsers().into_iter().map(Some).collect()
-    } else {
-        Vec::new()
-    };
-    browser_attempts.push(None); // bare fallback (no cookies)
+    let mut attempts: Vec<(Option<&str>, Option<&str>)> = vec![(Some("visionos"), None)];
+    if cookies_enabled {
+        attempts.extend(detected_cookie_browsers().into_iter().map(|browser| (None, Some(browser))));
+    }
+    attempts.push((None, None)); // bare fallback (no cookies)
 
     let mut last_err = format!("yt-dlp not available at {}", ytdlp.display());
 
-    for &cookie_opt in &browser_attempts {
+    for &(client_opt, cookie_opt) in &attempts {
         if cookie_opt.is_some() && !browser_cookies_enabled() {
             continue; // consent withdrawn mid-extraction
         }
         let mut cmd = std::process::Command::new(&ytdlp);
         cmd.args([
             "--ignore-config",
-            "-g", "-f", "140/bestaudio[ext=m4a]/bestaudio",
+            "-f", "140/bestaudio[ext=m4a]/bestaudio",
+            "--print", "available_at",
+            "--print", "url",
             "--no-playlist",
             "--force-ipv4",
             "--no-warnings",
@@ -966,6 +986,9 @@ pub fn get_stream_url(video_id: &str) -> Result<String, String> {
         // they're not on the system PATH.
         crate::core::addons::set_addon_path_env(&mut cmd);
 
+        if let Some(client) = client_opt {
+            cmd.arg("--extractor-args").arg(format!("youtube:player_client={client}"));
+        }
         if let Some(browser) = cookie_opt {
             cmd.arg("--cookies-from-browser").arg(browser);
         }
@@ -987,15 +1010,17 @@ pub fn get_stream_url(video_id: &str) -> Result<String, String> {
         };
 
         if output.status.success() {
-            let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !url.is_empty() {
+            if let Some((available_at, url)) = parse_extraction_output(&String::from_utf8_lossy(&output.stdout)) {
                 let elapsed = start.elapsed().as_millis();
-                eprintln!("[yt-dlp] resolved {video_id} in {elapsed}ms");
+                let delay = available_at.saturating_sub(unix_now());
+                let client = client_opt.unwrap_or("default");
+                eprintln!("[yt-dlp] resolved {video_id} in {elapsed}ms via {client} client (available in {delay}s)");
                 let revoked = cookie_opt.is_some()
                     && COOKIE_CONSENT_GENERATION.load(std::sync::atomic::Ordering::SeqCst) != consent_generation;
                 if !revoked {
-                    store_cached_url(video_id, url.clone());
+                    store_cached_url(video_id, url.clone(), available_at);
                 }
+                wait_until_available(available_at);
                 return Ok(url);
             }
         }
@@ -1003,6 +1028,10 @@ pub fn get_stream_url(video_id: &str) -> Result<String, String> {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         last_err = format!("yt-dlp -g failed: {stderr}");
 
+        if client_opt.is_some() {
+            eprintln!("[yt-dlp] {video_id}: preferred client failed, falling back to defaults");
+            continue;
+        }
         // Only retry different cookie sources on auth/bot errors
         if !stderr.contains("Sign in") && !stderr.contains("bot") && !stderr.contains("cookies database") {
             break;
@@ -1015,9 +1044,43 @@ pub fn get_stream_url(video_id: &str) -> Result<String, String> {
     Err(last_err)
 }
 
+/// Parses `--print available_at --print url` output into (available_at, url).
+/// yt-dlp prints "NA" for available_at when YouTube imposes no delay.
+fn parse_extraction_output(stdout: &str) -> Option<(u64, String)> {
+    let mut lines = stdout.lines().map(str::trim).filter(|line| !line.is_empty());
+    let available_at = lines.next()?.parse::<u64>().unwrap_or(0);
+    let url = lines.find(|line| line.starts_with("https://"))?;
+    Some((available_at, url.to_string()))
+}
+
 #[cfg(test)]
 mod extraction_tests {
-    use super::{run_extraction_command, EXTRACTION_TIMEOUT};
+    use super::{parse_extraction_output, run_extraction_command, EXTRACTION_TIMEOUT};
+
+    #[test]
+    fn parses_available_at_and_url() {
+        let out = "1793772491\nhttps://rr5---sn.googlevideo.com/videoplayback?x=1\n";
+        assert_eq!(parse_extraction_output(out), Some((1793772491, "https://rr5---sn.googlevideo.com/videoplayback?x=1".to_string())));
+    }
+
+    #[test]
+    fn na_available_at_means_no_delay() {
+        let out = "NA\r\nhttps://example.googlevideo.com/v\r\n";
+        assert_eq!(parse_extraction_output(out), Some((0, "https://example.googlevideo.com/v".to_string())));
+    }
+
+    #[test]
+    fn rejects_empty_or_url_less_output() {
+        assert_eq!(parse_extraction_output(""), None);
+        assert_eq!(parse_extraction_output("1793772491\n"), None);
+        assert_eq!(parse_extraction_output("NA\nnot a url\n"), None);
+    }
+
+    #[test]
+    fn skips_unexpected_extra_lines() {
+        let out = "NA\nsomething else\nhttps://example.googlevideo.com/v\n";
+        assert_eq!(parse_extraction_output(out), Some((0, "https://example.googlevideo.com/v".to_string())));
+    }
     use std::io::Write;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};

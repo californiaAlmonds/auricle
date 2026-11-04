@@ -53,7 +53,7 @@ pub struct SearchClient {
 
 impl SearchClient {
     pub async fn new() -> Result<Self, String> {
-        let api = YtMusic::new_unauthenticated()
+        let api = crate::core::net::ytmusic()
             .await
             .map_err(|error| error.to_string())?;
         Ok(Self {

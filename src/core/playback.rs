@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 
 use rodio::{OutputStream, OutputStreamHandle, Sink};
 use ytmapi_rs::common::YoutubeID;
-use ytmapi_rs::YtMusic;
 use ytmapi_rs::query::{search::SongsFilter, SearchQuery};
 
 use crate::core::stream_player::{get_stream_url, StreamingAudioSource};
@@ -1008,7 +1007,7 @@ impl PlaybackCore {
     }
 
     pub async fn seed_queue_from_backend(&self, query: &str, limit: usize) -> Result<(), String> {
-        let api = YtMusic::new_unauthenticated()
+        let api = crate::core::net::ytmusic()
             .await
             .map_err(|e| format!("Failed to initialize backend music client: {e}"))?;
 
