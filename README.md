@@ -26,9 +26,10 @@ Downloads are also mirrored on [SourceForge](https://sourceforge.net/projects/au
 
 ## Status
 
-Version 0.1.6 is an early Windows release. Browser cookies are now strictly opt-in,
-yt-dlp always verifies TLS certificates, and Auricle keeps a local diagnostic log with a
-**Report a problem** option. No Visual C++ Redistributable is required. Streaming depends on external services
+Version 0.1.7 is an early Windows release. It restores search, artwork and streaming
+after recent YouTube changes, and songs that aren't cached start faster again. Browser
+cookies are strictly opt-in, yt-dlp always verifies TLS certificates, and Auricle keeps a
+local diagnostic log with a **Report a problem** option. No Visual C++ Redistributable is required. Streaming depends on external services
 and optional add-ons, and availability can change. Auricle is not affiliated with
 YouTube or Google. The only supported UI is the native Slint shell.
 
