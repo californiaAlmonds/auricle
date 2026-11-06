@@ -12,3 +12,5 @@ pub mod addons;
 pub mod updater;
 pub mod menu_metadata;
 pub mod release_rank;
+#[cfg(target_os = "windows")]
+pub mod media_controls;
