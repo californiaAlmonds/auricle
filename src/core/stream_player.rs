@@ -859,6 +859,21 @@ fn run_extraction_command(
     result
 }
 
+/// Whether the user has opted in to letting yt-dlp use local browser cookies.
+pub fn browser_cookies_enabled() -> bool {
+    crate::core::persistence::load_settings().use_browser_cookies
+}
+
+/// Bumped whenever cookie consent is withdrawn, so in-flight extractions that
+/// used cookies don't repopulate the stream-link cache afterwards.
+static COOKIE_CONSENT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Called when the user turns browser cookies off.
+pub fn revoke_browser_cookies() {
+    COOKIE_CONSENT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    clear_url_cache();
+}
+
 /// Names of browsers whose cookie database exists on this machine, in priority order.
 /// Shared by the streaming path and the cache download path.
 pub fn detected_cookie_browsers() -> Vec<&'static str> {
@@ -877,10 +892,13 @@ pub fn detected_cookie_browsers() -> Vec<&'static str> {
     out
 }
 
-/// Returns the best-available `--cookies-from-browser` args for yt-dlp,
-/// based on which browser databases actually exist on this machine.
+/// Returns the best-available `--cookies-from-browser` args for yt-dlp, or none
+/// unless the user has opted in to browser cookies in Settings.
 /// Used by both the streaming path and the cache download path.
 pub fn cookie_args() -> Vec<String> {
+    if !browser_cookies_enabled() {
+        return vec![];
+    }
     match detected_cookie_browsers().first() {
         Some(browser) => vec!["--cookies-from-browser".to_string(), browser.to_string()],
         None => vec![],
@@ -937,21 +955,29 @@ pub fn get_stream_url(video_id: &str) -> Result<String, String> {
 
     // VisionOS URLs need no JS challenge and have no available_at delay (~2s faster
     // extraction, ~4s less wait); yt-dlp's default clients remain the fallback.
+    // Browser cookies are only tried when the user has opted in.
+    let cookies_enabled = browser_cookies_enabled();
+    let consent_generation = COOKIE_CONSENT_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
     let mut attempts: Vec<(Option<&str>, Option<&str>)> = vec![(Some("visionos"), None)];
-    attempts.extend(detected_cookie_browsers().into_iter().map(|browser| (None, Some(browser))));
+    if cookies_enabled {
+        attempts.extend(detected_cookie_browsers().into_iter().map(|browser| (None, Some(browser))));
+    }
     attempts.push((None, None)); // bare fallback (no cookies)
 
     let mut last_err = format!("yt-dlp not available at {}", ytdlp.display());
 
     for &(client_opt, cookie_opt) in &attempts {
+        if cookie_opt.is_some() && !browser_cookies_enabled() {
+            continue; // consent withdrawn mid-extraction
+        }
         let mut cmd = std::process::Command::new(&ytdlp);
         cmd.args([
+            "--ignore-config",
             "-f", "140/bestaudio[ext=m4a]/bestaudio",
             "--print", "available_at",
             "--print", "url",
             "--no-playlist",
             "--force-ipv4",
-            "--no-check-certificates",
             "--no-warnings",
             "--extractor-retries", "2",
             "--socket-timeout", "10",
@@ -984,17 +1010,16 @@ pub fn get_stream_url(video_id: &str) -> Result<String, String> {
         };
 
         if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let mut lines = stdout.lines().map(str::trim).filter(|line| !line.is_empty());
-            // Prints "NA" when YouTube gives no availability delay.
-            let available_at = lines.next().and_then(|line| line.parse::<u64>().ok()).unwrap_or(0);
-            let url = lines.next().unwrap_or_default().to_string();
-            if url.starts_with("http") {
+            if let Some((available_at, url)) = parse_extraction_output(&String::from_utf8_lossy(&output.stdout)) {
                 let elapsed = start.elapsed().as_millis();
                 let delay = available_at.saturating_sub(unix_now());
                 let client = client_opt.unwrap_or("default");
                 eprintln!("[yt-dlp] resolved {video_id} in {elapsed}ms via {client} client (available in {delay}s)");
-                store_cached_url(video_id, url.clone(), available_at);
+                let revoked = cookie_opt.is_some()
+                    && COOKIE_CONSENT_GENERATION.load(std::sync::atomic::Ordering::SeqCst) != consent_generation;
+                if !revoked {
+                    store_cached_url(video_id, url.clone(), available_at);
+                }
                 wait_until_available(available_at);
                 return Ok(url);
             }
@@ -1011,14 +1036,51 @@ pub fn get_stream_url(video_id: &str) -> Result<String, String> {
         if !stderr.contains("Sign in") && !stderr.contains("bot") && !stderr.contains("cookies database") {
             break;
         }
+        if !cookies_enabled {
+            eprintln!("[yt-dlp] {video_id}: YouTube asked to sign in; browser cookies are off (Settings > Privacy)");
+        }
     }
 
     Err(last_err)
 }
 
+/// Parses `--print available_at --print url` output into (available_at, url).
+/// yt-dlp prints "NA" for available_at when YouTube imposes no delay.
+fn parse_extraction_output(stdout: &str) -> Option<(u64, String)> {
+    let mut lines = stdout.lines().map(str::trim).filter(|line| !line.is_empty());
+    let available_at = lines.next()?.parse::<u64>().unwrap_or(0);
+    let url = lines.find(|line| line.starts_with("https://"))?;
+    Some((available_at, url.to_string()))
+}
+
 #[cfg(test)]
 mod extraction_tests {
-    use super::{run_extraction_command, EXTRACTION_TIMEOUT};
+    use super::{parse_extraction_output, run_extraction_command, EXTRACTION_TIMEOUT};
+
+    #[test]
+    fn parses_available_at_and_url() {
+        let out = "1793772491\nhttps://rr5---sn.googlevideo.com/videoplayback?x=1\n";
+        assert_eq!(parse_extraction_output(out), Some((1793772491, "https://rr5---sn.googlevideo.com/videoplayback?x=1".to_string())));
+    }
+
+    #[test]
+    fn na_available_at_means_no_delay() {
+        let out = "NA\r\nhttps://example.googlevideo.com/v\r\n";
+        assert_eq!(parse_extraction_output(out), Some((0, "https://example.googlevideo.com/v".to_string())));
+    }
+
+    #[test]
+    fn rejects_empty_or_url_less_output() {
+        assert_eq!(parse_extraction_output(""), None);
+        assert_eq!(parse_extraction_output("1793772491\n"), None);
+        assert_eq!(parse_extraction_output("NA\nnot a url\n"), None);
+    }
+
+    #[test]
+    fn skips_unexpected_extra_lines() {
+        let out = "NA\nsomething else\nhttps://example.googlevideo.com/v\n";
+        assert_eq!(parse_extraction_output(out), Some((0, "https://example.googlevideo.com/v".to_string())));
+    }
     use std::io::Write;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};

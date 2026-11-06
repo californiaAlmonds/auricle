@@ -2094,6 +2094,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     // Unify storage: fold any legacy `ytm-native` data into `auricle` before
     // anything reads settings or user data.
     core::persistence::migrate_legacy_dir();
+    log::info!("[startup] data folder ready");
 
     // Keep yt-dlp current in the background. A stale yt-dlp still resolves a CDN
     // URL but that URL gets 403'd past the first ~1 MiB, which shows up as every
@@ -2105,9 +2106,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     purge_oversized_thumb_cache();
 
     let playback = core::bridge::playback_core();
+    log::info!("[startup] playback core ready");
 
     if let Err(err) = playback.enable_audio_output() {
         log::error!("Failed to enable native audio output: {err}");
+    } else {
+        log::info!("[startup] audio output ready");
     }
 
     // Seed queue in background thread, update UI when done
@@ -2116,7 +2120,9 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         let _ = ui_handle_seed; // will be set after ui creation
     }
 
+    log::info!("[startup] creating main window");
     let ui = NativeShellWindow::new()?;
+    log::info!("[startup] main window created");
 
     // Apply Appearance before the window is shown so startup never flashes the
     // default palette. Unknown/legacy values normalize safely.
@@ -3155,6 +3161,20 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             core::persistence::save_settings(&settings);
         });
     }
+    // ── Privacy & diagnostics settings ───────────────────────────────────────
+    ui.set_use_browser_cookies(core::persistence::load_settings().use_browser_cookies);
+    ui.on_set_browser_cookies(move |enabled| {
+        let mut settings = core::persistence::load_settings();
+        settings.use_browser_cookies = enabled;
+        core::persistence::save_settings(&settings);
+        if !enabled {
+            // Stream links resolved with cookies are dropped along with the consent.
+            core::stream_player::revoke_browser_cookies();
+        }
+        log::info!("[privacy] browser cookies {}", if enabled { "enabled by user" } else { "disabled by user" });
+    });
+    ui.on_open_log_folder(core::diagnostics::open_log_folder);
+    ui.on_report_problem(|| core::diagnostics::open_report(""));
     // ── Appearance settings ──────────────────────────────────────────────────
     {
         let ui_weak = ui.as_weak();
@@ -5699,8 +5719,48 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         slint::CloseRequestResponse::HideWindow
     });
 
+    // Confirm the window actually appeared; only warn if it never does, so later
+    // hiding to the tray is not mistaken for a startup failure.
+    let startup_check = slint::Timer::default();
+    {
+        let ui_weak = ui.as_weak();
+        let ticks = std::cell::Cell::new(0u32);
+        let done = std::cell::Cell::new(false);
+        startup_check.start(slint::TimerMode::Repeated, std::time::Duration::from_secs(1), move || {
+            if done.get() {
+                return;
+            }
+            let Some(ui) = ui_weak.upgrade() else { return };
+            ticks.set(ticks.get() + 1);
+            if core::diagnostics::window_visible() {
+                done.set(true);
+                core::diagnostics::log_window_state(ui.window());
+            } else if ticks.get() >= 10 {
+                done.set(true);
+                core::diagnostics::window_never_shown(ui.window());
+            }
+        });
+    }
+    log::info!("[startup] entering event loop");
     let result = ui.run();
+    log::info!("[startup] event loop ended: {result:?}");
     // Remove the tray icon, then exit without waiting on background work or destructors.
     drop(_tray_icon);
-    std::process::exit(if result.is_ok() { 0 } else { 1 });
+    if result.is_ok() {
+        std::process::exit(0);
+    }
+    result
+}
+
+/// Entry point for the executables: CLI flags, local diagnostics, then the UI.
+pub fn launch() {
+    if core::diagnostics::handle_cli_args() {
+        return;
+    }
+    core::diagnostics::init();
+    if let Err(err) = run_native_shell() {
+        log::error!("[startup] UI failed: {err}");
+        core::diagnostics::show_error_dialog(&format!("Auricle couldn't open its window: {err}"));
+        std::process::exit(1);
+    }
 }

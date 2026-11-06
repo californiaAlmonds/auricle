@@ -83,6 +83,9 @@ pub struct AppSettings {
     /// Set once the one-time sweep of oversized cached thumbnails has run.
     #[serde(default)]
     pub thumb_cache_purged: bool,
+    /// Explicit user opt-in for yt-dlp to use YouTube cookies from a local browser.
+    #[serde(default)]
+    pub use_browser_cookies: bool,
 }
 
 fn default_prefetch_depth() -> u32 { 1 }
@@ -100,6 +103,7 @@ impl Default for AppSettings {
             theme_mode: default_theme_mode(),
             last_ytdlp_update_check: 0,
             thumb_cache_purged: false,
+            use_browser_cookies: false,
         }
     }
 }

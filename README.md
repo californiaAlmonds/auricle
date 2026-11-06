@@ -7,7 +7,7 @@ audio cache. The app runs in a native shell with no Electron or embedded web vie
 
 [![Download auricle](https://a.fsdn.com/con/app/sf-download-button)](https://sourceforge.net/projects/auricle/files/latest/download)
 
-![Auricle 0.1.4 on Windows](docs/screenshot.png)
+![Auricle on Windows](docs/screenshot.png)
 
 ## Features
 
@@ -26,24 +26,53 @@ Downloads are also mirrored on [SourceForge](https://sourceforge.net/projects/au
 
 ## Status
 
-Version 0.1.4 is an early Windows release. Streaming depends on external services
+Version 0.1.7 is an early Windows release. It restores search, artwork and streaming
+after recent YouTube changes, and songs that aren't cached start faster again. Browser
+cookies are strictly opt-in, yt-dlp always verifies TLS certificates, and Auricle keeps a
+local diagnostic log with a **Report a problem** option. No Visual C++ Redistributable is required. Streaming depends on external services
 and optional add-ons, and availability can change. Auricle is not affiliated with
 YouTube or Google. The only supported UI is the native Slint shell.
 
-## Essential add-ons (yt-dlp & ffmpeg)
+## Essential add-ons (yt-dlp, ffmpeg & Deno)
 
 Auricle does **not** bundle or redistribute third-party media tools. Audio
-extraction relies on [`yt-dlp`](https://github.com/yt-dlp/yt-dlp), and some cache
-operations use [`ffmpeg`](https://ffmpeg.org/). On first run, Auricle offers an
-optional **"Install essential add-ons"** step that can download these tools into a
-per-user application directory.
+extraction relies on [`yt-dlp`](https://github.com/yt-dlp/yt-dlp), some cache
+operations use [`ffmpeg`](https://ffmpeg.org/), and yt-dlp can use
+[`Deno`](https://deno.com/) as a JavaScript runtime for YouTube. On first run, Auricle
+offers an optional **"Install essential add-ons"** step that can download these tools
+from their official GitHub releases into `%LOCALAPPDATA%\auricle\bin`.
 
 Installing them is entirely at your own discretion and choice. You may also install
 them yourself and make them available on your `PATH`. Auricle will detect existing
 installations and skip them.
 
+Once yt-dlp is installed, Auricle keeps it current automatically: it runs
+`yt-dlp -U` in the background at most once a week (falling back to downloading the
+latest release), and once per session if playback starts failing because yt-dlp is out
+of date.
+
+By default Auricle never uses your browser cookies. If YouTube asks you to sign in to
+confirm you're not a bot, you can turn on **Use browser cookies for YouTube** in
+Settings > Privacy & diagnostics. After you accept the explanation, yt-dlp may read your
+YouTube cookies from Edge, Chrome or Firefox and send them only to YouTube; you can turn
+it off again at any time.
+
 These tools are licensed by their respective authors; Auricle is not affiliated with
 them and does not distribute them.
+
+## Privacy
+
+Auricle has no accounts, telemetry, analytics or automatic crash reporting, and keeps your
+library, history and logs on your PC. See the [privacy policy](https://californiaalmonds.github.io/auricle/privacy.html)
+for what is stored locally and what is sent to YouTube, Google and GitHub.
+
+## Troubleshooting
+
+Auricle writes a diagnostic log to `%LOCALAPPDATA%\auricle\logs\auricle.log`. If it
+can't start, it shows an error with an option to report it. You can also use
+**Settings > Privacy & diagnostics > Report a problem**, which opens a prefilled GitHub
+issue for you to review and submit, plus the log folder so you can attach the log.
+`auricle.exe --version` and `auricle.exe --help` print to the console and exit.
 
 ## Prerequisites
 
