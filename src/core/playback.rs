@@ -109,6 +109,8 @@ struct AudioEngine {
     /// Duration (secs) of the loaded source, published so the polling loop can
     /// backfill songs whose metadata omitted a duration.
     duration_out: Arc<AtomicU32>,
+    source_duration_secs: Option<f64>,
+    stream_eof_clean: Option<Arc<crate::core::stream_player::StreamEofTracker>>,
 }
 
 enum AudioCommand {
@@ -162,6 +164,7 @@ pub struct PlaybackCore {
     autoplay_refilling: AtomicBool,
     autoplay_generation: AtomicU64,
     pub(crate) autoplay_refill_empty: AtomicBool,
+    track_ended_awaiting_autoplay: AtomicBool,
 }
 
 fn log_native_audio_error(stage: &str, code: &str, video_id: &str, detail: &str) {
@@ -209,6 +212,8 @@ fn create_audio_engine(duration_out: Arc<AtomicU32>) -> Result<AudioEngine, Stri
         stream_content_len: None,
         volume: 1.0,
         duration_out,
+        source_duration_secs: None,
+        stream_eof_clean: None,
     })
 }
 
@@ -224,6 +229,8 @@ fn reopen_output_device(engine: &mut AudioEngine) -> Result<(), String> {
     let old_stream = std::mem::replace(&mut engine._stream, new_stream);
     drop(old_stream);
     engine.device_name = default_output_device_name();
+    engine.source_duration_secs = None;
+    engine.stream_eof_clean = None;
     Ok(())
 }
 
@@ -270,7 +277,7 @@ fn spawn_stream_fetch(events: mpsc::Sender<AudioEvent>, request_id: u64, video_i
     });
 }
 
-fn load_stream_into_engine(engine: &mut AudioEngine, video_id: &str, url: &str, fallback_content_len: Option<u64>, seek_secs: Option<f64>, tee_meta: Option<(&str, &str)>) -> Result<(), String> {
+fn load_stream_into_engine(engine: &mut AudioEngine, video_id: &str, url: &str, fallback_content_len: Option<u64>, seek_secs: Option<f64>, tee_meta: Option<(&str, &str)>, clamp_seek_to_end: bool) -> Result<(), String> {
     // Write-through-cache only a fresh full load (no seek). A seek starts mid-file
     // and would produce a non-contiguous cache file, so stream without teeing then.
     let decode_started = Instant::now();
@@ -284,10 +291,23 @@ fn load_stream_into_engine(engine: &mut AudioEngine, video_id: &str, url: &str, 
         e
     })?;
 
+    let exact_dur = source.duration_secs_f64();
+    let eof_clean = source.stream_eof_clean_handle();
+
     // Pre-seek on the raw source (HTTP range request) BEFORE appending — the same
     // reliable path cached files use, which sidesteps rodio's sink.try_seek chain.
     if let Some(secs) = seek_secs.filter(|&s| s > 0.5) {
-        source.seek_to(secs)?;
+        let target = if clamp_seek_to_end {
+            if let Some(d) = exact_dur.filter(|&d| d > 0.5) { secs.min((d - 0.35).max(0.0)) } else { secs }
+        } else {
+            if let Some(d) = exact_dur.filter(|&d| d > 0.0) {
+                if secs >= d - 1.5 { return Err(format!("stream seek target {secs:.1}s is at or past track end ({d:.1}s)")); }
+            }
+            secs
+        };
+        if target > 0.5 {
+            source.seek_to(target)?;
+        }
     }
 
     // Use content_len from the stream response, fall back to the HEAD-fetched value.
@@ -311,22 +331,54 @@ fn load_stream_into_engine(engine: &mut AudioEngine, video_id: &str, url: &str, 
     engine.current_is_cached = false;
     engine.stream_url = Some(url.to_string());
     engine.stream_content_len = content_len;
+    engine.source_duration_secs = exact_dur;
+    engine.stream_eof_clean = eof_clean;
     Ok(())
+}
+
+fn open_seeked_file_source(
+    path: &std::path::Path,
+    seek_secs: Option<f64>,
+    clamp_seek_to_end: bool,
+) -> Result<(StreamingAudioSource, Option<f64>), String> {
+    let mut source = StreamingAudioSource::from_file(path)
+        .map_err(|e| format!("Cache file decode error: {e}"))?;
+
+    let exact_dur = source.duration_secs_f64();
+    if let Some(secs) = seek_secs.filter(|&s| s > 0.1) {
+        if clamp_seek_to_end {
+            let target = if let Some(d) = exact_dur.filter(|&d| d > 0.5) {
+                secs.min((d - 0.35).max(0.0))
+            } else {
+                secs
+            };
+            if target > 0.1 {
+                source
+                    .seek_to(target)
+                    .map_err(|e| format!("Cache file seek_to({target:.1}s) failed: {e}"))?;
+            }
+        } else {
+            if let Some(d) = exact_dur.filter(|&d| d > 0.0) {
+                if secs >= d - 1.5 {
+                    return Err(format!(
+                        "resume target {secs:.1}s is at or past cached track end ({d:.1}s)"
+                    ));
+                }
+            }
+            source
+                .seek_to(secs)
+                .map_err(|e| format!("Cache file seek_to({secs:.1}s) failed: {e}"))?;
+        }
+    }
+
+    Ok((source, exact_dur))
 }
 
 /// Load a cached file into the engine, optionally pre-seeking to `seek_secs`.
 /// Seeking happens on the source BEFORE appending to the sink — avoids
 /// relying on sink.try_seek() which doesn't forward cleanly through rodio's pipeline.
-fn load_file_into_engine(engine: &mut AudioEngine, video_id: &str, path: &std::path::Path, seek_secs: Option<f64>) -> Result<(), String> {
-    let mut source = StreamingAudioSource::from_file(path)
-        .map_err(|e| format!("Cache file decode error: {e}"))?;
-
-    if let Some(secs) = seek_secs.filter(|&s| s > 0.1) {
-        if let Err(e) = source.seek_to(secs) {
-            eprintln!("[file-seek] seek_to({secs:.1}s) failed: {e}");
-            // Non-fatal: play from beginning rather than crash
-        }
-    }
+fn load_file_into_engine(engine: &mut AudioEngine, video_id: &str, path: &std::path::Path, seek_secs: Option<f64>, clamp_seek_to_end: bool) -> Result<(), String> {
+    let (source, exact_dur) = open_seeked_file_source(path, seek_secs, clamp_seek_to_end)?;
 
     let replacement_sink = Sink::try_new(&engine.handle)
         .map_err(|e| format!("Failed to replace sink: {e}"))?;
@@ -340,6 +392,8 @@ fn load_file_into_engine(engine: &mut AudioEngine, video_id: &str, path: &std::p
     engine.current_is_cached = true;
     engine.stream_url = None;
     engine.stream_content_len = None;
+    engine.source_duration_secs = exact_dur;
+    engine.stream_eof_clean = None;
     Ok(())
 }
 
@@ -436,7 +490,7 @@ fn spawn_audio_worker(
                             }
 
                             engine.sink.stop();
-                            engine.current_video_id = None;
+                            engine.current_video_id = None; engine.source_duration_secs = None; engine.stream_eof_clean = None;
                             pending_seek = None;
 
                             if is_playing {
@@ -452,13 +506,19 @@ fn spawn_audio_worker(
                             is_playing = playing;
                             if !playing {
                                 // Freeze elapsed tracking
-                                if let Some(started) = playback_started_at.take() {
-                                    playback_base_secs += started.elapsed().as_secs_f64();
+                                if !audio_loading_flag.load(Ordering::Relaxed) {
+                                    if let Some(started) = playback_started_at.take() {
+                                        playback_base_secs += started.elapsed().as_secs_f64();
+                                    }
+                                } else {
+                                    playback_started_at = None;
                                 }
                                 engine.sink.pause();
                                 continue;
                             } else {
-                                playback_started_at = Some(std::time::Instant::now());
+                                if playback_started_at.is_none() && !audio_loading_flag.load(Ordering::Relaxed) && engine.current_video_id.is_some() {
+                                    playback_started_at = Some(std::time::Instant::now());
+                                }
                             }
                             if let Some(ref video_id) = requested_video.clone() {
                                 if engine.current_video_id.as_deref() == Some(video_id) {
@@ -473,7 +533,7 @@ fn spawn_audio_worker(
                                     audio_just_started_flag.store(false, Ordering::Relaxed);
                                 } else {
                                     engine.sink.stop();
-                                    engine.current_video_id = None;
+                                    engine.current_video_id = None; engine.source_duration_secs = None; engine.stream_eof_clean = None;
                                     audio_loading_flag.store(true, Ordering::Relaxed);
                                     audio_just_started_flag.store(false, Ordering::Relaxed);
                                     stream_retries = 0;
@@ -496,7 +556,7 @@ fn spawn_audio_worker(
                             // If user sought while streaming, honour that exact target.
                             // Otherwise use elapsed_secs (real playback position).
                             let seek_target = pending_seek.take().unwrap_or(elapsed_secs);
-                            match load_file_into_engine(&mut engine, &vid, &path, Some(seek_target)) {
+                            match load_file_into_engine(&mut engine, &vid, &path, Some(seek_target), false) {
                                 Ok(()) => {
                                     is_cached_flag.store(true, Ordering::Relaxed);
                                     if !is_playing { engine.sink.pause(); }
@@ -517,10 +577,10 @@ fn spawn_audio_worker(
                             let cached_path = AudioCache::global().lock().ok()
                                 .and_then(|mut c| c.get(&video_id));
                             if let Some(path) = cached_path {
-                                match load_file_into_engine(&mut engine, &video_id, &path, Some(secs)) {
+                                match load_file_into_engine(&mut engine, &video_id, &path, Some(secs), true) {
                                     Ok(()) => {
                                         is_cached_flag.store(true, Ordering::Relaxed);
-                                        playback_base_secs = secs;
+                                        playback_base_secs = secs.min(engine.source_duration_secs.unwrap_or(secs));
                                         playback_started_at = if is_playing { Some(std::time::Instant::now()) } else { None };
                                         if !is_playing { engine.sink.pause(); }
                                     }
@@ -533,10 +593,10 @@ fn spawn_audio_worker(
                                     let path2 = AudioCache::global().lock().ok()
                                         .and_then(|mut c| c.get(&cached_vid));
                                     if let Some(path) = path2 {
-                                        match load_file_into_engine(&mut engine, &cached_vid, &path, Some(secs)) {
+                                        match load_file_into_engine(&mut engine, &cached_vid, &path, Some(secs), true) {
                                             Ok(()) => {
-                                                playback_base_secs = secs;
-                                                playback_started_at = if is_playing { Some(std::time::Instant::now()) } else { None };
+                                                playback_base_secs = secs.min(engine.source_duration_secs.unwrap_or(secs));
+                                        playback_started_at = if is_playing { Some(std::time::Instant::now()) } else { None };
                                                 if !is_playing { engine.sink.pause(); }
                                             }
                                             Err(e) => eprintln!("[seek-cached] reload+seek failed: {e}"),
@@ -554,14 +614,14 @@ fn spawn_audio_worker(
                                 let in_place = engine.sink.try_seek(Duration::from_secs_f64(secs.max(0.0)));
                                 if in_place.is_ok() {
                                     eprintln!("[seek] stream in-place seek → {secs:.1}s");
-                                    playback_base_secs = secs;
-                                    playback_started_at = if is_playing { Some(std::time::Instant::now()) } else { None };
+                                    playback_base_secs = secs.min(engine.source_duration_secs.unwrap_or(secs));
+                                        playback_started_at = if is_playing { Some(std::time::Instant::now()) } else { None };
                                 } else if let Some(url) = url {
-                                    match load_stream_into_engine(&mut engine, &video_id, &url, clen, Some(secs), None) {
+                                    match load_stream_into_engine(&mut engine, &video_id, &url, clen, Some(secs), None, true) {
                                         Ok(()) => {
                                             eprintln!("[seek] stream reloaded at {secs:.1}s");
-                                            playback_base_secs = secs;
-                                            playback_started_at = if is_playing { Some(std::time::Instant::now()) } else { None };
+                                            playback_base_secs = secs.min(engine.source_duration_secs.unwrap_or(secs));
+                                        playback_started_at = if is_playing { Some(std::time::Instant::now()) } else { None };
                                             if !is_playing { engine.sink.pause(); }
                                         }
                                         Err(e) => {
@@ -588,7 +648,7 @@ fn spawn_audio_worker(
                             }
                             match result {
                                 Ok(AudioSource::Stream(url, content_len)) => {
-                                    if let Err(err) = load_stream_into_engine(&mut engine, &video_id, &url, content_len, None, Some((&requested_title, &requested_artist))) {
+                                    if let Err(err) = load_stream_into_engine(&mut engine, &video_id, &url, content_len, None, Some((&requested_title, &requested_artist)), false) {
                                         // Most common cause: expired/unauthorized signed CDN
                                         // URL (HTTP 401/403) from a prefetched radio track.
                                         if stream_retries < MAX_STREAM_RETRIES {
@@ -609,11 +669,14 @@ fn spawn_audio_worker(
                                                 crate::core::addons::force_ytdlp_update_once();
                                             }
                                             audio_loading_flag.store(false, Ordering::Relaxed);
-                                            engine.current_video_id = None;
+                                            engine.current_video_id = None; engine.source_duration_secs = None; engine.stream_eof_clean = None;
                                             stream_retries = 0;
                                             advance_pending.store(true, Ordering::Relaxed);
                                         }
                                     } else {
+                                        if let Some(d) = engine.source_duration_secs.filter(|&d| d > 0.0) {
+                                            current_duration_secs = d;
+                                        }
                                         is_cached_flag.store(false, Ordering::Relaxed);
                                         audio_loading_flag.store(false, Ordering::Relaxed);
                                         audio_just_started_flag.store(true, Ordering::Relaxed);
@@ -624,13 +687,14 @@ fn spawn_audio_worker(
                                     }
                                 }
                                 Ok(AudioSource::CachedFile(path)) => {
-                                    if let Err(err) = load_file_into_engine(&mut engine, &video_id, &path, None) {
+                                    if let Err(err) = load_file_into_engine(&mut engine, &video_id, &path, None, false) {
                                         log_native_audio_error("playback", "cache-load-failed", &video_id, &err);
                                         // Fall back to streaming (fresh stream attempt)
                                         stream_retries = 0;
                                         latest_request_id = latest_request_id.saturating_add(1);
                                         spawn_stream_fetch(event_sender.clone(), latest_request_id, video_id, false);
                                     } else {
+                                        if let Some(d) = engine.source_duration_secs.filter(|&d| d > 0.0) { current_duration_secs = d; }
                                         is_cached_flag.store(true, Ordering::Relaxed);
                                         audio_loading_flag.store(false, Ordering::Relaxed);
                                         audio_just_started_flag.store(true, Ordering::Relaxed);
@@ -652,7 +716,7 @@ fn spawn_audio_worker(
                                         // Give up — unfreeze the UI and skip to the next track.
                                         log_native_audio_error("extract", "stream-url-giveup", &video_id, &err);
                                         audio_loading_flag.store(false, Ordering::Relaxed);
-                                        engine.current_video_id = None;
+                                        engine.current_video_id = None; engine.source_duration_secs = None; engine.stream_eof_clean = None;
                                         stream_retries = 0;
                                         advance_pending.store(true, Ordering::Relaxed);
                                     }
@@ -680,40 +744,35 @@ fn spawn_audio_worker(
                         log::info!("{message}");
                         eprintln!("{message}");
 
+                        let clean_stream_eof = engine.stream_eof_clean.as_ref().is_some_and(|f| f.is_clean_eof());
+                        let effective_dur = engine.source_duration_secs.filter(|&d| d > 0.0).unwrap_or(current_duration_secs);
+                        let elapsed = playback_base_secs
+                            + if is_playing {
+                                playback_started_at.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0)
+                            } else {
+                                0.0
+                            };
+                        let near_end = clean_stream_eof || (effective_dur > 0.0 && elapsed >= effective_dur - 2.0);
+
                         match reopen_output_device(&mut engine) {
                             Ok(()) => {
                                 if engine.device_name.is_none() {
                                     engine.device_name = current_device;
                                 }
                                 if let Some(vid) = engine.current_video_id.clone() {
-                                    let elapsed = playback_base_secs
-                                        + if is_playing {
-                                            playback_started_at.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0)
-                                        } else {
-                                            0.0
-                                        };
-                                    let near_end = current_duration_secs > 0.0
-                                        && elapsed >= current_duration_secs - 2.0;
                                     let reload_result = if near_end {
                                         // Reloading past the end would fail and restart the song; just advance.
-                                        engine.current_video_id = None;
+                                        engine.current_video_id = None; engine.source_duration_secs = None; engine.stream_eof_clean = None;
                                         if is_playing { advance_pending.store(true, Ordering::Relaxed); }
                                         Ok(())
                                     } else if engine.current_is_cached {
                                         match AudioCache::global().lock().ok().and_then(|mut c| c.get(&vid)) {
-                                            Some(path) => load_file_into_engine(&mut engine, &vid, &path, Some(elapsed)),
+                                            Some(path) => load_file_into_engine(&mut engine, &vid, &path, Some(elapsed), false),
                                             None => Err("Cached file not found in AudioCache".to_string()),
                                         }
                                     } else if let Some(url) = engine.stream_url.clone() {
                                         let clen = engine.stream_content_len;
-                                        load_stream_into_engine(
-                                            &mut engine,
-                                            &vid,
-                                            &url,
-                                            clen,
-                                            Some(elapsed),
-                                            None,
-                                        )
+                                        load_stream_into_engine(&mut engine, &vid, &url, clen, Some(elapsed), None, false)
                                     } else {
                                         Err("No stream URL or cached file available for reload".to_string())
                                     };
@@ -729,7 +788,7 @@ fn spawn_audio_worker(
                                         }
                                         Err(err) => {
                                             log_native_audio_error("device", "device-reload-failed", &vid, &err);
-                                            engine.current_video_id = None;
+                                            engine.current_video_id = None; engine.source_duration_secs = None; engine.stream_eof_clean = None;
                                             sink_empty_count = 0;
                                             if is_playing {
                                                 if let Some(ref req_vid) = requested_video {
@@ -774,31 +833,27 @@ fn spawn_audio_worker(
 
                     // At ~400ms of empty sink on a streaming track, try cache fallback
                     // before declaring the song finished.
-                    if sink_empty_count == 5 && !engine.current_is_cached {
-                        let elapsed = playback_base_secs
-                            + playback_started_at.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
-                        // Only recover genuine mid-song stalls. If the stream simply
-                        // reached its natural end, skip the cache load (it would seek
-                        // past the end and could restart the track) and let the
-                        // advance debounce fire.
-                        let near_end = current_duration_secs > 0.0
-                            && elapsed >= current_duration_secs - 5.0;
-                        if !near_end {
-                            if let Some(ref vid) = engine.current_video_id.clone() {
-                                let cached_path = crate::core::cache::AudioCache::global().lock().ok()
-                                    .and_then(|mut c| c.get(vid));
-                                if let Some(path) = cached_path {
-                                    match load_file_into_engine(&mut engine, vid, &path, Some(elapsed)) {
-                                        Ok(()) => {
-                                            is_cached_flag.store(true, Ordering::Relaxed);
-                                            sink_empty_count = 0;
-                                            playback_base_secs = elapsed;
-                                            playback_started_at = Some(std::time::Instant::now());
-                                            eprintln!("[cache-fallback] {vid} → resumed from cache at {elapsed:.1}s");
-                                        }
-                                        Err(e) => {
-                                            eprintln!("[cache-fallback] {vid} failed: {e}");
-                                        }
+                    let clean_stream_eof = engine.stream_eof_clean.as_ref().is_some_and(|f| f.is_clean_eof());
+                    let effective_dur = engine.source_duration_secs.filter(|&d| d > 0.0).unwrap_or(current_duration_secs);
+                    let elapsed = playback_base_secs + playback_started_at.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
+                    let near_end = clean_stream_eof || (effective_dur > 0.0 && elapsed >= effective_dur - 5.0);
+
+                    if sink_empty_count == 5 && !engine.current_is_cached && !near_end {
+                        if let Some(ref vid) = engine.current_video_id.clone() {
+                            let cached_path = crate::core::cache::AudioCache::global().lock().ok()
+                                .and_then(|mut c| c.get(vid));
+                            if let Some(path) = cached_path {
+                                match load_file_into_engine(&mut engine, vid, &path, Some(elapsed), false) {
+                                    Ok(()) => {
+                                        if let Some(d) = engine.source_duration_secs.filter(|&d| d > 0.0) { current_duration_secs = d; }
+                                        is_cached_flag.store(true, Ordering::Relaxed);
+                                        sink_empty_count = 0;
+                                        playback_base_secs = elapsed;
+                                        playback_started_at = Some(std::time::Instant::now());
+                                        eprintln!("[cache-fallback] {vid} → resumed from cache at {elapsed:.1}s");
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[cache-fallback] {vid} failed: {e}");
                                     }
                                 }
                             }
@@ -806,7 +861,7 @@ fn spawn_audio_worker(
                     }
 
                     if sink_empty_count >= 15 {
-                        engine.current_video_id = None;
+                        engine.current_video_id = None; engine.source_duration_secs = None; engine.stream_eof_clean = None;
                         advance_pending.store(true, Ordering::Relaxed);
                         sink_empty_count = 0;
                     }
@@ -880,6 +935,7 @@ impl PlaybackCore {
             autoplay_refilling: AtomicBool::new(false),
             autoplay_generation: AtomicU64::new(0),
             autoplay_refill_empty: AtomicBool::new(false),
+            track_ended_awaiting_autoplay: AtomicBool::new(false),
         }
     }
 
@@ -937,6 +993,7 @@ impl PlaybackCore {
     }
 
     pub fn toggle_play_pause(&self) -> bool {
+        self.track_ended_awaiting_autoplay.store(false, Ordering::Relaxed);
         let is_playing = {
             let mut state = self.state.lock().unwrap();
             let now = std::time::Instant::now();
@@ -960,6 +1017,7 @@ impl PlaybackCore {
     }
 
     pub fn set_playing(&self, is_playing: bool) {
+        self.track_ended_awaiting_autoplay.store(false, Ordering::Relaxed);
         {
             let mut state = self.state.lock().unwrap();
             let now = std::time::Instant::now();
@@ -998,6 +1056,7 @@ impl PlaybackCore {
         duration_secs: u32,
     ) {
         let mut state = self.state.lock().unwrap();
+        self.track_ended_awaiting_autoplay.store(false, Ordering::Relaxed);
 
         // Save previous track BEFORE overwriting
         let prev = state.now_playing.clone();
@@ -1046,6 +1105,7 @@ impl PlaybackCore {
     }
 
     pub fn prev_track(&self) {
+        self.track_ended_awaiting_autoplay.store(false, Ordering::Relaxed);
         // Standard player behavior: if we're more than 3s into the track,
         // restart it rather than jumping to the previous song.
         if self.elapsed_secs() > 3.0 {
@@ -1098,6 +1158,7 @@ impl PlaybackCore {
     }
 
     pub fn next_track(&self) {
+        self.track_ended_awaiting_autoplay.store(false, Ordering::Relaxed);
         let mut state = self.state.lock().unwrap();
         if state.queue.is_empty() { return; }
         if state.queue_index + 1 >= state.queue.len() {
@@ -1185,6 +1246,7 @@ impl PlaybackCore {
     }
 
     pub fn set_queue(&self, songs: Vec<NowPlaying>) {
+        self.track_ended_awaiting_autoplay.store(false, Ordering::Relaxed);
         if songs.is_empty() { return; }
         let mut state = self.state.lock().unwrap();
         state.queue = songs;
@@ -1222,11 +1284,13 @@ impl PlaybackCore {
         }
         let state = self.state.lock().unwrap();
         let base = state.paused_elapsed.as_secs_f64();
-        if let Some(started) = state.track_started_at {
+        let raw = if let Some(started) = state.track_started_at {
             base + started.elapsed().as_secs_f64()
         } else {
             base
-        }
+        };
+        let dur = state.now_playing.duration_secs as f64;
+        if dur > 0.0 { raw.min(dur) } else { raw }
     }
 
     pub fn track_duration_secs(&self) -> u32 {
@@ -1270,11 +1334,13 @@ impl PlaybackCore {
         // Timer elapsed already reflects any user seeks (seek_to_secs updates it).
         let elapsed_secs = {
             let base = state.paused_elapsed.as_secs_f64();
-            if let Some(started) = state.track_started_at {
+            let raw = if let Some(started) = state.track_started_at {
                 base + started.elapsed().as_secs_f64()
             } else {
                 base
-            }
+            };
+            let dur = state.now_playing.duration_secs as f64;
+            if dur > 0.0 { raw.min(dur) } else { raw }
         };
         if let Some(ref worker) = state.audio_worker {
             let _ = worker.sender.send(AudioCommand::UpgradeToCache { path, elapsed_secs });
@@ -1289,6 +1355,51 @@ impl PlaybackCore {
     }
 
     /// Returns true (and clears the flag) if the audio worker detected a track completion.
+    pub fn advance_after_track_end(&self) {
+        let mut state = self.state.lock().unwrap();
+        if state.queue.is_empty() {
+            drop(state);
+            self.stop_at_queue_end();
+            return;
+        }
+        if state.queue_index + 1 >= state.queue.len() {
+            if state.now_playing.duration_secs > 0 {
+                state.paused_elapsed = Duration::from_secs(state.now_playing.duration_secs as u64);
+            } else if let Some(started) = state.track_started_at {
+                state.paused_elapsed += started.elapsed();
+            }
+            state.track_started_at = None;
+            self.track_ended_awaiting_autoplay.store(true, Ordering::Relaxed);
+            self.autoplay_needed.store(true, Ordering::Relaxed);
+            return;
+        }
+        state.queue_index += 1;
+        state.now_playing = state.queue[state.queue_index].clone();
+        state.paused_elapsed = Duration::ZERO;
+        state.track_started_at = if state.is_playing { Some(std::time::Instant::now()) } else { None };
+        self.track_ended_awaiting_autoplay.store(false, Ordering::Relaxed);
+        drop(state);
+        self.sync_audio_playback();
+        self.prewarm_next_queue_url();
+    }
+
+    pub fn is_awaiting_autoplay_after_end(&self) -> bool {
+        self.track_ended_awaiting_autoplay.load(Ordering::Relaxed)
+    }
+
+    pub fn stop_at_queue_end(&self) {
+        self.track_ended_awaiting_autoplay.store(false, Ordering::Relaxed);
+        let mut state = self.state.lock().unwrap();
+        state.is_playing = false;
+        state.paused_elapsed = Duration::ZERO;
+        state.track_started_at = None;
+        let sender = state.audio_worker.as_ref().map(|w| w.sender.clone());
+        drop(state);
+        if let Some(s) = sender {
+            let _ = s.send(AudioCommand::SetPlaying(false));
+        }
+    }
+
     pub fn take_advance_pending(&self) -> bool {
         self.advance_pending.swap(false, Ordering::Relaxed)
     }
@@ -1478,6 +1589,7 @@ impl PlaybackCore {
 
     /// Set now_playing without triggering audio playback (for restoring last session).
     pub fn set_now_playing_paused(&self, np: NowPlaying) {
+        self.track_ended_awaiting_autoplay.store(false, Ordering::Relaxed);
         let mut state = self.state.lock().unwrap();
         state.now_playing = np;
         state.is_playing = false;
@@ -1777,7 +1889,7 @@ mod tests {
                 log_native_audio_timing("length-lookup", if content_len.is_some() { "length-ready" } else { "length-unknown" }, &video_id, length_started);
 
                 *worker_stage.lock().unwrap() = "stream-load";
-                load_stream_into_engine(&mut engine, &video_id, &url, content_len, None, None)
+                load_stream_into_engine(&mut engine, &video_id, &url, content_len, None, None, false)
                     .map_err(|_| "stream-load-failed")?;
 
                 *worker_stage.lock().unwrap() = "sink-progress";
@@ -1809,6 +1921,105 @@ mod tests {
         }
     }
 
+    #[test]
+    fn elapsed_secs_clamps_to_duration() {
+        let core = test_core();
+        {
+            let mut state = core.state.lock().unwrap();
+            state.now_playing.duration_secs = 10;
+            state.paused_elapsed = Duration::from_secs(12);
+        }
+        assert_eq!(core.elapsed_secs(), 10.0);
+        {
+            let mut state = core.state.lock().unwrap();
+            state.now_playing.duration_secs = 0; // unbounded
+        }
+        assert_eq!(core.elapsed_secs(), 12.0);
+    }
+
+    #[test]
+    fn advance_after_track_end_freezes_timer() {
+        let core = test_core();
+        {
+            let mut state = core.state.lock().unwrap();
+            state.queue = vec![dummy_song("1")];
+            state.queue_index = 0;
+            state.now_playing = state.queue[0].clone();
+            state.paused_elapsed = Duration::from_secs(0);
+        }
+        core.advance_after_track_end();
+        assert!(core.is_awaiting_autoplay_after_end());
+        assert!(core.take_autoplay_needed());
+        assert_eq!(core.elapsed_secs(), 180.0); // frozen
+    }
+
+    #[test]
+    fn manual_next_track_at_end() {
+        let core = test_core();
+        {
+            let mut state = core.state.lock().unwrap();
+            state.queue = vec![dummy_song("1")];
+            state.queue_index = 0;
+        }
+        core.next_track();
+        assert!(!core.is_awaiting_autoplay_after_end());
+        assert!(core.take_autoplay_needed());
+    }
+
+    #[test]
+    fn stop_at_queue_end_clears_state() {
+        let core = test_core();
+        core.track_ended_awaiting_autoplay.store(true, Ordering::Relaxed);
+        {
+            let mut state = core.state.lock().unwrap();
+            state.is_playing = true;
+            state.paused_elapsed = Duration::from_secs(180);
+        }
+        core.stop_at_queue_end();
+        assert!(!core.is_playing());
+        assert!(!core.is_awaiting_autoplay_after_end());
+        assert_eq!(core.elapsed_secs(), 0.0);
+    }
+
+    #[test]
+    fn open_seeked_file_source_rejects_past_end_resume_and_clamps_user_seek() {
+        use std::io::Write;
+        let wav_path = std::env::temp_dir().join(format!(
+            "auricle_playback_seek_guard_{}.wav",
+            std::process::id()
+        ));
+        let sample_rate: u32 = 8000;
+        let num_samples: u32 = sample_rate * 4; // 4.0 seconds
+        let data_len: u32 = num_samples * 2;
+        let file_len: u32 = 36 + data_len;
+        {
+            let mut f = std::fs::File::create(&wav_path).expect("create temp wav");
+            f.write_all(b"RIFF").unwrap();
+            f.write_all(&file_len.to_le_bytes()).unwrap();
+            f.write_all(b"WAVEfmt ").unwrap();
+            f.write_all(&16u32.to_le_bytes()).unwrap();
+            f.write_all(&1u16.to_le_bytes()).unwrap();
+            f.write_all(&1u16.to_le_bytes()).unwrap();
+            f.write_all(&sample_rate.to_le_bytes()).unwrap();
+            f.write_all(&(sample_rate * 2).to_le_bytes()).unwrap();
+            f.write_all(&2u16.to_le_bytes()).unwrap();
+            f.write_all(&16u16.to_le_bytes()).unwrap();
+            f.write_all(b"data").unwrap();
+            f.write_all(&data_len.to_le_bytes()).unwrap();
+            f.write_all(&vec![0u8; data_len as usize]).unwrap();
+        }
+
+        // Mid-song cache-fallback resume succeeds.
+        assert!(open_seeked_file_source(&wav_path, Some(1.0), false).is_ok());
+        // Near-end and past-EOF cache-fallback resumes MUST return Err instead of replaying from 0:00.
+        assert!(open_seeked_file_source(&wav_path, Some(3.0), false).is_err());
+        assert!(open_seeked_file_source(&wav_path, Some(4.4), false).is_err());
+        // Explicit user scrub to 100% / rounded-up integer duration clamps cleanly near end.
+        assert!(open_seeked_file_source(&wav_path, Some(4.2), true).is_ok());
+
+        let _ = std::fs::remove_file(&wav_path);
+    }
+
     fn test_core() -> PlaybackCore {
         PlaybackCore {
             state: Mutex::new(PlaybackState {
@@ -1836,6 +2047,7 @@ mod tests {
             autoplay_refilling: AtomicBool::new(false),
             autoplay_generation: AtomicU64::new(0),
             autoplay_refill_empty: AtomicBool::new(false),
+            track_ended_awaiting_autoplay: AtomicBool::new(false),
         }
     }
 
