@@ -77,12 +77,30 @@ impl NowPlaying {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepeatMode {
+    Off,
+    All,
+    One,
+}
+
+impl RepeatMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::All => "all",
+            Self::One => "one",
+        }
+    }
+}
+
 pub struct PlaybackState {
     pub queue: Vec<NowPlaying>,
     pub queue_index: usize,
     pub now_playing: NowPlaying,
     pub is_playing: bool,
     pub audio_enabled: bool,
+    pub repeat_mode: RepeatMode,
     audio_worker: Option<AudioWorker>,
     pub track_started_at: Option<std::time::Instant>,
     pub paused_elapsed: std::time::Duration,
@@ -916,6 +934,7 @@ impl PlaybackCore {
                 },
                 is_playing: false,
                 audio_enabled: false,
+                repeat_mode: RepeatMode::Off,
                 audio_worker: None,
                 track_started_at: None,
                 paused_elapsed: std::time::Duration::ZERO,
@@ -937,6 +956,20 @@ impl PlaybackCore {
             autoplay_refill_empty: AtomicBool::new(false),
             track_ended_awaiting_autoplay: AtomicBool::new(false),
         }
+    }
+
+    pub fn cycle_repeat_mode(&self) -> RepeatMode {
+        let mut state = self.state.lock().unwrap();
+        state.repeat_mode = match state.repeat_mode {
+            RepeatMode::Off => RepeatMode::All,
+            RepeatMode::All => RepeatMode::One,
+            RepeatMode::One => RepeatMode::Off,
+        };
+        state.repeat_mode
+    }
+
+    pub fn repeat_mode(&self) -> RepeatMode {
+        self.state.lock().unwrap().repeat_mode
     }
 
     pub fn enable_audio_output(&self) -> Result<(), String> {
@@ -1162,11 +1195,15 @@ impl PlaybackCore {
         let mut state = self.state.lock().unwrap();
         if state.queue.is_empty() { return; }
         if state.queue_index + 1 >= state.queue.len() {
-            // Reached end of queue — request autoplay radio fetch
-            self.autoplay_needed.store(true, Ordering::Relaxed);
-            return;
+            if state.repeat_mode == RepeatMode::All {
+                state.queue_index = 0;
+            } else {
+                self.autoplay_needed.store(true, Ordering::Relaxed);
+                return;
+            }
+        } else {
+            state.queue_index += 1;
         }
-        state.queue_index += 1;
         state.now_playing = state.queue[state.queue_index].clone();
         // Reset timer so progress bar starts from 0
         state.paused_elapsed = std::time::Duration::ZERO;
@@ -1256,6 +1293,57 @@ impl PlaybackCore {
         state.track_started_at = if state.is_playing { Some(std::time::Instant::now()) } else { None };
         drop(state);
         self.sync_audio_playback();
+    }
+
+    pub fn has_upcoming_user_queue(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state.queue.len() > state.queue_index.saturating_add(1)
+    }
+
+    pub fn shuffle_upcoming_user_queue(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        let upcoming_len = state.queue.len().saturating_sub(state.queue_index.saturating_add(1));
+        if upcoming_len < 2 {
+            return false;
+        }
+        let start = state.queue_index + 1;
+        
+        let mut seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        seed = seed.wrapping_add(COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        
+        let mut next_u64 = || {
+            let mut z = seed.wrapping_add(0x9e3779b97f4a7c15);
+            seed = z;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+            z ^ (z >> 31)
+        };
+
+        let original = state.queue[start..].to_vec();
+
+        let slice = &mut state.queue[start..];
+        for i in (1..slice.len()).rev() {
+            let j = (next_u64() % ((i + 1) as u64)) as usize;
+            slice.swap(i, j);
+        }
+
+        let mut changed = false;
+        for (a, b) in slice.iter().zip(original.iter()) {
+            if a.video_id != b.video_id {
+                changed = true;
+                break;
+            }
+        }
+
+        if !changed {
+            slice.rotate_left(1);
+        }
+
+        true
     }
 
     pub fn full_queue(&self) -> Vec<NowPlaying> {
@@ -1362,6 +1450,46 @@ impl PlaybackCore {
             self.stop_at_queue_end();
             return;
         }
+
+        match state.repeat_mode {
+            RepeatMode::One => {
+                state.is_playing = true;
+                state.paused_elapsed = std::time::Duration::ZERO;
+                state.track_started_at = Some(std::time::Instant::now());
+                drop(state);
+                self.sync_audio_playback();
+                return;
+            }
+            RepeatMode::All => {
+                if state.queue_index + 1 < state.queue.len() {
+                    state.queue_index += 1;
+                } else if !state.queue.is_empty() {
+                    let prev = state.now_playing.clone();
+                    if state.queue.len() > 1 {
+                        if !prev.video_id.is_empty() && prev.video_id != "native-prototype" {
+                            if state.history.back().map(|h| h.video_id.as_str()) != Some(&prev.video_id) {
+                                state.history.push_back(prev);
+                                if state.history.len() > 50 {
+                                    state.history.pop_front();
+                                }
+                            }
+                        }
+                    }
+                    state.queue_index = 0;
+                }
+                state.now_playing = state.queue[state.queue_index].clone();
+                state.is_playing = true;
+                state.paused_elapsed = std::time::Duration::ZERO;
+                state.track_started_at = Some(std::time::Instant::now());
+                self.track_ended_awaiting_autoplay.store(false, Ordering::Relaxed);
+                drop(state);
+                self.sync_audio_playback();
+                self.prewarm_next_queue_url();
+                return;
+            }
+            RepeatMode::Off => {}
+        }
+
         if state.queue_index + 1 >= state.queue.len() {
             if state.now_playing.duration_secs > 0 {
                 state.paused_elapsed = Duration::from_secs(state.now_playing.duration_secs as u64);
@@ -1381,6 +1509,56 @@ impl PlaybackCore {
         drop(state);
         self.sync_audio_playback();
         self.prewarm_next_queue_url();
+    }
+
+    pub fn is_currently_active_track(&self, video_id: &str) -> bool {
+        if video_id.is_empty() || video_id == "native-prototype" {
+            return false;
+        }
+        let s = self.state.lock().unwrap();
+        s.is_playing && s.now_playing.video_id == video_id
+    }
+
+    pub fn play_autoplay_at_preserving_queues(&self, index: usize) -> Option<NowPlaying> {
+        let song = {
+            let mut aq = self.autoplay_queue.lock().unwrap();
+            if index >= aq.len() {
+                return None;
+            }
+            aq.remove(index)
+        };
+
+        *self.autoplay_seed.lock().unwrap() = song.video_id.clone();
+
+        let mut state = self.state.lock().unwrap();
+        let prev = state.now_playing.clone();
+        if !prev.video_id.is_empty() && prev.video_id != "native-prototype" && prev.video_id != song.video_id {
+            if state.history.back().map(|h| h.video_id.as_str()) != Some(&prev.video_id) {
+                state.history.push_back(prev);
+                if state.history.len() > 50 {
+                    state.history.pop_front();
+                }
+            }
+        }
+
+        if state.queue.is_empty() {
+            state.queue.push(song.clone());
+            state.queue_index = 0;
+        } else {
+            let idx = state.queue_index.min(state.queue.len().saturating_sub(1));
+            state.queue[idx] = song.clone();
+            state.queue_index = idx;
+        }
+
+        state.now_playing = song.clone();
+        state.is_playing = true;
+        state.paused_elapsed = std::time::Duration::ZERO;
+        state.track_started_at = Some(std::time::Instant::now());
+        drop(state);
+
+        self.sync_audio_playback();
+
+        Some(song)
     }
 
     pub fn is_awaiting_autoplay_after_end(&self) -> bool {
@@ -2028,6 +2206,7 @@ mod tests {
                 now_playing: NowPlaying::default(),
                 is_playing: false,
                 audio_enabled: false,
+                repeat_mode: RepeatMode::Off,
                 audio_worker: None,
                 track_started_at: None,
                 paused_elapsed: Duration::ZERO,
@@ -2148,5 +2327,87 @@ mod tests {
         assert!(!core.last_autoplay_refill_empty());
         core.autoplay_refill_empty.store(true, Ordering::Release);
         assert!(core.last_autoplay_refill_empty());
+    }
+
+    #[test]
+    fn play_autoplay_at_preserving_queues_works() {
+        let core = test_core();
+        {
+            let mut state = core.state.lock().unwrap();
+            state.now_playing = dummy_song("np_1");
+            state.queue = vec![dummy_song("np_1"), dummy_song("q_1"), dummy_song("q_2")];
+            state.queue_index = 0;
+        }
+        core.set_autoplay_queue(vec![dummy_song("ap_1"), dummy_song("ap_2"), dummy_song("ap_3")]);
+        let played = core.play_autoplay_at_preserving_queues(1);
+        assert_eq!(played.unwrap().video_id, "ap_2");
+        assert_eq!(core.autoplay_queue().into_iter().map(|s| s.video_id).collect::<Vec<_>>(), vec!["ap_1", "ap_3"]);
+        let state = core.state.lock().unwrap();
+        assert_eq!(state.now_playing.video_id, "ap_2");
+        assert_eq!(state.queue.iter().map(|s| s.video_id.as_str()).collect::<Vec<_>>(), vec!["ap_2", "q_1", "q_2"]);
+        assert_eq!(state.history.back().unwrap().video_id, "np_1");
+    }
+
+    #[test]
+    fn shuffle_upcoming_user_queue_preserves_autoplay() {
+        let core = test_core();
+        {
+            let mut state = core.state.lock().unwrap();
+            state.queue = vec![dummy_song("np_1")];
+            state.queue_index = 0;
+        }
+        core.set_autoplay_queue(vec![dummy_song("ap_1"), dummy_song("ap_2"), dummy_song("ap_3")]);
+        assert!(!core.shuffle_upcoming_user_queue());
+        assert_eq!(
+            core.autoplay_queue().iter().map(|s| s.video_id.as_str()).collect::<Vec<_>>(),
+            vec!["ap_1", "ap_2", "ap_3"]
+        );
+
+        {
+            let mut state = core.state.lock().unwrap();
+            state.queue = vec![dummy_song("np_1"), dummy_song("q_1"), dummy_song("q_2"), dummy_song("q_3")];
+            state.queue_index = 0;
+        }
+        let shuffled = core.shuffle_upcoming_user_queue();
+        assert!(shuffled);
+        assert_eq!(
+            core.autoplay_queue().iter().map(|s| s.video_id.as_str()).collect::<Vec<_>>(),
+            vec!["ap_1", "ap_2", "ap_3"]
+        );
+        let state = core.state.lock().unwrap();
+        assert_eq!(state.queue[0].video_id, "np_1");
+        assert_eq!(state.queue.len(), 4);
+    }
+
+    #[test]
+    fn repeat_mode_one_replays() {
+        let core = test_core();
+        {
+            let mut state = core.state.lock().unwrap();
+            state.queue = vec![dummy_song("np_1"), dummy_song("q_1")];
+            state.queue_index = 0;
+            state.now_playing = state.queue[0].clone();
+            state.repeat_mode = RepeatMode::One;
+        }
+        core.advance_after_track_end();
+        let state = core.state.lock().unwrap();
+        assert_eq!(state.queue_index, 0);
+        assert_eq!(state.now_playing.video_id, "np_1");
+    }
+
+    #[test]
+    fn repeat_mode_all_wraps() {
+        let core = test_core();
+        {
+            let mut state = core.state.lock().unwrap();
+            state.queue = vec![dummy_song("np_1"), dummy_song("q_1")];
+            state.queue_index = 1;
+            state.now_playing = state.queue[1].clone();
+            state.repeat_mode = RepeatMode::All;
+        }
+        core.advance_after_track_end();
+        let state = core.state.lock().unwrap();
+        assert_eq!(state.queue_index, 0);
+        assert_eq!(state.now_playing.video_id, "np_1");
     }
 }
