@@ -5,6 +5,7 @@ use ytmapi_rs::common::YoutubeID;
 pub mod core;
 mod context_ui;
 mod discography_ui;
+mod now_playing_ui;
 mod search_ui;
 
 use std::sync::{Arc, Mutex};
@@ -994,6 +995,15 @@ fn refresh_native_shell_ui(ui: &NativeShellWindow, playback: &'static core::play
     ui.set_track_initial(SharedString::from(initial.as_str()));
     ui.set_is_liked(playback.is_liked(&track.video_id));
 
+    let can_shuffle = playback.has_upcoming_user_queue();
+    if ui.get_can_shuffle_queue() != can_shuffle {
+        ui.set_can_shuffle_queue(can_shuffle);
+    }
+    let repeat_str = playback.repeat_mode().as_str();
+    if ui.get_repeat_mode().as_str() != repeat_str {
+        ui.set_repeat_mode(SharedString::from(repeat_str));
+    }
+
     // Fetch each list once under lock, then reuse for both the models and the
     // missing-thumbnail scan below.
     let upcoming = playback.queue_upcoming();
@@ -1126,6 +1136,160 @@ fn format_duration_secs(secs: u32) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
 }
 
+struct HeroState {
+    window_seed: usize,
+    video_id: String,
+    pick_offset: usize,
+    is_taste_seed: bool,
+}
+
+static HERO_STATE: std::sync::OnceLock<Mutex<HeroState>> = std::sync::OnceLock::new();
+
+fn get_hero_state() -> &'static Mutex<HeroState> {
+    HERO_STATE.get_or_init(|| Mutex::new(HeroState {
+        window_seed: 0,
+        video_id: String::new(),
+        pick_offset: 0,
+        is_taste_seed: false,
+    }))
+}
+
+fn current_time_window_and_eyebrow() -> (usize, &'static str) {
+    let unix_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let window = (unix_secs / (4 * 3600)) as usize;
+    let eyebrows = [
+        "FEATURED FOR YOU",
+        "MADE FOR YOUR TASTE",
+        "FRESH PICK FOR YOU",
+        "CURATED FROM YOUR TASTE",
+        "YOUR DAILY SPOTLIGHT",
+        "RECOMMENDED FOR YOU",
+    ];
+    let eyebrow = eyebrows[window % eyebrows.len()];
+    (window, eyebrow)
+}
+
+fn maybe_seed_home_hero(ui: &NativeShellWindow, force_next: bool) {
+    let extract = |model: ModelRc<SongItem>| -> Vec<SongItem> {
+        (0..model.row_count())
+            .filter_map(|i| model.row_data(i))
+            .filter(|s| !s.video_id.is_empty())
+            .collect()
+    };
+
+    let personalized = extract(ui.get_personalized_songs());
+    let followed = extract(ui.get_home_followed_songs());
+    let liked = extract(ui.get_liked_songs());
+    let trending = extract(ui.get_trending_songs());
+
+    let is_taste = !personalized.is_empty() || !followed.is_empty() || !liked.is_empty();
+
+    let mut candidates = Vec::new();
+    candidates.extend(personalized);
+    candidates.extend(followed);
+    candidates.extend(liked);
+    candidates.extend(trending);
+
+    if candidates.is_empty() {
+        return;
+    }
+
+    let (current_window, eyebrow) = current_time_window_and_eyebrow();
+    let mut state = get_hero_state().lock().unwrap();
+
+    if force_next {
+        state.pick_offset = state.pick_offset.wrapping_add(1);
+    } else if !state.video_id.is_empty() && state.window_seed == current_window {
+        if !state.is_taste_seed && is_taste {
+            // Upgrade from fallback to taste once
+        } else {
+            return;
+        }
+    }
+
+    state.window_seed = current_window;
+    state.is_taste_seed = is_taste;
+
+    let idx = (current_window + state.pick_offset) % candidates.len();
+    let pick = candidates[idx].clone();
+    state.video_id = pick.video_id.to_string();
+    drop(state);
+
+    ui.set_hero_video_id(pick.video_id.clone());
+    ui.set_hero_title(pick.title.clone());
+    ui.set_hero_artist(pick.artist.clone());
+    ui.set_hero_duration_secs(pick.duration_secs);
+    ui.set_hero_eyebrow(SharedString::from(eyebrow));
+
+    let vid = pick.video_id.to_string();
+    let ui_weak = ui.as_weak();
+    core::net::spawn(move || {
+        let hero_cache_path = std::env::temp_dir().join(format!("ytm_hero_{}.jpg", vid));
+        let thumb_cache_path = std::env::temp_dir().join(format!("ytm_thumb_{}.jpg", vid));
+
+        let mut bytes_opt: Option<Vec<u8>> = None;
+        if hero_cache_path.exists() {
+            if let Ok(b) = std::fs::read(&hero_cache_path) {
+                bytes_opt = Some(b);
+            }
+        } else if thumb_cache_path.exists() {
+            if let Ok(b) = std::fs::read(&thumb_cache_path) {
+                bytes_opt = Some(b);
+            }
+        }
+
+        if bytes_opt.is_none() {
+            let http = core::net::http();
+            let url_hq = format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", vid);
+            if let Ok(resp) = http.get(&url_hq).send() {
+                if resp.status().is_success() {
+                    if let Ok(bytes) = resp.bytes() {
+                        let b = bytes.to_vec();
+                        let _ = std::fs::write(&hero_cache_path, &b);
+                        bytes_opt = Some(b);
+                    }
+                }
+            }
+            if bytes_opt.is_none() {
+                let url_mq = format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", vid);
+                if let Ok(resp) = http.get(&url_mq).send() {
+                    if resp.status().is_success() {
+                        if let Ok(bytes) = resp.bytes() {
+                            let b = bytes.to_vec();
+                            let _ = std::fs::write(&hero_cache_path, &b);
+                            bytes_opt = Some(b);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(bytes) = bytes_opt {
+            if let Ok(img) = image::load_from_memory(&bytes) {
+                let accent_color = extract_vibrant_accent_from_image(&img);
+                let rgba = img.to_rgba8();
+                let (w, h) = (rgba.width(), rgba.height());
+                let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(rgba.as_raw(), w, h);
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        if ui.get_hero_video_id().as_str() == vid.as_str() {
+                            let slint_img = slint::Image::from_rgba8(buf);
+                            ui.set_hero_thumbnail(slint_img);
+                            ui.set_hero_has_thumbnail(true);
+                            let theme = ui.global::<Theme>();
+                            theme.set_hero_accent(accent_color);
+                            theme.set_has_hero_accent(true);
+                        }
+                    }
+                }).ok();
+            }
+        }
+    });
+}
+
 fn fetch_trending_songs(ui_weak: slint::Weak<NativeShellWindow>) {
     core::net::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -1199,6 +1363,7 @@ fn fetch_trending_songs(ui_weak: slint::Weak<NativeShellWindow>) {
                     }).collect();
                     let model = std::rc::Rc::new(slint::VecModel::from(items));
                     ui.set_trending_songs(slint::ModelRc::from(model));
+                    maybe_seed_home_hero(&ui, false);
                 }
             }).ok();
 
@@ -1359,6 +1524,7 @@ fn fetch_followed_songs(ui_weak: slint::Weak<NativeShellWindow>) {
                     }
                 }).collect();
                 ui.set_home_followed_songs(ModelRc::new(VecModel::from(items)));
+                maybe_seed_home_hero(&ui, false);
             }
         }).ok();
         if !thumb_urls.is_empty() {
@@ -1456,6 +1622,7 @@ fn fetch_personalized_songs(ui_weak: slint::Weak<NativeShellWindow>) {
                     }).collect();
                     let model = std::rc::Rc::new(slint::VecModel::from(items));
                     ui.set_personalized_songs(slint::ModelRc::from(model));
+                    maybe_seed_home_hero(&ui, false);
                 }
             }).ok();
 
@@ -1572,8 +1739,6 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
         sorted_words.sort_by(|a, b| b.1.cmp(&a.1));
         sorted_words.first().map(|(word, _)| word.clone())
     };
-
-    let top_artists_clone = top_artists.clone();
 
     // Seed artists for New Releases: followed artists carry real channel ids (so we
     // can pull their actual discography); taste names fill in behind them.
@@ -1697,142 +1862,6 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
                                         if let Some(ui) = ui_w.upgrade() {
                                             let slint_img = slint::Image::from_rgba8(buf);
                                             let model = ui.get_home_new_releases();
-                                            if let Some(row) = model.row_data(idx_copy) {
-                                                let mut updated = row;
-                                                updated.thumbnail = slint_img;
-                                                updated.has_thumbnail = true;
-                                                model.set_row_data(idx_copy, updated);
-                                            }
-                                        }
-                                    }).ok();
-                                }
-                            }
-                        }
-                    }
-                });
-            }
-        });
-    }
-
-    // ── Thread 2: Mixes (3 personalized mixes from search) ────────────────────
-    {
-        let ui_weak = ui_weak.clone();
-        let artists = top_artists_clone.clone();
-        core::net::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-            let (mix1, mix2, mix3, mix1_title, mix2_title, mix3_title) = rt.block_on(async {
-                use ytmapi_rs::query::{SearchQuery, search::SongsFilter};
-                let api = match crate::core::net::ytmusic().await {
-                    Ok(a) => a,
-                    Err(_) => return (Vec::new(), Vec::new(), Vec::new(), String::new(), String::new(), String::new()),
-                };
-
-                // Mix 1: "Your Mix" - songs similar to top artist
-                let artist1 = artists.first().cloned().unwrap_or_else(|| "popular".to_string());
-                let mix1_title = format!("{} Mix", artist1);
-                let query1 = format!("{} mix songs", artist1);
-                let mix1: Vec<(String, String, String, u32, String)> = api.query(SearchQuery::new(query1).with_filter(SongsFilter)).await
-                    .unwrap_or_default()
-                    .into_iter().take(10)
-                    .map(|s| {
-                        let dur = parse_duration(&s.duration).unwrap_or(0);
-                        let thumb = pick_thumb(&s.thumbnails).map(|t| t.url.clone()).unwrap_or_default();
-                        (s.video_id.get_raw().to_string(), s.title, s.artist, dur, thumb)
-                    }).collect();
-
-                // Mix 2: "Discover Mix" - songs from second artist or discovery
-                let artist2 = artists.get(1).cloned().unwrap_or_else(|| "new music".to_string());
-                let mix2_title = format!("Discover: {}", artist2);
-                let query2 = format!("{} discover new songs", artist2);
-                let mix2: Vec<(String, String, String, u32, String)> = api.query(SearchQuery::new(query2).with_filter(SongsFilter)).await
-                    .unwrap_or_default()
-                    .into_iter().take(10)
-                    .map(|s| {
-                        let dur = parse_duration(&s.duration).unwrap_or(0);
-                        let thumb = pick_thumb(&s.thumbnails).map(|t| t.url.clone()).unwrap_or_default();
-                        (s.video_id.get_raw().to_string(), s.title, s.artist, dur, thumb)
-                    }).collect();
-
-                // Mix 3: "Chill Mix" - relaxing songs
-                let mix3_title = "Chill Mix".to_string();
-                let query3 = "chill vibes relax lo-fi".to_string();
-                let mix3: Vec<(String, String, String, u32, String)> = api.query(SearchQuery::new(query3).with_filter(SongsFilter)).await
-                    .unwrap_or_default()
-                    .into_iter().take(10)
-                    .map(|s| {
-                        let dur = parse_duration(&s.duration).unwrap_or(0);
-                        let thumb = pick_thumb(&s.thumbnails).map(|t| t.url.clone()).unwrap_or_default();
-                        (s.video_id.get_raw().to_string(), s.title, s.artist, dur, thumb)
-                    }).collect();
-
-                (mix1, mix2, mix3, mix1_title, mix2_title, mix3_title)
-            });
-
-            if mix1.is_empty() && mix2.is_empty() && mix3.is_empty() { return; }
-
-            // Collect all thumb URLs for fetching
-            let all_thumb_urls: Vec<(u8, usize, String)> = mix1.iter().enumerate()
-                .filter(|(_, (_, _, _, _, url))| !url.is_empty())
-                .map(|(i, (_, _, _, _, url))| (1u8, i, url.clone()))
-                .chain(mix2.iter().enumerate()
-                    .filter(|(_, (_, _, _, _, url))| !url.is_empty())
-                    .map(|(i, (_, _, _, _, url))| (2u8, i, url.clone())))
-                .chain(mix3.iter().enumerate()
-                    .filter(|(_, (_, _, _, _, url))| !url.is_empty())
-                    .map(|(i, (_, _, _, _, url))| (3u8, i, url.clone())))
-                .collect();
-
-            let ui_weak2 = ui_weak.clone();
-            slint::invoke_from_event_loop(move || {
-                if let Some(ui) = ui_weak.upgrade() {
-                    let make_song_items = |raw: &[(String, String, String, u32, String)]| -> Vec<SongItem> {
-                        raw.iter().map(|(vid, title, artist, dur, _)| {
-                            let avatar = title.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "?".to_string());
-                            SongItem {
-                                video_id: SharedString::from(vid.as_str()),
-                                title: SharedString::from(title.as_str()),
-                                artist: SharedString::from(artist.as_str()),
-                                album: SharedString::default(),
-                                duration_str: SharedString::from(format_duration_secs(*dur).as_str()),
-                                avatar_letter: SharedString::from(avatar.as_str()),
-                                duration_secs: *dur as i32,
-                                thumbnail: slint::Image::default(),
-                                has_thumbnail: false,
-                            }
-                        }).collect()
-                    };
-                    ui.set_home_mix_1(ModelRc::new(VecModel::from(make_song_items(&mix1))));
-                    ui.set_home_mix_2(ModelRc::new(VecModel::from(make_song_items(&mix2))));
-                    ui.set_home_mix_3(ModelRc::new(VecModel::from(make_song_items(&mix3))));
-                    ui.set_home_mix_1_title(SharedString::from(mix1_title.as_str()));
-                    ui.set_home_mix_2_title(SharedString::from(mix2_title.as_str()));
-                    ui.set_home_mix_3_title(SharedString::from(mix3_title.as_str()));
-                }
-            }).ok();
-
-            // Fetch thumbnails for mixes
-            if !all_thumb_urls.is_empty() {
-                core::net::spawn(move || {
-                    let http = core::net::http();
-                    for (mix_num, idx, url) in &all_thumb_urls {
-                        if let Ok(resp) = http.get(url).send() {
-                            if let Ok(bytes) = resp.bytes() {
-                                if let Ok(img) = image::load_from_memory(&bytes) {
-                                    let rgba = img.to_rgba8();
-                                    let (w, h) = (rgba.width(), rgba.height());
-                                    let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(rgba.as_raw(), w, h);
-                                    let ui_w = ui_weak2.clone();
-                                    let mix_num_copy = *mix_num;
-                                    let idx_copy = *idx;
-                                    slint::invoke_from_event_loop(move || {
-                                        if let Some(ui) = ui_w.upgrade() {
-                                            let slint_img = slint::Image::from_rgba8(buf);
-                                            let model = match mix_num_copy {
-                                                1 => ui.get_home_mix_1(),
-                                                2 => ui.get_home_mix_2(),
-                                                3 => ui.get_home_mix_3(),
-                                                _ => return,
-                                            };
                                             if let Some(row) = model.row_data(idx_copy) {
                                                 let mut updated = row;
                                                 updated.thumbnail = slint_img;
@@ -2318,6 +2347,20 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     {
         let liked_items: Vec<SongItem> = playback.get_liked_songs().iter().map(make_song_item).collect();
         ui.set_liked_songs(ModelRc::new(VecModel::from(liked_items)));
+        maybe_seed_home_hero(&ui, false);
+    }
+
+    {
+        let np = playback.now_playing();
+        if !np.video_id.is_empty() {
+            now_playing_ui::notify_track_changed(
+                ui.as_weak(),
+                np.video_id,
+                np.title,
+                np.artist,
+                np.duration_secs,
+            );
+        }
     }
 
 
@@ -2890,6 +2933,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             }
         });
     }
+    now_playing_ui::wire(&ui);
 
     // ── Navigate ──────────────────────────────────────────────────────────────
     {
@@ -2909,6 +2953,19 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 let hist = nav_history.lock().unwrap();
                 let cur = *nav_cursor.lock().unwrap();
                 update_nav_buttons(&ui, &hist, cur);
+                if view.as_str() == "NowPlaying" {
+                    let playback = crate::core::bridge::playback_core();
+                    let np = playback.now_playing();
+                    if !np.video_id.is_empty() {
+                        now_playing_ui::notify_track_changed(
+                            ui.as_weak(),
+                            np.video_id,
+                            np.title,
+                            np.artist,
+                            np.duration_secs,
+                        );
+                    }
+                }
                 // Trigger explore data load when navigating to Explore
                 if view.as_str() == "Explore" {
                     ui.invoke_load_explore_data();
@@ -2964,6 +3021,18 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                         drop(hist);
                         ui.invoke_navigate_to_playlist(SharedString::from(entry.context_id.as_str()));
                         nav_restoring.store(false, std::sync::atomic::Ordering::Relaxed);
+                    } else if entry.view == "NowPlaying" {
+                        let playback = crate::core::bridge::playback_core();
+                        let np = playback.now_playing();
+                        if !np.video_id.is_empty() {
+                            now_playing_ui::notify_track_changed(
+                                ui.as_weak(),
+                                np.video_id,
+                                np.title,
+                                np.artist,
+                                np.duration_secs,
+                            );
+                        }
                     }
                 }
             }
@@ -3010,6 +3079,18 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                         drop(hist);
                         ui.invoke_navigate_to_playlist(SharedString::from(entry.context_id.as_str()));
                         nav_restoring.store(false, std::sync::atomic::Ordering::Relaxed);
+                    } else if entry.view == "NowPlaying" {
+                        let playback = crate::core::bridge::playback_core();
+                        let np = playback.now_playing();
+                        if !np.video_id.is_empty() {
+                            now_playing_ui::notify_track_changed(
+                                ui.as_weak(),
+                                np.video_id,
+                                np.title,
+                                np.artist,
+                                np.duration_secs,
+                            );
+                        }
                     }
                 }
             }
@@ -3054,6 +3135,9 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     {
         let ui_weak = ui.as_weak();
         ui.on_play_song(move |video_id, title, artist, duration_secs| {
+            if playback.is_currently_active_track(video_id.as_str()) {
+                return;
+            }
             // set_now_playing calls sync_audio_playback internally.
             // We set is_playing FIRST so sync_audio_playback actually starts audio.
             {
@@ -3170,24 +3254,91 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     {
         let ui_weak = ui.as_weak();
         ui.on_play_autoplay_song(move |index| {
-            let song = playback.autoplay_get(index as usize);
-            if let Some(song) = song {
-                {
-                    let mut state = playback.state_lock();
-                    state.is_playing = true;
+            if let Some(song) = playback.play_autoplay_at_preserving_queues(index as usize) {
+                if let Some(ui) = ui_weak.upgrade() {
+                    refresh_native_shell_ui(&ui, playback);
+                    let items: Vec<SongItem> = playback.autoplay_queue().iter().map(make_song_item).collect();
+                    ui.set_autoplay_queue(ModelRc::new(VecModel::from(items)));
+                    now_playing_ui::notify_track_changed(
+                        ui.as_weak(),
+                        song.video_id.clone(),
+                        song.title.clone(),
+                        song.artist.clone(),
+                        song.duration_secs,
+                    );
                 }
-                playback.set_now_playing(&song.video_id, &song.title, &song.artist, song.duration_secs);
+            }
+        });
+    }
+
+    // ── Shuffle queue ────────────────────────────────────────────────────────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_shuffle_queue(move || {
+            let playback = crate::core::bridge::playback_core();
+            if playback.shuffle_upcoming_user_queue() {
                 if let Some(ui) = ui_weak.upgrade() {
                     refresh_native_shell_ui(&ui, playback);
                 }
-                // Re-seed autoplay from the newly played song
-                playback.set_autoplay_seed(&song.video_id);
-                playback.clear_autoplay_queue();
-                let ui_w = ui_weak.clone();
-                let vid = song.video_id.clone();
-                std::thread::spawn(move || {
-                    fetch_autoplay_queue(ui_w, vid, false);
-                });
+            }
+        });
+    }
+
+    // ── Cycle repeat mode ────────────────────────────────────────────────────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_cycle_repeat(move || {
+            let playback = crate::core::bridge::playback_core();
+            let mode = playback.cycle_repeat_mode();
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_repeat_mode(SharedString::from(mode.as_str()));
+            }
+        });
+    }
+
+    // ── Open Now Playing view ────────────────────────────────────────────────
+    {
+        let ui_weak = ui.as_weak();
+        let nav_history = nav_history.clone();
+        let nav_cursor = nav_cursor.clone();
+        ui.on_open_now_playing(move || {
+            let Some(ui) = ui_weak.upgrade() else { return; };
+            if ui.get_now_playing_video_id().as_str().is_empty() {
+                return;
+            }
+            if ui.get_current_view().as_str() == "NowPlaying" {
+                if ui.get_can_go_back() {
+                    ui.invoke_nav_back();
+                } else {
+                    ui.set_current_view(SharedString::from("Home"));
+                }
+            } else {
+                ui.set_queue_pane_open(false);
+                context_ui::invalidate(&ui);
+                push_nav_entry(&nav_history, &nav_cursor, "NowPlaying".to_string(), String::new());
+                let hist = nav_history.lock().unwrap();
+                let cur = *nav_cursor.lock().unwrap();
+                update_nav_buttons(&ui, &hist, cur);
+                ui.set_current_view(SharedString::from("NowPlaying"));
+                let playback = crate::core::bridge::playback_core();
+                let np = playback.now_playing();
+                now_playing_ui::notify_track_changed(
+                    ui.as_weak(),
+                    np.video_id,
+                    np.title,
+                    np.artist,
+                    np.duration_secs,
+                );
+            }
+        });
+    }
+
+    // ── Refresh hero pick ────────────────────────────────────────────────────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_refresh_hero_pick(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                maybe_seed_home_hero(&ui, true);
             }
         });
     }
@@ -3549,15 +3700,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                     });
                                 }
 
-                                // Convert releases (albums + singles ordered by popularity)
-                                let mut plays_by_release: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-                                for s in artist.top_releases.songs.iter().flat_map(|section| section.results.iter()) {
-                                    let album_id = ytmapi_rs::common::YoutubeID::get_raw(&s.album.id);
-                                    if !album_id.is_empty() {
-                                        let entry = plays_by_release.entry(album_id.to_string()).or_insert(0);
-                                        *entry = entry.saturating_add(discography_ui::parse_plays(&s.plays));
-                                    }
-                                }
+                                // Convert releases (albums + singles in native order)
                                 let combined_releases: Vec<(String, (AlbumItem, Option<String>))> = artist.top_releases.albums.iter()
                                     .chain(artist.top_releases.singles.iter())
                                     .flat_map(|section| section.results.iter())
@@ -3576,7 +3719,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                     })
                                     .collect();
                                 let mut album_thumb_urls: Vec<(String, String)> = vec![];
-                                let albums: Vec<AlbumItem> = discography_ui::order_by_popularity(combined_releases, &plays_by_release)
+                                let albums: Vec<AlbumItem> = discography_ui::filter_preview_releases(combined_releases)
                                     .into_iter()
                                     .map(|(item, thumb_url)| {
                                         if let Some(url) = thumb_url {
@@ -3585,12 +3728,9 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                         item
                                     })
                                     .collect();
-                                // The ranked row replaces this list; it is only the fallback.
-                                ui.set_artist_row_sorting(!albums.is_empty());
-                                ui.set_artist_view_albums(ModelRc::new(VecModel::from(Vec::<AlbumItem>::new())));
-                                ui.set_artist_row_fallback(ModelRc::new(VecModel::from(albums)));
+                                ui.set_artist_row_sorting(false);
+                                ui.set_artist_view_albums(ModelRc::new(VecModel::from(albums)));
                                 ui.set_artist_view_singles(ModelRc::new(VecModel::from(Vec::<AlbumItem>::new())));
-                                discography_ui::rank_artist_row(&ui, &browse_id_c, &artist.name, artist.top_releases.songs.as_ref().map(|songs| songs.browse_id.get_raw().to_string()));
 
                                 // Convert videos
                                 let mut video_thumb_urls: Vec<(usize, String)> = vec![];
@@ -3730,8 +3870,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                             }
                                             slint::invoke_from_event_loop(move || {
                                                 if let Some(ui) = ui_w.upgrade() {
-                                                    // Match by browse id: the model may already belong to another artist.
-                                                    for model in [ui.get_artist_view_albums(), ui.get_artist_row_fallback()] {
+                                                    let model = ui.get_artist_view_albums();
                                                     for row in 0..model.row_count() {
                                                         let Some(mut item) = model.row_data(row) else { continue };
                                                         if item.has_thumbnail || !loaded.iter().any(|id| id.as_str() == item.browse_id.as_str()) { continue; }
@@ -3740,7 +3879,6 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                                             item.has_thumbnail = true;
                                                             model.set_row_data(row, item);
                                                         }
-                                                    }
                                                     }
                                                 }
                                             }).ok();
@@ -4709,7 +4847,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             let mut thumb_refresh_counter: u32 = 0;
             let mut thumb_fetch_done: Option<std::sync::mpsc::Receiver<()>> = None;
             let mut last_autoplay_refill: Option<std::time::Instant> = None;
-            let mut eq_phase: i32 = 0;
+            let mut last_notified_np_id = String::new();
             #[cfg(target_os = "windows")]
             let mut smtc_attached = false;
 
@@ -5199,10 +5337,21 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     }
                 };
 
-                if is_playing {
-                    eq_phase = (eq_phase + 1) & 3;
+                if track.video_id != last_notified_np_id {
+                    last_notified_np_id = track.video_id.clone();
+                    if !track.video_id.is_empty() {
+                        now_playing_ui::notify_track_changed(
+                            ui_weak.clone(),
+                            track.video_id.clone(),
+                            track.title.clone(),
+                            track.artist.clone(),
+                            dur,
+                        );
+                    }
                 }
-                let next_eq_phase = eq_phase;
+
+                let can_shuffle = playback.has_upcoming_user_queue();
+                let repeat_str = playback.repeat_mode().as_str();
 
                 let ui_w = ui_weak.clone();
                 slint::invoke_from_event_loop(move || {
@@ -5216,12 +5365,11 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                         if ui.get_is_playing() != is_playing {
                             ui.set_is_playing(is_playing);
                         }
-                        let theme = ui.global::<Theme>();
-                        if theme.get_is_playing() != is_playing {
-                            theme.set_is_playing(is_playing);
+                        if ui.get_can_shuffle_queue() != can_shuffle {
+                            ui.set_can_shuffle_queue(can_shuffle);
                         }
-                        if is_playing && theme.get_eq_phase() != next_eq_phase {
-                            theme.set_eq_phase(next_eq_phase);
+                        if ui.get_repeat_mode().as_str() != repeat_str {
+                            ui.set_repeat_mode(SharedString::from(repeat_str));
                         }
                         if ui.get_now_playing_video_id().as_str() != track.video_id.as_str() {
                             ui.set_now_playing_video_id(SharedString::from(track.video_id.as_str()));

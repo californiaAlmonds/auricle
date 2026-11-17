@@ -7,8 +7,8 @@ use serde_json::Value;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use tokio::sync::mpsc;
 use ytmapi_rs::auth::{noauth::NoAuthToken, AuthToken};
-use ytmapi_rs::common::{AlbumID, ArtistChannelID, BrowseParams, PlaylistID, YoutubeID};
-use ytmapi_rs::parse::{ParseFrom, PlaylistItem, ProcessedResult};
+use ytmapi_rs::common::{ArtistChannelID, BrowseParams, YoutubeID};
+use ytmapi_rs::parse::{ParseFrom, ProcessedResult};
 use ytmapi_rs::query::{GetArtistAlbumsQuery, GetArtistQuery, PostMethod, PostQuery, Query};
 use ytmapi_rs::YtMusic;
 
@@ -17,10 +17,6 @@ use crate::{context_ui, core, AlbumItem, NativeShellWindow};
 const CACHE_CAPACITY: usize = 8;
 const CACHE_TTL: Duration = Duration::from_secs(120);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
-const ALBUM_STATS_LIMIT: usize = 2000;
-const ALBUM_FETCH_DELAY: Duration = Duration::from_millis(150);
-const ALBUM_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
-const SONGS_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 const SECTIONS: &str = "/contents/singleColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents";
 
 static CATALOGUES: OnceLock<Mutex<CatalogueCache>> = OnceLock::new();
@@ -36,6 +32,62 @@ fn album_stats() -> &'static Mutex<HashMap<String, (u64, usize)>> {
     ALBUM_STATS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Fast synchronous preview helper preserving YouTube Music's returned order,
+/// filtering out empty items, and deduplicating by browse_id and normalized title.
+pub fn filter_preview_releases(
+    releases: Vec<(String, (AlbumItem, Option<String>))>,
+) -> Vec<(AlbumItem, Option<String>)> {
+    let mut seen_ids = HashSet::new();
+    let mut seen_titles = HashSet::new();
+    let mut result = Vec::new();
+
+    for (browse_id, (item, thumb_url)) in releases {
+        let id_clean = browse_id.trim();
+        let item_id_clean = item.browse_id.trim();
+        let title_clean = item.title.trim();
+        if id_clean.is_empty() || item_id_clean.is_empty() || title_clean.is_empty() {
+            continue;
+        }
+
+        let norm_key = core::release_rank::title_key(title_clean);
+
+        if seen_ids.contains(id_clean) || seen_ids.contains(item_id_clean) {
+            continue;
+        }
+
+        if !norm_key.is_empty() && seen_titles.contains(&norm_key) {
+            continue;
+        }
+
+        seen_ids.insert(id_clean.to_string());
+        if id_clean != item_id_clean {
+            seen_ids.insert(item_id_clean.to_string());
+        }
+        if !norm_key.is_empty() {
+            seen_titles.insert(norm_key);
+        }
+
+        result.push((item, thumb_url));
+    }
+
+    result
+}
+
+/// Invalidates any artist-row ranking still running for a previous page.
+pub fn cancel_artist_row() {
+    ROW_GENERATION.fetch_add(1, Ordering::SeqCst);
+}
+
+#[allow(dead_code)]
+pub fn rank_artist_row(
+    _ui: &NativeShellWindow,
+    _artist_id: &str,
+    _artist_name: &str,
+    _songs_playlist_id: Option<String>,
+) {
+}
+
+#[allow(dead_code)]
 pub(crate) fn parse_plays(text: &str) -> u64 {
     let Some(token) = text.split_whitespace().next() else {
         return 0;
@@ -59,6 +111,7 @@ pub(crate) fn parse_plays(text: &str) -> u64 {
     (value * multiplier).round() as u64
 }
 
+#[allow(dead_code)]
 pub(crate) fn order_by_popularity<T>(
     releases: Vec<(String, T)>,
     plays_by_release: &std::collections::HashMap<String, u64>,
@@ -696,358 +749,6 @@ fn request_thumbnail(ui: &NativeShellWindow, state: &Arc<State>, id: &str) {
     });
 }
 
-async fn fetch_artist_song_album_ids(
-    api: &YtMusic<NoAuthToken>,
-    artist_id: &str,
-    songs_playlist_id: Option<&str>,
-) -> Vec<String> {
-    let Some(raw_id) = songs_playlist_id.map(str::trim).filter(|id| !id.is_empty()) else {
-        return Vec::new();
-    };
-    let first = api.get_playlist_tracks(PlaylistID::from_raw(raw_id)).await;
-    let items = match first {
-        Ok(tracks) if !tracks.is_empty() => tracks,
-        first_res => {
-            if let Some(stripped) = raw_id.strip_prefix("VL").filter(|s| !s.is_empty()) {
-                match api.get_playlist_tracks(PlaylistID::from_raw(stripped)).await {
-                    Ok(tracks) => tracks,
-                    Err(error) => {
-                        log::warn!(
-                            "Artist songs playlist fetch failed for {artist_id} ({raw_id}): {error}"
-                        );
-                        Vec::new()
-                    }
-                }
-            } else {
-                if let Err(error) = first_res {
-                    log::warn!(
-                        "Artist songs playlist fetch failed for {artist_id} ({raw_id}): {error}"
-                    );
-                }
-                Vec::new()
-            }
-        }
-    };
-    items
-        .into_iter()
-        .filter_map(|item| match item {
-            PlaylistItem::Song(track) => Some(track.album.id.get_raw().to_string()),
-            _ => None,
-        })
-        .collect()
-}
-
-pub(crate) async fn compute_artist_row(
-    api: &YtMusic<NoAuthToken>,
-    artist_id: &str,
-    artist_name: &str,
-    songs_playlist_id: Option<&str>,
-    limit: usize,
-    should_continue: &dyn Fn() -> bool,
-) -> Result<(Vec<Release>, String), String> {
-    if !should_continue() {
-        return Err("cancelled".into());
-    }
-    // Bind first: an `if let` on the lock would hold the guard into the else branch and deadlock.
-    let cached = catalogues()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(artist_id, Instant::now());
-    let catalogue = if let Some(cached) = cached {
-        cached
-    } else {
-        let fetched = Arc::new(fetch_catalogue(api, artist_id).await?);
-        catalogues()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(fetched.clone(), Instant::now());
-        fetched
-    };
-    if !should_continue() {
-        return Err("cancelled".into());
-    }
-    let resolved_artist_name = if artist_name.trim().is_empty() {
-        catalogue.artist_name.as_str()
-    } else {
-        artist_name
-    };
-
-    let song_album_ids = match tokio::time::timeout(
-        SONGS_FETCH_TIMEOUT,
-        fetch_artist_song_album_ids(api, artist_id, songs_playlist_id),
-    )
-    .await
-    {
-        Ok(ids) => ids,
-        Err(_) => {
-            log::warn!("Artist songs playlist fetch timed out for {artist_id}");
-            Vec::new()
-        }
-    };
-    if !should_continue() {
-        return Err("cancelled".into());
-    }
-    let song_rank = core::release_rank::song_ranks(&song_album_ids);
-    let deduped = core::release_rank::dedupe(catalogue.releases.iter().map(to_candidate).collect());
-
-    let mut stats_snapshot = album_stats()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    let non_compilations: Vec<core::release_rank::Candidate> = deduped
-        .iter()
-        .filter(|c| {
-            let track_count = stats_snapshot.get(&c.id).map(|s| s.1);
-            core::release_rank::classify(c, resolved_artist_name, track_count)
-                != core::release_rank::ReleaseKind::Compilation
-        })
-        .cloned()
-        .collect();
-    let cached_plays: HashMap<String, u64> = stats_snapshot
-        .iter()
-        .map(|(k, &(plays, _))| (k.clone(), plays))
-        .collect();
-    let initially_ranked = core::release_rank::rank(&non_compilations, &song_rank, &cached_plays);
-    let to_fetch: Vec<String> = initially_ranked
-        .into_iter()
-        .take(limit)
-        .filter(|c| !stats_snapshot.contains_key(&c.id))
-        .map(|c| c.id.clone())
-        .collect();
-
-    for (idx, album_id) in to_fetch.iter().enumerate() {
-        if !should_continue() {
-            return Err("cancelled".into());
-        }
-        if idx > 0 {
-            tokio::time::sleep(ALBUM_FETCH_DELAY).await;
-            if !should_continue() {
-                return Err("cancelled".into());
-            }
-        }
-        match tokio::time::timeout(ALBUM_FETCH_TIMEOUT, api.get_album(AlbumID::from_raw(album_id.as_str())))
-            .await
-            .map_err(|_| "timed out".to_string())
-            .and_then(|result| result.map_err(|error| error.to_string()))
-        {
-            Ok(album) => {
-                let plays_sum = album
-                    .tracks
-                    .iter()
-                    .map(|track| parse_plays(&track.plays))
-                    .fold(0u64, u64::saturating_add);
-                let track_count = album.tracks.len();
-                stats_snapshot.insert(album_id.clone(), (plays_sum, track_count));
-                let mut cache = album_stats().lock().unwrap_or_else(|e| e.into_inner());
-                if cache.len() >= ALBUM_STATS_LIMIT {
-                    cache.clear();
-                }
-                cache.insert(album_id.clone(), (plays_sum, track_count));
-            }
-            Err(error) => {
-                log::warn!("Album stats fetch failed for {album_id}: {error}");
-            }
-        }
-    }
-
-    if !should_continue() {
-        return Err("cancelled".into());
-    }
-    let final_candidates: Vec<core::release_rank::Candidate> = deduped
-        .into_iter()
-        .filter(|c| {
-            let track_count = stats_snapshot.get(&c.id).map(|s| s.1);
-            core::release_rank::classify(c, resolved_artist_name, track_count)
-                != core::release_rank::ReleaseKind::Compilation
-        })
-        .collect();
-    let plays: HashMap<String, u64> = stats_snapshot
-        .iter()
-        .map(|(k, &(p, _))| (k.clone(), p))
-        .collect();
-    let ranked = core::release_rank::rank(&final_candidates, &song_rank, &plays);
-
-    let mut release_by_id = HashMap::<&str, &Release>::with_capacity(catalogue.releases.len());
-    for release in &catalogue.releases {
-        release_by_id.entry(release.id.as_str()).or_insert(release);
-    }
-    let releases = ranked
-        .into_iter()
-        .take(limit)
-        .filter_map(|candidate| {
-            let mut release = (*release_by_id.get(candidate.id.as_str())?).clone();
-            release.albums = candidate.from_albums;
-            release.singles = candidate.from_singles;
-            Some(release)
-        })
-        .collect();
-    Ok((releases, resolved_artist_name.to_string()))
-}
-
-fn current_artist_matches(artist_id: &str) -> bool {
-    CUR_ARTIST
-        .get()
-        .and_then(|cur| cur.lock().ok())
-        .is_some_and(|artist| artist.browse_id == artist_id)
-}
-
-/// Invalidates any artist-row ranking still running for a previous page.
-pub(crate) fn cancel_artist_row() {
-    ROW_GENERATION.fetch_add(1, Ordering::SeqCst);
-}
-
-pub(crate) fn rank_artist_row(
-    ui: &NativeShellWindow,
-    artist_id: &str,
-    artist_name: &str,
-    songs_playlist_id: Option<String>,
-) {
-    let generation = ROW_GENERATION.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
-    let weak = ui.as_weak();
-    let artist_id = artist_id.to_string();
-    let artist_name = artist_name.to_string();
-    let _ = std::thread::Builder::new()
-        .name("auricle-artist-row".into())
-        .spawn(move || {
-            core::audio_priority::lower_current_thread();
-            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            else {
-                let _ = slint::invoke_from_event_loop(move || {
-                    let Some(ui) = weak.upgrade() else { return };
-                    if ROW_GENERATION.load(Ordering::SeqCst) == generation {
-                        ui.set_artist_row_sorting(false);
-                        ui.set_artist_view_albums(ui.get_artist_row_fallback());
-                    }
-                });
-                return;
-            };
-            let result = runtime.block_on(async {
-                tokio::time::timeout(FETCH_TIMEOUT, async {
-                    let api = crate::core::net::ytmusic()
-                        .await
-                        .map_err(|error| error.to_string())?;
-                    compute_artist_row(
-                        &api,
-                        &artist_id,
-                        &artist_name,
-                        songs_playlist_id.as_deref(),
-                        20,
-                        &|| ROW_GENERATION.load(Ordering::SeqCst) == generation,
-                    )
-                    .await
-                })
-                .await
-                .unwrap_or_else(|_| Err("Artist row ranking timed out.".into()))
-            });
-            match result {
-                Ok((releases, resolved_name)) => {
-                    let _ = slint::invoke_from_event_loop(move || {
-                        let Some(ui) = weak.upgrade() else { return };
-                        if ROW_GENERATION.load(Ordering::SeqCst) != generation
-                            || ui.get_current_view() != "Artist"
-                            || !current_artist_matches(&artist_id)
-                        {
-                            return;
-                        }
-                        let mut missing_thumbs = Vec::new();
-                        let items: Vec<AlbumItem> = releases
-                            .iter()
-                            .map(|release| {
-                                context_ui::register_entity(
-                                    "Album",
-                                    &release.id,
-                                    &release.title,
-                                    &resolved_name,
-                                    &release.thumbnail_url,
-                                );
-                                let item = album_item(release, &resolved_name);
-                                if !item.has_thumbnail && !release.thumbnail_url.is_empty() {
-                                    missing_thumbs.push((
-                                        release.id.clone(),
-                                        release.thumbnail_url.clone(),
-                                    ));
-                                }
-                                item
-                            })
-                            .collect();
-                        ui.set_artist_row_sorting(false);
-                        if items.is_empty() {
-                            ui.set_artist_view_albums(ui.get_artist_row_fallback());
-                            return;
-                        }
-                        ui.set_artist_view_albums(ModelRc::new(VecModel::from(items)));
-                        for (id, url) in missing_thumbs {
-                            let weak = ui.as_weak();
-                            let artist_id = artist_id.clone();
-                            core::net::spawn(move || {
-                                if ROW_GENERATION.load(Ordering::SeqCst) != generation {
-                                    return;
-                                }
-                                let path = crate::library_thumb_path("album", &id);
-                                if !path.exists() {
-                                    let Ok(bytes) = core::net::http()
-                                        .get(&url)
-                                        .send()
-                                        .and_then(reqwest::blocking::Response::error_for_status)
-                                        .and_then(reqwest::blocking::Response::bytes)
-                                    else {
-                                        return;
-                                    };
-                                    if ROW_GENERATION.load(Ordering::SeqCst) != generation
-                                        || std::fs::write(&path, bytes).is_err()
-                                    {
-                                        return;
-                                    }
-                                }
-                                let _ = slint::invoke_from_event_loop(move || {
-                                    let Some(ui) = weak.upgrade() else { return };
-                                    if ROW_GENERATION.load(Ordering::SeqCst) != generation
-                                        || ui.get_current_view() != "Artist"
-                                        || !current_artist_matches(&artist_id)
-                                    {
-                                        return;
-                                    }
-                                    let (thumbnail, has_thumbnail) = crate::load_cached_thumb(&path);
-                                    if !has_thumbnail {
-                                        return;
-                                    }
-                                    let model = ui.get_artist_view_albums();
-                                    for row in 0..model.row_count() {
-                                        let Some(mut item) = model.row_data(row) else {
-                                            continue;
-                                        };
-                                        if item.browse_id.as_str() == id {
-                                            item.thumbnail = thumbnail;
-                                            item.has_thumbnail = true;
-                                            model.set_row_data(row, item);
-                                            break;
-                                        }
-                                    }
-                                });
-                            });
-                        }
-                    });
-                }
-                Err(error) if error == "cancelled" => {}
-                Err(error) => {
-                    log::warn!("Artist row ranking failed for {artist_id}: {error}");
-                    let _ = slint::invoke_from_event_loop(move || {
-                        let Some(ui) = weak.upgrade() else { return };
-                        if ROW_GENERATION.load(Ordering::SeqCst) != generation
-                            || !current_artist_matches(&artist_id)
-                        {
-                            return;
-                        }
-                        ui.set_artist_row_sorting(false);
-                        ui.set_artist_view_albums(ui.get_artist_row_fallback());
-                    });
-                }
-            }
-        });
-}
-
 enum Command {
     Load(Request, bool),
     Cancel,
@@ -1533,7 +1234,7 @@ mod tests {
 
     #[test]
     #[ignore = "Requires live YouTube Music access; provider catalogue may change"]
-    fn live_arijit_artist_row() {
+    fn live_arijit_artist_preview() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1545,37 +1246,78 @@ mod tests {
                 .get_artist(ArtistChannelID::from_raw(artist_id))
                 .await
                 .unwrap();
-            let songs_playlist_id = artist
+            let combined: Vec<(String, (AlbumItem, Option<String>))> = artist
                 .top_releases
-                .songs
-                .as_ref()
-                .map(|songs| songs.browse_id.get_raw().to_string());
-            let (releases, artist_name) = compute_artist_row(
-                &api,
-                artist_id,
-                &artist.name,
-                songs_playlist_id.as_deref(),
-                20,
-                &|| true,
-            )
-            .await
-            .unwrap();
-            for (idx, release) in releases.iter().enumerate() {
-                eprintln!("{}: {} ({})", idx + 1, release.title, release.year);
+                .albums
+                .iter()
+                .chain(artist.top_releases.singles.iter())
+                .flat_map(|section| section.results.iter())
+                .map(|a| {
+                    let browse_id = a.album_id.get_raw().to_string();
+                    let thumb_url = crate::pick_thumb(&a.thumbnails).map(|t| t.url.clone());
+                    let item = AlbumItem {
+                        title: a.title.as_str().into(),
+                        browse_id: browse_id.as_str().into(),
+                        artist: artist.name.as_str().into(),
+                        year: a.year.as_str().into(),
+                        thumbnail: Default::default(),
+                        has_thumbnail: false,
+                    };
+                    (browse_id, (item, thumb_url))
+                })
+                .collect();
+            let releases = filter_preview_releases(combined);
+            for (idx, (item, _)) in releases.iter().enumerate() {
+                eprintln!("{}: {} ({})", idx + 1, item.title, item.year);
             }
-            assert!((1..=20).contains(&releases.len()));
-            let stats = album_stats().lock().unwrap_or_else(|e| e.into_inner());
-            for release in &releases {
-                let candidate = to_candidate(release);
-                let track_count = stats.get(&release.id).map(|s| s.1);
-                assert_ne!(
-                    core::release_rank::classify(&candidate, &artist_name, track_count),
-                    core::release_rank::ReleaseKind::Compilation,
-                    "unexpected compilation in artist row: {}",
-                    release.title
-                );
-            }
+            assert!(!releases.is_empty());
         });
+    }
+
+    #[test]
+    fn filter_preview_releases_preserves_native_order_and_deduplicates() {
+        let make_item = |id: &str, title: &str| (
+            id.to_string(),
+            (
+                AlbumItem {
+                    browse_id: id.into(),
+                    title: title.into(),
+                    artist: "Artist".into(),
+                    year: "2024".into(),
+                    thumbnail: Default::default(),
+                    has_thumbnail: false,
+                },
+                Some(format!("http://thumb/{id}")),
+            ),
+        );
+
+        let raw = vec![
+            make_item("id-1", "Album One"),
+            make_item("id-2", "Single Two - Single"),
+            make_item("id-3", "Album One"), // Duplicate title
+            make_item("id-1", "Different Title"), // Duplicate browse_id
+            make_item("", "Empty ID"), // Empty browse_id
+            make_item("id-4", ""), // Empty title
+            make_item("id-5", "Single Two"), // Duplicate normalized title (- Single stripped)
+            make_item("id-6", "Album \u{201C}Three\u{201D}"),
+            make_item("id-7", "Album \"Three\""), // Duplicate normalized smart quote
+            make_item("id-8", "Final Release"),
+        ];
+
+        let filtered = filter_preview_releases(raw);
+        let titles: Vec<&str> = filtered.iter().map(|(item, _)| item.title.as_str()).collect();
+        let ids: Vec<&str> = filtered.iter().map(|(item, _)| item.browse_id.as_str()).collect();
+
+        assert_eq!(
+            titles,
+            vec![
+                "Album One",
+                "Single Two - Single",
+                "Album \u{201C}Three\u{201D}",
+                "Final Release"
+            ]
+        );
+        assert_eq!(ids, vec!["id-1", "id-2", "id-6", "id-8"]);
     }
 
     #[test]
