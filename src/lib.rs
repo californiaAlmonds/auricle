@@ -2025,6 +2025,7 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
 
 fn normalize_theme_name(name: &str) -> &'static str {
     match name {
+        "Dynamic" => "Dynamic",
         "Solar Red" => "Solar Red",
         "Ember" => "Ember",
         "Earth" => "Earth",
@@ -2040,16 +2041,17 @@ fn normalize_theme_name(name: &str) -> &'static str {
 
 fn theme_accent(name: &str) -> slint::Color {
     let (r, g, b) = match normalize_theme_name(name) {
-        "Solar Red" => (0xe2, 0x50, 0x3f),
-        "Ember" => (0xf2, 0x70, 0x3a),
-        "Earth" => (0xb0, 0x6a, 0x43),
-        "Forest" => (0x3f, 0xa9, 0x6a),
-        "Ocean" => (0x16, 0x99, 0xa8),
-        "Sky" => (0x46, 0xa6, 0xe6),
-        "Twilight" => (0x8b, 0x5c, 0xf6),
-        "Rose" => (0xe2, 0x6a, 0xa0),
-        "Mono" => (0x6b, 0x72, 0x80),
-        _ => (0x64, 0x86, 0xb0),
+        "Dynamic" => (0x7c, 0x8c, 0xf8),
+        "Solar Red" => (0xfa, 0x2d, 0x48),
+        "Ember" => (0xf9, 0x73, 0x16),
+        "Earth" => (0xc2, 0x78, 0x49),
+        "Forest" => (0x24, 0xc4, 0x66),
+        "Ocean" => (0x14, 0xb8, 0xc4),
+        "Sky" => (0x38, 0xbd, 0xf8),
+        "Twilight" => (0x9b, 0x6d, 0xff),
+        "Rose" => (0xec, 0x48, 0x99),
+        "Mono" => (0x8b, 0x95, 0xa5),
+        _ => (0x5b, 0x8d, 0xef),
     };
     slint::Color::from_rgb_u8(r, g, b)
 }
@@ -2098,8 +2100,169 @@ fn theme_is_light(mode: &str) -> bool {
 }
 
 fn apply_theme(ui: &NativeShellWindow, name: &str, mode: &str) {
-    ui.global::<Theme>().set_accent(theme_accent(name));
-    ui.global::<Theme>().set_is_light(theme_is_light(mode));
+    let norm = normalize_theme_name(name);
+    let is_dyn = norm == "Dynamic";
+    let theme = ui.global::<Theme>();
+    theme.set_is_dynamic(is_dyn);
+    if is_dyn && theme.get_has_art_accent() {
+        theme.set_accent(theme.get_art_accent());
+    } else {
+        theme.set_accent(theme_accent(norm));
+    }
+    theme.set_is_light(theme_is_light(mode));
+}
+
+fn apply_art_accent(ui: &NativeShellWindow, art_color: Option<slint::Color>) {
+    let theme = ui.global::<Theme>();
+    match art_color {
+        Some(c) => {
+            theme.set_art_accent(c);
+            theme.set_has_art_accent(true);
+            if theme.get_is_dynamic() {
+                theme.set_accent(c);
+            }
+        }
+        None => {
+            theme.set_has_art_accent(false);
+            if theme.get_is_dynamic() {
+                theme.set_accent(theme_accent("Dynamic"));
+            }
+        }
+    }
+}
+
+fn rgb_to_hsv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+    let v = max;
+    let s = if max > 0.0 { delta / max } else { 0.0 };
+    let h = if delta <= 1e-6 {
+        0.0
+    } else if (max - r).abs() < 1e-6 {
+        60.0 * (((g - b) / delta).rem_euclid(6.0))
+    } else if (max - g).abs() < 1e-6 {
+        60.0 * (((b - r) / delta) + 2.0)
+    } else {
+        60.0 * (((r - g) / delta) + 4.0)
+    };
+    (h.rem_euclid(360.0), s, v)
+}
+
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
+    let c = v * s;
+    let h_prime = (h.rem_euclid(360.0)) / 60.0;
+    let x = c * (1.0 - ((h_prime % 2.0) - 1.0).abs());
+    let m = v - c;
+    let (r1, g1, b1) = if h_prime < 1.0 {
+        (c, x, 0.0)
+    } else if h_prime < 2.0 {
+        (x, c, 0.0)
+    } else if h_prime < 3.0 {
+        (0.0, c, x)
+    } else if h_prime < 4.0 {
+        (0.0, x, c)
+    } else if h_prime < 5.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+    let r = ((r1 + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    let g = ((g1 + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    let b = ((b1 + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    (r, g, b)
+}
+
+pub fn extract_vibrant_accent_from_image(img: &image::DynamicImage) -> slint::Color {
+    let rgba = img.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+    if w == 0 || h == 0 {
+        return slint::Color::from_rgb_u8(0x8b, 0x95, 0xa5);
+    }
+
+    let x_step = (w / 24).max(1);
+    let y_step = (h / 24).max(1);
+
+    // Skip top/bottom 12% letterbox bars (e.g. YouTube mqdefault.jpg 16:9 black bars)
+    let mut y_start = (h as f32 * 0.12) as u32;
+    let mut y_end = (h as f32 * 0.88).ceil() as u32;
+    if y_start >= y_end || y_end > h {
+        y_start = 0;
+        y_end = h;
+    }
+
+    let mut bin_weights = [0.0f32; 12];
+    let mut bin_r = [0.0f32; 12];
+    let mut bin_g = [0.0f32; 12];
+    let mut bin_b = [0.0f32; 12];
+    let mut total_vivid_weight = 0.0f32;
+
+    let mut y = y_start;
+    while y < y_end {
+        let mut x = 0;
+        while x < w {
+            let px = rgba.get_pixel(x, y);
+            let alpha = px[3];
+            if alpha >= 128 {
+                let r = px[0] as f32 / 255.0;
+                let g = px[1] as f32 / 255.0;
+                let b = px[2] as f32 / 255.0;
+                let (h_val, s, v) = rgb_to_hsv(r, g, b);
+
+                let is_near_black = v < 0.12;
+                let is_near_white = v > 0.96 && s < 0.12;
+                if !is_near_black && !is_near_white {
+                    let weight = s.powf(1.6) * (1.0 - ((v - 0.62).abs() * 1.35).min(0.9));
+                    if weight > 0.001 {
+                        let bin = ((h_val / 30.0).floor() as usize).min(11);
+                        bin_weights[bin] += weight;
+                        bin_r[bin] += r * weight;
+                        bin_g[bin] += g * weight;
+                        bin_b[bin] += b * weight;
+                        total_vivid_weight += weight;
+                    }
+                }
+            }
+            x += x_step;
+        }
+        y += y_step;
+    }
+
+    if total_vivid_weight < 1e-3 {
+        return slint::Color::from_rgb_u8(0x8b, 0x95, 0xa5);
+    }
+
+    let mut best_bin = 0;
+    let mut best_weight = 0.0f32;
+    for (i, &bw) in bin_weights.iter().enumerate() {
+        if bw > best_weight {
+            best_weight = bw;
+            best_bin = i;
+        }
+    }
+
+    if best_weight < 1e-4 {
+        return slint::Color::from_rgb_u8(0x8b, 0x95, 0xa5);
+    }
+
+    let avg_r = bin_r[best_bin] / best_weight;
+    let avg_g = bin_g[best_bin] / best_weight;
+    let avg_b = bin_b[best_bin] / best_weight;
+
+    let (h_val, s, v) = rgb_to_hsv(avg_r, avg_g, avg_b);
+    let norm_s = s.clamp(0.52, 0.82);
+    let norm_v = v.clamp(0.68, 0.88);
+    let (final_r, final_g, final_b) = hsv_to_rgb(h_val, norm_s, norm_v);
+
+    slint::Color::from_rgb_u8(final_r, final_g, final_b)
+}
+
+pub fn extract_vibrant_accent_from_bytes(bytes: &[u8]) -> Option<slint::Color> {
+    image::load_from_memory(bytes).ok().map(|img| extract_vibrant_accent_from_image(&img))
+}
+
+pub fn extract_vibrant_accent_from_path(path: &std::path::Path) -> Option<slint::Color> {
+    image::open(path).ok().map(|img| extract_vibrant_accent_from_image(&img))
 }
 
 pub fn run_native_shell() -> Result<(), slint::PlatformError> {
@@ -4546,6 +4709,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             let mut thumb_refresh_counter: u32 = 0;
             let mut thumb_fetch_done: Option<std::sync::mpsc::Receiver<()>> = None;
             let mut last_autoplay_refill: Option<std::time::Instant> = None;
+            let mut eq_phase: i32 = 0;
             #[cfg(target_os = "windows")]
             let mut smtc_attached = false;
 
@@ -4843,12 +5007,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                         std::thread::spawn(move || {
                             let url = format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", vid);
                             let tmp = std::env::temp_dir().join(format!("ytm_thumb_{}.jpg", vid));
-                            let ok = client.get(&url).send().ok()
+                            let bytes = client.get(&url).send().ok()
                                 .filter(|r| r.status().is_success())
-                                .and_then(|r| r.bytes().ok())
-                                .map(|b| std::fs::write(&tmp, &b).is_ok())
-                                .unwrap_or(false);
-                            if ok {
+                                .and_then(|r| r.bytes().ok());
+                            if let Some(b) = bytes {
+                                let _ = std::fs::write(&tmp, &b);
+                                let art_color = extract_vibrant_accent_from_bytes(&b);
                                 slint::invoke_from_event_loop(move || {
                                     if let Some(ui) = ui_weak_art.upgrade() {
                                         // Only apply if this is still the current track.
@@ -4856,6 +5020,9 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                             if let Ok(img) = slint::Image::load_from_path(&tmp) {
                                                 ui.set_album_art(img);
                                                 ui.set_has_album_art(true);
+                                                if art_color.is_some() {
+                                                    apply_art_accent(&ui, art_color);
+                                                }
                                             }
                                         }
                                     }
@@ -5010,6 +5177,8 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     }
                 }
 
+                let thumb_art_color = thumb_path.as_deref().and_then(extract_vibrant_accent_from_path);
+
                 #[cfg(target_os = "windows")]
                 let media_snap = {
                     let album = if !track.album.is_empty() {
@@ -5030,28 +5199,68 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     }
                 };
 
+                if is_playing {
+                    eq_phase = (eq_phase + 1) & 3;
+                }
+                let next_eq_phase = eq_phase;
+
                 let ui_w = ui_weak.clone();
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_w.upgrade() {
-                        ui.set_track_title(SharedString::from(track.title.as_str()));
-                        ui.set_track_artist(SharedString::from(track.artist.as_str()));
-                        ui.set_is_playing(is_playing);
-                        ui.set_now_playing_video_id(SharedString::from(track.video_id.as_str()));
-                        ui.set_progress(progress);
-                        ui.set_current_time(SharedString::from(current_time.as_str()));
-                        ui.set_total_time(SharedString::from(total_time.as_str()));
-                        ui.set_track_initial(SharedString::from(initial.as_str()));
-                        ui.set_is_liked(liked);
-                        ui.set_cache_used_mb(cache_used_mb);
-                        ui.set_cache_song_count(cache_song_count);
-                        ui.set_cache_limit_mb(cache_limit_mb);
+                        if ui.get_track_title().as_str() != track.title.as_str() {
+                            ui.set_track_title(SharedString::from(track.title.as_str()));
+                        }
+                        if ui.get_track_artist().as_str() != track.artist.as_str() {
+                            ui.set_track_artist(SharedString::from(track.artist.as_str()));
+                        }
+                        if ui.get_is_playing() != is_playing {
+                            ui.set_is_playing(is_playing);
+                        }
+                        let theme = ui.global::<Theme>();
+                        if theme.get_is_playing() != is_playing {
+                            theme.set_is_playing(is_playing);
+                        }
+                        if is_playing && theme.get_eq_phase() != next_eq_phase {
+                            theme.set_eq_phase(next_eq_phase);
+                        }
+                        if ui.get_now_playing_video_id().as_str() != track.video_id.as_str() {
+                            ui.set_now_playing_video_id(SharedString::from(track.video_id.as_str()));
+                        }
+                        if (ui.get_progress() - progress).abs() >= 0.0005 {
+                            ui.set_progress(progress);
+                        }
+                        if ui.get_current_time().as_str() != current_time.as_str() {
+                            ui.set_current_time(SharedString::from(current_time.as_str()));
+                        }
+                        if ui.get_total_time().as_str() != total_time.as_str() {
+                            ui.set_total_time(SharedString::from(total_time.as_str()));
+                        }
+                        if ui.get_track_initial().as_str() != initial.as_str() {
+                            ui.set_track_initial(SharedString::from(initial.as_str()));
+                        }
+                        if ui.get_is_liked() != liked {
+                            ui.set_is_liked(liked);
+                        }
+                        if ui.get_cache_used_mb() != cache_used_mb {
+                            ui.set_cache_used_mb(cache_used_mb);
+                        }
+                        if ui.get_cache_song_count() != cache_song_count {
+                            ui.set_cache_song_count(cache_song_count);
+                        }
+                        if ui.get_cache_limit_mb() != cache_limit_mb {
+                            ui.set_cache_limit_mb(cache_limit_mb);
+                        }
                         if let Some(path) = thumb_path {
                             if let Ok(img) = slint::Image::load_from_path(&path) {
                                 ui.set_album_art(img);
                                 ui.set_has_album_art(true);
+                                if thumb_art_color.is_some() {
+                                    apply_art_accent(&ui, thumb_art_color);
+                                }
                             }
                         } else if thumbnail_changed {
                             ui.set_has_album_art(false);
+                            apply_art_accent(&ui, None);
                         }
                     }
                     #[cfg(target_os = "windows")]
@@ -5175,6 +5384,10 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 if let Ok(img) = slint::Image::load_from_path(&thumb_path) {
                     ui.set_album_art(img);
                     ui.set_has_album_art(true);
+                    let art_color = extract_vibrant_accent_from_path(&thumb_path);
+                    if art_color.is_some() {
+                        apply_art_accent(&ui, art_color);
+                    }
                 }
             }
             // Fetch autoplay queue for last played song
@@ -5790,5 +6003,99 @@ pub fn launch() {
         log::error!("[startup] UI failed: {err}");
         core::diagnostics::show_error_dialog(&format!("Auricle couldn't open its window: {err}"));
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_theme_name() {
+        assert_eq!(normalize_theme_name("Dynamic"), "Dynamic");
+        assert_eq!(normalize_theme_name("Default Blue"), "Default Blue");
+        assert_eq!(normalize_theme_name("Solar Red"), "Solar Red");
+        assert_eq!(normalize_theme_name("Ember"), "Ember");
+        assert_eq!(normalize_theme_name("Earth"), "Earth");
+        assert_eq!(normalize_theme_name("Forest"), "Forest");
+        assert_eq!(normalize_theme_name("Ocean"), "Ocean");
+        assert_eq!(normalize_theme_name("Sky"), "Sky");
+        assert_eq!(normalize_theme_name("Twilight"), "Twilight");
+        assert_eq!(normalize_theme_name("Rose"), "Rose");
+        assert_eq!(normalize_theme_name("Mono"), "Mono");
+
+        // Backwards compatibility for unknown / legacy theme names
+        assert_eq!(normalize_theme_name("Legacy Theme"), "Default Blue");
+        assert_eq!(normalize_theme_name(""), "Default Blue");
+    }
+
+    #[test]
+    fn test_theme_accent_values() {
+        assert_eq!(theme_accent("Dynamic"), slint::Color::from_rgb_u8(0x7c, 0x8c, 0xf8));
+        assert_eq!(theme_accent("Default Blue"), slint::Color::from_rgb_u8(0x5b, 0x8d, 0xef));
+        assert_eq!(theme_accent("Solar Red"), slint::Color::from_rgb_u8(0xfa, 0x2d, 0x48));
+        assert_eq!(theme_accent("Ember"), slint::Color::from_rgb_u8(0xf9, 0x73, 0x16));
+        assert_eq!(theme_accent("Earth"), slint::Color::from_rgb_u8(0xc2, 0x78, 0x49));
+        assert_eq!(theme_accent("Forest"), slint::Color::from_rgb_u8(0x24, 0xc4, 0x66));
+        assert_eq!(theme_accent("Ocean"), slint::Color::from_rgb_u8(0x14, 0xb8, 0xc4));
+        assert_eq!(theme_accent("Sky"), slint::Color::from_rgb_u8(0x38, 0xbd, 0xf8));
+        assert_eq!(theme_accent("Twilight"), slint::Color::from_rgb_u8(0x9b, 0x6d, 0xff));
+        assert_eq!(theme_accent("Rose"), slint::Color::from_rgb_u8(0xec, 0x48, 0x99));
+        assert_eq!(theme_accent("Mono"), slint::Color::from_rgb_u8(0x8b, 0x95, 0xa5));
+        assert_eq!(theme_accent("Invalid"), slint::Color::from_rgb_u8(0x5b, 0x8d, 0xef));
+    }
+
+    #[test]
+    fn test_extract_vibrant_accent_grayscale_fallback() {
+        let img = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            64,
+            64,
+            image::Rgba([128, 128, 128, 255]),
+        ));
+        let accent = extract_vibrant_accent_from_image(&img);
+        assert_eq!(accent, slint::Color::from_rgb_u8(0x8b, 0x95, 0xa5));
+    }
+
+    #[test]
+    fn test_extract_vibrant_accent_letterbox_rejection() {
+        let mut raw = image::RgbaImage::new(100, 100);
+        for y in 0..100 {
+            for x in 0..100 {
+                if y < 12 || y >= 88 {
+                    // Top and bottom 12% letterbox bars: neon red
+                    raw.put_pixel(x, y, image::Rgba([255, 0, 0, 255]));
+                } else {
+                    // Content area: pure vibrant cyan
+                    raw.put_pixel(x, y, image::Rgba([0, 220, 220, 255]));
+                }
+            }
+        }
+        let img = image::DynamicImage::ImageRgba8(raw);
+        let accent = extract_vibrant_accent_from_image(&img);
+        // Letterbox red was ignored, cyan content won
+        assert!(accent.blue() > 150);
+        assert!(accent.green() > 150);
+        assert!(accent.red() < 100);
+    }
+
+    #[test]
+    fn test_extract_vibrant_accent_complementary_hue_non_muddying() {
+        let mut raw = image::RgbaImage::new(100, 100);
+        for y in 0..100 {
+            for x in 0..100 {
+                if y < 60 {
+                    // 60% orange
+                    raw.put_pixel(x, y, image::Rgba([255, 120, 20, 255]));
+                } else {
+                    // 40% blue
+                    raw.put_pixel(x, y, image::Rgba([20, 120, 255, 255]));
+                }
+            }
+        }
+        let img = image::DynamicImage::ImageRgba8(raw);
+        let accent = extract_vibrant_accent_from_image(&img);
+        // The winning hue bin is orange; hue binning prevents muddy brown averaging
+        assert!(accent.red() > accent.blue() + 50);
+        assert!(accent.red() > 180);
     }
 }
