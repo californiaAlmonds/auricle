@@ -1232,9 +1232,8 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                     RailTooltip { enabled: !sidebar-open && logo-ta.has-hover; label: "Expand sidebar"; }
                                 }
                                 if sidebar-open: HorizontalLayout {
-                                    horizontal-stretch: 1; alignment: space-between;
+                                    horizontal-stretch: 1;
                                     Text { text: "Auricle"; color: Theme.text; font-size: 18px; font-weight: 800; vertical-alignment: center; }
-                                    IconBtn { svg-icon: @image-url("icons/chevron-left.svg"); use-svg: true; icon-color: Theme.text-dim; clicked => { toggle-sidebar(); } }
                                 }
                             }
                         }
@@ -1407,7 +1406,6 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                         x: 1px; y: 1px; width: max(0px, parent.width - 2px); height: 240px;
                         border-top-left-radius: Theme.radius; border-top-right-radius: Theme.radius;
                         background: @linear-gradient(180deg, Theme.ambient-tint.with-alpha(Theme.is-light ? 0.10 : 0.15) 0%, transparent 100%);
-                        animate background { duration: 350ms; easing: ease-out; }
                     }
                     VerticalLayout {
                         width: parent.width; height: parent.height;
@@ -1535,7 +1533,7 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                             animate y { duration: 200ms; easing: cubic-bezier(0.2, 0.0, 0.0, 1.0); }
 
                             // Loading
-                        if is-loading && current-view != "Search": VerticalLayout {
+                        if is-loading && current-view != "Search" && current-view != "NowPlaying": VerticalLayout {
                             alignment: center; spacing: 10px;
                             Text { text: "Searching..."; font-size: 18px; color: Theme.text-muted; horizontal-alignment: center; }
                             Text { text: "Hold tight"; font-size: 13px; color: Theme.text-dim; horizontal-alignment: center; }
@@ -4152,6 +4150,610 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                 }
                             }
                         }
+
+                        // NOW PLAYING
+                        if current-view == "NowPlaying": np-root := Rectangle {
+                            width: parent.width; height: parent.height;
+                            property <length> pad: compact ? 20px : 32px;
+                            property <length> left-avail-w: (self.width - 3 * self.pad) * 11 / 21;
+                            property <length> art-sz: max(170px, min(self.left-avail-w - 24px, min(self.height - 2 * self.pad - 116px, 420px)));
+
+                            HorizontalLayout {
+                                width: parent.width; height: parent.height;
+                                padding: np-root.pad; spacing: np-root.pad;
+
+                            // Left column: Hero artwork + track title + artist/album links
+                            np-left := Rectangle {
+                                horizontal-stretch: 11; min-width: 250px;
+
+                                VerticalLayout {
+                                    width: parent.width; height: parent.height; alignment: center; spacing: 18px;
+
+                                    Rectangle {
+                                        height: np-root.art-sz;
+                                        Rectangle {
+                                            x: (parent.width - self.width) / 2; y: 0;
+                                            width: np-root.art-sz; height: np-root.art-sz;
+                                            border-radius: Theme.radius-lg;
+                                            background: Theme.art-placeholder;
+                                            drop-shadow-blur: 36px; drop-shadow-color: Theme.accent-glow; drop-shadow-offset-y: 12px;
+
+                                            Rectangle {
+                                                width: parent.width; height: parent.height; border-radius: Theme.radius-lg; clip: true;
+                                                if np-has-highres-art: Image { source: np-highres-art; width: parent.width; height: parent.height; image-fit: cover; }
+                                                if !np-has-highres-art && has-album-art: Image { source: album-art; width: parent.width; height: parent.height; image-fit: cover; }
+                                                if !np-has-highres-art && !has-album-art: Rectangle {
+                                                    width: parent.width; height: parent.height;
+                                                    background: @linear-gradient(135deg, Theme.effective-accent 0%, Theme.effective-accent.darker(0.45) 100%);
+                                                    Image {
+                                                        source: @image-url("icons/music-note.svg");
+                                                        width: 64px; height: 64px; colorize: Theme.on-accent;
+                                                        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        spacing: 6px; padding-left: 12px; padding-right: 12px;
+                                        Text { text: track-title; font-size: 22px; font-weight: 800; color: Theme.text; horizontal-alignment: center; overflow: elide; }
+                                        Rectangle {
+                                            height: 22px;
+                                            Text {
+                                                text: track-artist; width: parent.width; height: parent.height;
+                                                font-size: 14px; font-weight: 600;
+                                                color: np-art-link-ta.has-hover ? Theme.effective-accent : Theme.text-muted;
+                                                horizontal-alignment: center; vertical-alignment: center; overflow: elide;
+                                            }
+                                            np-art-link-ta := TouchArea { clicked => { open-artist-for(now-playing-video-id, track-artist); } }
+                                        }
+                                        if np-album-title != "": Rectangle {
+                                            height: 20px;
+                                            Text {
+                                                text: np-album-title + (np-album-year != "" ? "  •  " + np-album-year : "");
+                                                width: parent.width; height: parent.height;
+                                                font-size: 12px;
+                                                color: np-alb-link-ta.has-hover ? Theme.text : Theme.text-dim;
+                                                horizontal-alignment: center; vertical-alignment: center; overflow: elide;
+                                            }
+                                            np-alb-link-ta := TouchArea {
+                                                clicked => {
+                                                    if (np-album-id != "") { navigate-to-album(np-album-id); }
+                                                    else { open-album-for(now-playing-video-id, np-album-title); }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Right column: Segmented Tabs (Up Next / Lyrics / Related)
+                            np-right := Rectangle {
+                                horizontal-stretch: 10; min-width: 290px;
+                                border-radius: Theme.radius-lg; background: Theme.glass;
+                                border-color: Theme.border; border-width: 1px;
+
+                                VerticalLayout {
+                                    width: parent.width; height: parent.height; padding-top: 6px; spacing: 0px;
+
+                                    // Tab header
+                                    Rectangle {
+                                        height: 46px;
+                                        HorizontalLayout {
+                                            width: parent.width; height: parent.height;
+                                            // UP NEXT tab
+                                            Rectangle {
+                                                horizontal-stretch: 1;
+                                                Text {
+                                                    text: "UP NEXT"; font-size: 12px; font-weight: 700; letter-spacing: 0.9px;
+                                                    color: np-tab == "UpNext" ? Theme.text : (tab-un-ta.has-hover ? Theme.text : Theme.text-muted);
+                                                    horizontal-alignment: center; vertical-alignment: center; width: parent.width; height: parent.height;
+                                                }
+                                                if np-tab == "UpNext": Rectangle {
+                                                    y: parent.height - 2px; height: 2px; width: 32px;
+                                                    x: (parent.width - self.width) / 2;
+                                                    border-radius: 1px; background: Theme.effective-accent;
+                                                }
+                                                tab-un-ta := TouchArea { clicked => { np-tab-changed("UpNext"); } }
+                                            }
+                                            // LYRICS tab
+                                            Rectangle {
+                                                horizontal-stretch: 1;
+                                                Text {
+                                                    text: "LYRICS"; font-size: 12px; font-weight: 700; letter-spacing: 0.9px;
+                                                    color: np-tab == "Lyrics" ? Theme.text : (tab-lyr-ta.has-hover ? Theme.text : Theme.text-muted);
+                                                    horizontal-alignment: center; vertical-alignment: center; width: parent.width; height: parent.height;
+                                                }
+                                                if np-tab == "Lyrics": Rectangle {
+                                                    y: parent.height - 2px; height: 2px; width: 32px;
+                                                    x: (parent.width - self.width) / 2;
+                                                    border-radius: 1px; background: Theme.effective-accent;
+                                                }
+                                                tab-lyr-ta := TouchArea { clicked => { np-tab-changed("Lyrics"); } }
+                                            }
+                                            // RELATED tab
+                                            Rectangle {
+                                                horizontal-stretch: 1;
+                                                Text {
+                                                    text: "RELATED"; font-size: 12px; font-weight: 700; letter-spacing: 0.9px;
+                                                    color: np-tab == "Related" ? Theme.text : (tab-rel-ta.has-hover ? Theme.text : Theme.text-muted);
+                                                    horizontal-alignment: center; vertical-alignment: center; width: parent.width; height: parent.height;
+                                                }
+                                                if np-tab == "Related": Rectangle {
+                                                    y: parent.height - 2px; height: 2px; width: 32px;
+                                                    x: (parent.width - self.width) / 2;
+                                                    border-radius: 1px; background: Theme.effective-accent;
+                                                }
+                                                tab-rel-ta := TouchArea { clicked => { np-tab-changed("Related"); } }
+                                            }
+                                        }
+                                        Rectangle { y: parent.height - 1px; height: 1px; width: parent.width; background: Theme.border-soft; }
+                                    }
+
+                                    // Tab 1: UP NEXT
+                                    if np-tab == "UpNext": VerticalLayout {
+                                        vertical-stretch: 1; padding: 14px; spacing: 10px;
+
+                                        // Context bar
+                                        Rectangle {
+                                            height: 36px;
+                                            HorizontalLayout {
+                                                width: parent.width; height: parent.height; alignment: space-between;
+                                                Text { text: "Playing from Queue"; font-size: 12px; font-weight: 600; color: Theme.text-muted; vertical-alignment: center; }
+                                                HorizontalLayout {
+                                                    spacing: 8px; alignment: center;
+                                                    Text { text: "Autoplay"; font-size: 12px; font-weight: 600; color: Theme.text; vertical-alignment: center; }
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        Rectangle {
+                                                            width: 40px; height: 22px; border-radius: 11px;
+                                                            background: autoplay-enabled ? Theme.effective-accent : Theme.surface-hover;
+                                                            animate background { duration: 180ms; }
+                                                            Rectangle {
+                                                                x: autoplay-enabled ? parent.width - self.width - 2px : 2px;
+                                                                y: (parent.height - self.height) / 2;
+                                                                width: 18px; height: 18px; border-radius: 9px;
+                                                                background: autoplay-enabled ? Theme.on-accent : Theme.text-muted;
+                                                                animate x { duration: 180ms; easing: ease-in-out; }
+                                                            }
+                                                            TouchArea { clicked => { set-autoplay-enabled(!autoplay-enabled); } }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // Scroll wrapper
+                                        Rectangle {
+                                            vertical-stretch: 1; clip: true;
+                                            np-upnext-fl := SmoothFlickable {
+                                                width: parent.width; height: parent.height;
+                                                viewport-width: self.width; viewport-height: np-upnext-col.preferred-height;
+                                                np-upnext-col := VerticalLayout {
+                                                    width: parent.width; height: self.preferred-height; alignment: start; spacing: 4px;
+
+                                                    // Current card
+                                                    if now-playing-video-id != "": Rectangle {
+                                                        height: 64px; border-radius: Theme.radius-sm;
+                                                        background: Theme.accent-soft;
+                                                        border-width: 1px; border-color: Theme.effective-accent.with-alpha(0.35);
+
+                                                        HorizontalLayout {
+                                                            padding-left: 8px; padding-right: 12px; padding-top: 8px; padding-bottom: 8px; spacing: 12px;
+                                                            Rectangle {
+                                                                width: 46px; height: 46px; border-radius: 6px; clip: true;
+                                                                background: Theme.art-placeholder;
+                                                                if has-album-art: Image { source: album-art; width: parent.width; height: parent.height; image-fit: cover; }
+                                                                if !has-album-art: Text {
+                                                                    text: track-initial; color: Theme.effective-accent; font-size: 16px; font-weight: 700;
+                                                                    width: parent.width; height: parent.height;
+                                                                    horizontal-alignment: center; vertical-alignment: center;
+                                                                }
+                                                            }
+                                                            VerticalLayout {
+                                                                alignment: center; spacing: 3px; horizontal-stretch: 1;
+                                                                Text { text: track-title; font-size: 13px; font-weight: 700; color: Theme.effective-accent; overflow: elide; }
+                                                                Text { text: track-artist; font-size: 12px; color: Theme.text-muted; overflow: elide; }
+                                                            }
+                                                            VerticalLayout {
+                                                                alignment: center;
+                                                                Image {
+                                                                    source: root.is-playing ? @image-url("icons/pause.svg") : @image-url("icons/play.svg");
+                                                                    width: 18px; height: 18px; colorize: Theme.effective-accent;
+                                                                }
+                                                            }
+                                                        }
+                                                        np-cur-ta := TouchArea {
+                                                            clicked => { toggle-play-pause(); }
+                                                            pointer-event(e) => {
+                                                                if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                                                                    open-ctx(now-playing-video-id, track-title, track-artist, "", 0,
+                                                                        self.absolute-position.x + self.mouse-x,
+                                                                        self.absolute-position.y + self.mouse-y);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+
+                                                    // Manual Queue section
+                                                    if queue.length > 0: Rectangle { height: 10px; }
+                                                    if queue.length > 0: Text { text: "NEXT IN QUEUE"; font-size: 11px; font-weight: 700; color: Theme.text-dim; }
+                                                    if queue.length > 0: Rectangle { height: 2px; }
+
+                                                    for item[i] in queue: Rectangle {
+                                                        height: 60px; border-radius: Theme.radius-sm;
+                                                        background: (np-q-ta.has-hover || np-q-rm-ta.has-hover) ? Theme.hover-veil : transparent;
+                                                        HorizontalLayout {
+                                                            padding-left: 6px; padding-right: 50px; padding-top: 8px; padding-bottom: 8px; spacing: 10px;
+                                                            Rectangle {
+                                                                width: 44px; height: 44px; border-radius: 6px; clip: true;
+                                                                background: Theme.art-placeholder;
+                                                                if item.has-thumbnail: Image { source: item.thumbnail; width: parent.width; height: parent.height; image-fit: cover; }
+                                                                if !item.has-thumbnail: Text {
+                                                                    text: item.avatar-letter; color: Theme.text-muted; font-size: 14px; font-weight: 700;
+                                                                    width: parent.width; height: parent.height;
+                                                                    horizontal-alignment: center; vertical-alignment: center;
+                                                                }
+                                                            }
+                                                            VerticalLayout {
+                                                                alignment: center; spacing: 2px; horizontal-stretch: 1;
+                                                                Text { text: item.title; font-size: 13px; font-weight: 600; color: Theme.text; overflow: elide; }
+                                                                Text { text: item.artist; font-size: 11px; color: Theme.text-muted; overflow: elide; }
+                                                            }
+                                                            if item.duration-str != "": VerticalLayout {
+                                                                alignment: center;
+                                                                Text { text: item.duration-str; font-size: 11px; color: Theme.text-dim; }
+                                                            }
+                                                        }
+                                                        np-q-ta := TouchArea {
+                                                            clicked => { play-song(item.video-id, item.title, item.artist, item.duration-secs); }
+                                                            pointer-event(e) => {
+                                                                if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                                                                    open-ctx-queue(item.video-id, item.title, item.artist, item.album, item.duration-secs, i,
+                                                                        self.absolute-position.x + self.mouse-x,
+                                                                        self.absolute-position.y + self.mouse-y);
+                                                                }
+                                                            }
+                                                        }
+                                                        Rectangle {
+                                                            x: parent.width - 42px; y: 0; width: 42px; height: parent.height;
+                                                            Rectangle {
+                                                                width: 28px; height: 28px; border-radius: 14px;
+                                                                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                                                                background: (np-q-ta.has-hover || np-q-rm-ta.has-hover) ? (np-q-rm-ta.has-hover ? Theme.surface-hover : Theme.hover-veil) : transparent;
+                                                                if np-q-ta.has-hover || np-q-rm-ta.has-hover: Image {
+                                                                    source: @image-url("icons/close.svg"); width: 14px; height: 14px;
+                                                                    colorize: np-q-rm-ta.has-hover ? Theme.text : Theme.text-muted;
+                                                                    x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                                                                }
+                                                            }
+                                                            np-q-rm-ta := TouchArea { clicked => { remove-from-queue(i); } }
+                                                        }
+                                                    }
+
+                                                    // Autoplay section
+                                                    if autoplay-enabled && autoplay-queue.length > 0: Rectangle { height: 12px; }
+                                                    if autoplay-enabled && autoplay-queue.length > 0: Text { text: "AUTOPLAY"; font-size: 11px; font-weight: 700; color: Theme.text-dim; }
+                                                    if autoplay-enabled && autoplay-queue.length > 0: Rectangle { height: 2px; }
+
+                                                    for item[i] in autoplay-queue: Rectangle {
+                                                        height: 60px; border-radius: Theme.radius-sm;
+                                                        background: (np-ap-ta.has-hover || np-ap-rm-ta.has-hover) ? Theme.hover-veil : transparent;
+                                                        HorizontalLayout {
+                                                            padding-left: 6px; padding-right: 50px; padding-top: 8px; padding-bottom: 8px; spacing: 10px;
+                                                            Rectangle {
+                                                                width: 44px; height: 44px; border-radius: 6px; clip: true;
+                                                                background: Theme.art-placeholder;
+                                                                if item.has-thumbnail: Image { source: item.thumbnail; width: parent.width; height: parent.height; image-fit: cover; }
+                                                                if !item.has-thumbnail: Text {
+                                                                    text: item.avatar-letter; color: Theme.text-muted; font-size: 14px; font-weight: 700;
+                                                                    width: parent.width; height: parent.height;
+                                                                    horizontal-alignment: center; vertical-alignment: center;
+                                                                }
+                                                            }
+                                                            VerticalLayout {
+                                                                alignment: center; spacing: 2px; horizontal-stretch: 1;
+                                                                Text { text: item.title; font-size: 13px; font-weight: 600; color: Theme.text; overflow: elide; }
+                                                                Text { text: item.artist; font-size: 11px; color: Theme.text-muted; overflow: elide; }
+                                                            }
+                                                            if item.duration-str != "": VerticalLayout {
+                                                                alignment: center;
+                                                                Text { text: item.duration-str; font-size: 11px; color: Theme.text-dim; }
+                                                            }
+                                                        }
+                                                        np-ap-ta := TouchArea {
+                                                            clicked => { play-autoplay-song(i); }
+                                                            pointer-event(e) => {
+                                                                if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                                                                    open-ctx-autoplay(item.video-id, item.title, item.artist, item.album, item.duration-secs, i,
+                                                                        self.absolute-position.x + self.mouse-x,
+                                                                        self.absolute-position.y + self.mouse-y);
+                                                                }
+                                                            }
+                                                        }
+                                                        Rectangle {
+                                                            x: parent.width - 42px; y: 0; width: 42px; height: parent.height;
+                                                            Rectangle {
+                                                                width: 28px; height: 28px; border-radius: 14px;
+                                                                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                                                                background: (np-ap-ta.has-hover || np-ap-rm-ta.has-hover) ? (np-ap-rm-ta.has-hover ? Theme.surface-hover : Theme.hover-veil) : transparent;
+                                                                if np-ap-ta.has-hover || np-ap-rm-ta.has-hover: Image {
+                                                                    source: @image-url("icons/close.svg"); width: 14px; height: 14px;
+                                                                    colorize: np-ap-rm-ta.has-hover ? Theme.text : Theme.text-muted;
+                                                                    x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                                                                }
+                                                            }
+                                                            np-ap-rm-ta := TouchArea { clicked => { remove-from-autoplay(i); } }
+                                                        }
+                                                    }
+
+                                                    // Empty state
+                                                    if queue.length == 0 && (!autoplay-enabled || autoplay-queue.length == 0): Rectangle {
+                                                        height: 120px;
+                                                        Text {
+                                                            text: "Add songs to your queue or enable Autoplay to keep the music flowing.";
+                                                            font-size: 13px; color: Theme.text-dim; horizontal-alignment: center; vertical-alignment: center;
+                                                            wrap: word-wrap;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Tab 2: LYRICS
+                                    if np-tab == "Lyrics": Rectangle {
+                                        vertical-stretch: 1; clip: true;
+
+                                        if np-lyrics-busy: VerticalLayout {
+                                            width: parent.width; height: parent.height; alignment: center; spacing: 8px;
+                                            Text { text: "Loading lyrics…"; font-size: 15px; font-weight: 600; color: Theme.text-muted; horizontal-alignment: center; }
+                                        }
+
+                                        if !np-lyrics-busy && !np-lyrics-available: VerticalLayout {
+                                            width: parent.width; height: parent.height; alignment: center; spacing: 10px;
+                                            HorizontalLayout {
+                                                alignment: center;
+                                                Image { source: @image-url("icons/lyrics.svg"); width: 36px; height: 36px; colorize: Theme.text-dim; }
+                                            }
+                                            Text { text: "Lyrics aren't available for this song"; font-size: 15px; font-weight: 600; color: Theme.text; horizontal-alignment: center; }
+                                            Text { text: "Try another track or explore Related info."; font-size: 12px; color: Theme.text-muted; horizontal-alignment: center; }
+                                        }
+
+                                        if !np-lyrics-busy && np-lyrics-available: SmoothFlickable {
+                                            width: parent.width; height: parent.height;
+                                            viewport-width: self.width; viewport-height: np-lyr-col.preferred-height;
+                                            np-lyr-col := VerticalLayout {
+                                                width: parent.width; height: self.preferred-height;
+                                                padding: 24px; spacing: 18px; alignment: start;
+                                                Text { text: np-lyrics-text; font-size: 17px; font-weight: 600; color: Theme.text; wrap: word-wrap; }
+                                                if np-lyrics-source != "": Text { text: np-lyrics-source; font-size: 11px; color: Theme.text-dim; wrap: word-wrap; }
+                                            }
+                                        }
+                                    }
+
+                                    // Tab 3: RELATED
+                                    if np-tab == "Related": Rectangle {
+                                        vertical-stretch: 1; clip: true;
+
+                                        SmoothFlickable {
+                                            width: parent.width; height: parent.height;
+                                            viewport-width: self.width; viewport-height: np-rel-col.preferred-height;
+                                            np-rel-col := VerticalLayout {
+                                                width: parent.width; height: self.preferred-height;
+                                                padding: 16px; spacing: 18px; alignment: start;
+
+                                                // Song info & credits card
+                                                Rectangle {
+                                                    border-radius: Theme.radius; background: Theme.surface;
+                                                    border-color: Theme.border-soft; border-width: 1px;
+                                                    VerticalLayout {
+                                                        padding: 14px; spacing: 10px;
+                                                        HorizontalLayout {
+                                                            spacing: 8px; alignment: start;
+                                                            Image { source: @image-url("icons/info.svg"); width: 15px; height: 15px; colorize: Theme.effective-accent; }
+                                                            Text { text: "SONG INFO & CREDITS"; font-size: 11px; font-weight: 700; letter-spacing: 0.8px; color: Theme.text-muted; vertical-alignment: center; }
+                                                        }
+                                                        // Title & duration
+                                                        HorizontalLayout {
+                                                            spacing: 8px; alignment: space-between;
+                                                            Text { text: track-title; font-size: 14px; font-weight: 700; color: Theme.text; overflow: elide; horizontal-stretch: 1; }
+                                                            Text { text: np-duration-text != "" ? np-duration-text : total-time; font-size: 12px; color: Theme.text-muted; }
+                                                        }
+                                                        // Artists
+                                                        if np-credits-artists.length > 0: VerticalLayout {
+                                                            spacing: 6px;
+                                                            for credit in np-credits-artists: Rectangle {
+                                                                height: 24px;
+                                                                HorizontalLayout {
+                                                                    spacing: 8px; alignment: start;
+                                                                    VerticalLayout { alignment: center; Image { source: @image-url("icons/artist.svg"); width: 14px; height: 14px; colorize: cr-art-ta.has-hover ? Theme.effective-accent : Theme.text-dim; } }
+                                                                    Text { text: credit.name; font-size: 13px; font-weight: 500; color: cr-art-ta.has-hover ? Theme.effective-accent : Theme.text-muted; vertical-alignment: center; }
+                                                                }
+                                                                cr-art-ta := TouchArea {
+                                                                    clicked => {
+                                                                        if (credit.browse-id != "") { navigate-to-artist(credit.browse-id); }
+                                                                        else { open-artist-for(now-playing-video-id, credit.name); }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        if np-credits-artists.length == 0: Rectangle {
+                                                            height: 24px;
+                                                            HorizontalLayout {
+                                                                spacing: 8px; alignment: start;
+                                                                VerticalLayout { alignment: center; Image { source: @image-url("icons/artist.svg"); width: 14px; height: 14px; colorize: fb-art-ta.has-hover ? Theme.effective-accent : Theme.text-dim; } }
+                                                                Text { text: track-artist; font-size: 13px; font-weight: 500; color: fb-art-ta.has-hover ? Theme.effective-accent : Theme.text-muted; vertical-alignment: center; }
+                                                            }
+                                                            fb-art-ta := TouchArea { clicked => { open-artist-for(now-playing-video-id, track-artist); } }
+                                                        }
+                                                        // Album
+                                                        if np-album-title != "": Rectangle {
+                                                            height: 24px;
+                                                            HorizontalLayout {
+                                                                spacing: 8px; alignment: start;
+                                                                VerticalLayout { alignment: center; Image { source: @image-url("icons/album.svg"); width: 14px; height: 14px; colorize: cr-alb-ta.has-hover ? Theme.text : Theme.text-dim; } }
+                                                                Text { text: np-album-title + (np-album-year != "" ? " • " + np-album-year : ""); font-size: 13px; color: cr-alb-ta.has-hover ? Theme.text : Theme.text-muted; vertical-alignment: center; overflow: elide; }
+                                                            }
+                                                            cr-alb-ta := TouchArea {
+                                                                clicked => {
+                                                                    if (np-album-id != "") { navigate-to-album(np-album-id); }
+                                                                    else { open-album-for(now-playing-video-id, np-album-title); }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+                                                if np-related-busy: Text { text: "Loading related tracks & credits…"; font-size: 12px; color: Theme.text-muted; }
+
+                                                // From the Album
+                                                if np-album-songs.length > 0: VerticalLayout {
+                                                    spacing: 6px;
+                                                    Text { text: "FROM THE ALBUM"; font-size: 11px; font-weight: 700; letter-spacing: 0.8px; color: Theme.text-dim; }
+                                                    for s in np-album-songs: Rectangle {
+                                                        height: 56px; border-radius: Theme.radius-sm;
+                                                        background: (np-as-ta.has-hover || np-as-q-ta.has-hover) ? Theme.hover-veil : transparent;
+                                                        HorizontalLayout {
+                                                            padding-left: 6px; padding-right: 48px; padding-top: 6px; padding-bottom: 6px; spacing: 10px;
+                                                            Rectangle {
+                                                                width: 42px; height: 42px; border-radius: 6px; clip: true;
+                                                                background: Theme.art-placeholder;
+                                                                if s.has-thumbnail: Image { source: s.thumbnail; width: parent.width; height: parent.height; image-fit: cover; }
+                                                                if !s.has-thumbnail: Text {
+                                                                    text: s.avatar-letter; color: Theme.text-muted; font-size: 14px; font-weight: 700;
+                                                                    width: parent.width; height: parent.height;
+                                                                    horizontal-alignment: center; vertical-alignment: center;
+                                                                }
+                                                            }
+                                                            VerticalLayout {
+                                                                alignment: center; spacing: 2px; horizontal-stretch: 1;
+                                                                Text { text: s.title; font-size: 13px; font-weight: 600; color: Theme.text; overflow: elide; }
+                                                                Text { text: s.artist; font-size: 11px; color: Theme.text-muted; overflow: elide; }
+                                                            }
+                                                            if s.duration-str != "": VerticalLayout {
+                                                                alignment: center;
+                                                                Text { text: s.duration-str; font-size: 11px; color: Theme.text-dim; }
+                                                            }
+                                                        }
+                                                        np-as-ta := TouchArea {
+                                                            clicked => { play-song(s.video-id, s.title, s.artist, s.duration-secs); }
+                                                            pointer-event(e) => {
+                                                                if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                                                                    open-ctx(s.video-id, s.title, s.artist, s.album, s.duration-secs,
+                                                                        self.absolute-position.x + self.mouse-x,
+                                                                        self.absolute-position.y + self.mouse-y);
+                                                                }
+                                                            }
+                                                        }
+                                                        Rectangle {
+                                                            x: parent.width - 40px; y: 0; width: 40px; height: parent.height;
+                                                            Rectangle {
+                                                                width: 28px; height: 28px; border-radius: 14px;
+                                                                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                                                                background: (np-as-ta.has-hover || np-as-q-ta.has-hover) ? (np-as-q-ta.has-hover ? Theme.surface-hover : Theme.hover-veil) : transparent;
+                                                                if np-as-ta.has-hover || np-as-q-ta.has-hover: Image {
+                                                                    source: @image-url("icons/queue.svg"); width: 14px; height: 14px;
+                                                                    colorize: np-as-q-ta.has-hover ? Theme.text : Theme.text-muted;
+                                                                    x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                                                                }
+                                                            }
+                                                            np-as-q-ta := TouchArea { clicked => { queue-song(s.video-id, s.title, s.artist); } }
+                                                        }
+                                                    }
+                                                }
+
+                                                // More like this
+                                                if np-related-songs.length > 0: VerticalLayout {
+                                                    spacing: 6px;
+                                                    Text { text: "MORE LIKE THIS"; font-size: 11px; font-weight: 700; letter-spacing: 0.8px; color: Theme.text-dim; }
+                                                    for s in np-related-songs: Rectangle {
+                                                        height: 56px; border-radius: Theme.radius-sm;
+                                                        background: (np-rs-ta.has-hover || np-rs-q-ta.has-hover) ? Theme.hover-veil : transparent;
+                                                        HorizontalLayout {
+                                                            padding-left: 6px; padding-right: 48px; padding-top: 6px; padding-bottom: 6px; spacing: 10px;
+                                                            Rectangle {
+                                                                width: 42px; height: 42px; border-radius: 6px; clip: true;
+                                                                background: Theme.art-placeholder;
+                                                                if s.has-thumbnail: Image { source: s.thumbnail; width: parent.width; height: parent.height; image-fit: cover; }
+                                                                if !s.has-thumbnail: Text {
+                                                                    text: s.avatar-letter; color: Theme.text-muted; font-size: 14px; font-weight: 700;
+                                                                    width: parent.width; height: parent.height;
+                                                                    horizontal-alignment: center; vertical-alignment: center;
+                                                                }
+                                                            }
+                                                            VerticalLayout {
+                                                                alignment: center; spacing: 2px; horizontal-stretch: 1;
+                                                                Text { text: s.title; font-size: 13px; font-weight: 600; color: Theme.text; overflow: elide; }
+                                                                Text { text: s.artist; font-size: 11px; color: Theme.text-muted; overflow: elide; }
+                                                            }
+                                                            if s.duration-str != "": VerticalLayout {
+                                                                alignment: center;
+                                                                Text { text: s.duration-str; font-size: 11px; color: Theme.text-dim; }
+                                                            }
+                                                        }
+                                                        np-rs-ta := TouchArea {
+                                                            clicked => { play-song(s.video-id, s.title, s.artist, s.duration-secs); }
+                                                            pointer-event(e) => {
+                                                                if (e.button == PointerEventButton.right && e.kind == PointerEventKind.up) {
+                                                                    open-ctx(s.video-id, s.title, s.artist, s.album, s.duration-secs,
+                                                                        self.absolute-position.x + self.mouse-x,
+                                                                        self.absolute-position.y + self.mouse-y);
+                                                                }
+                                                            }
+                                                        }
+                                                        Rectangle {
+                                                            x: parent.width - 40px; y: 0; width: 40px; height: parent.height;
+                                                            Rectangle {
+                                                                width: 28px; height: 28px; border-radius: 14px;
+                                                                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                                                                background: (np-rs-ta.has-hover || np-rs-q-ta.has-hover) ? (np-rs-q-ta.has-hover ? Theme.surface-hover : Theme.hover-veil) : transparent;
+                                                                if np-rs-ta.has-hover || np-rs-q-ta.has-hover: Image {
+                                                                    source: @image-url("icons/queue.svg"); width: 14px; height: 14px;
+                                                                    colorize: np-rs-q-ta.has-hover ? Theme.text : Theme.text-muted;
+                                                                    x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                                                                }
+                                                            }
+                                                            np-rs-q-ta := TouchArea { clicked => { queue-song(s.video-id, s.title, s.artist); } }
+                                                        }
+                                                    }
+                                                }
+
+                                                // Similar Artists
+                                                if np-related-artists.length > 0: VerticalLayout {
+                                                    spacing: 6px;
+                                                    Text { text: "SIMILAR ARTISTS"; font-size: 11px; font-weight: 700; letter-spacing: 0.8px; color: Theme.text-dim; }
+                                                    for art in np-related-artists: Rectangle {
+                                                        height: 56px; border-radius: Theme.radius-sm;
+                                                        background: np-ra-ta.has-hover ? Theme.hover-veil : transparent;
+                                                        HorizontalLayout {
+                                                            padding-left: 6px; padding-right: 12px; padding-top: 6px; padding-bottom: 6px; spacing: 12px;
+                                                            Rectangle {
+                                                                width: 42px; height: 42px; border-radius: 21px; clip: true;
+                                                                background: Theme.art-placeholder;
+                                                                if art.has-thumbnail: Image { source: art.thumbnail; width: parent.width; height: parent.height; image-fit: cover; }
+                                                                if !art.has-thumbnail: Image {
+                                                                    source: @image-url("icons/artist.svg"); width: 18px; height: 18px; colorize: Theme.text-muted;
+                                                                    x: 12px; y: 12px;
+                                                                }
+                                                            }
+                                                            VerticalLayout {
+                                                                alignment: center; spacing: 2px; horizontal-stretch: 1;
+                                                                Text { text: art.name; font-size: 13px; font-weight: 600; color: Theme.text; overflow: elide; }
+                                                                if art.subscriber-count != "": Text { text: art.subscriber-count; font-size: 11px; color: Theme.text-dim; overflow: elide; }
+                                                            }
+                                                        }
+                                                        np-ra-ta := TouchArea { clicked => { navigate-to-artist(art.browse-id); } }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            }
+                        }
                     }
                     }
                     }
@@ -4468,7 +5070,6 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                     x: 1px; y: 1px; width: max(0px, parent.width - 2px); height: max(0px, parent.height - 2px);
                     border-radius: Theme.radius-lg;
                     background: @linear-gradient(95deg, Theme.ambient-tint.with-alpha(Theme.is-light ? 0.14 : 0.22) 0%, transparent 46%, Theme.effective-accent.with-alpha(Theme.is-light ? 0.06 : 0.10) 100%);
-                    animate background { duration: 350ms; easing: ease-out; }
                 }
                 // Top glass-edge highlight for a premium frosted look.
                 Rectangle { x: 18px; y: 0; height: 1px; width: max(0px, parent.width - 36px); background: Theme.frost-hi; }
@@ -4532,7 +5133,7 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                     source: is-liked ? @image-url("icons/heart-fill.svg") : @image-url("icons/heart.svg");
                                     width: like-bounce ? 28px : (is-liked ? 22px : 20px);
                                     height: like-bounce ? 28px : (is-liked ? 22px : 20px);
-                                    colorize: is-liked ? Theme.accent : Theme.text-dim;
+                                    colorize: is-liked ? Theme.effective-accent : Theme.text-dim;
                                     x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
                                     animate colorize { duration: 200ms; }
                                     animate width, height { duration: 150ms; easing: ease-out-back; }
@@ -4642,7 +5243,7 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                         x: 0; y: 0;
                                         width: parent.width * progress;
                                         height: parent.height; border-radius: self.height / 2;
-                                        background: prog-ta.has-hover ? Theme.accent-strong : Theme.accent;
+                                        background: prog-ta.has-hover ? Theme.accent-strong : Theme.effective-accent;
                                     }
                                 }
                                 Rectangle {
@@ -4666,7 +5267,7 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
 
                         VerticalLayout {
                             alignment: center;
-                            IconBtn { svg-icon: @image-url("icons/queue.svg"); use-svg: true; active: queue-pane-open; icon-color: queue-pane-open ? Theme.accent : Theme.text-dim; clicked => { toggle-queue-pane(); } }
+                            IconBtn { svg-icon: @image-url("icons/queue.svg"); use-svg: true; active: queue-pane-open; icon-color: queue-pane-open ? Theme.effective-accent : Theme.text-dim; clicked => { toggle-queue-pane(); } }
                         }
 
                         if !compact: HorizontalLayout {
@@ -4713,7 +5314,7 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                             x: 0; y: 0;
                                             width: parent.width * volume;
                                             height: parent.height; border-radius: self.height / 2;
-                                            background: vol-ta.has-hover ? Theme.accent : Theme.text-muted;
+                                            background: vol-ta.has-hover ? Theme.effective-accent : Theme.text-muted;
                                         }
                                     }
                                     Rectangle {
@@ -4722,7 +5323,7 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                         border-radius: self.width / 2;
                                         x: parent.width * volume - self.width / 2;
                                         y: (parent.height - self.height) / 2;
-                                        background: Theme.accent;
+                                        background: Theme.effective-accent;
                                         animate width, height { duration: 140ms; easing: ease-out; }
                                     }
                                 }

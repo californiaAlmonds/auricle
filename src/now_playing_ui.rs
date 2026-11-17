@@ -802,6 +802,26 @@ pub fn notify_track_changed(
         return;
     }
 
+    let already_same = last_video_id()
+        .lock()
+        .map(|l| l.as_str() == video_id.as_str())
+        .unwrap_or(false);
+    if already_same {
+        if duration_secs > 0 {
+            let ui_w = ui_weak.clone();
+            let dur_text = format_duration_text(duration_secs);
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_w.upgrade() {
+                    if ui.get_np_duration_text().is_empty() {
+                        ui.set_np_duration_text(SharedString::from(dur_text.as_str()));
+                    }
+                }
+            })
+            .ok();
+        }
+        return;
+    }
+
     let gen = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     if let Ok(mut last) = last_video_id().lock() {
         *last = video_id.clone();
