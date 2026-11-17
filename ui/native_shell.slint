@@ -1,4 +1,10 @@
 import { LineEdit, ListView } from "std-widgets.slint";
+import "fonts/PlusJakartaSans-Regular.ttf";
+import "fonts/PlusJakartaSans-Medium.ttf";
+import "fonts/PlusJakartaSans-SemiBold.ttf";
+import "fonts/PlusJakartaSans-Bold.ttf";
+import "fonts/PlusJakartaSans-ExtraBold.ttf";
+
 
 export struct ArtistCredit {
     name: string,
@@ -64,58 +70,52 @@ struct MoodItem {
 // flag, so a single user choice re-skins the app while the relationships between
 // colors stay fixed. Rust sets `accent` + `is-light` from the saved settings.
 export global Theme {
-    // Inputs (set from Rust / Settings)
-    in property <color> accent: #6486b0;      // default "Default Blue" — muted steel blue (from reference)
+    in property <color> accent: #5b8def;
     in property <bool> is-light: false;
+    in property <color> art-accent: #5b8def;
+    in property <bool> has-art-accent: false;
+    in property <bool> is-dynamic: false;
+    in property <int> eq-phase: 0;
+    in property <bool> is-playing: false;
 
-    // Palette sampled from the reference: crisp, OPAQUE dark-slate surfaces carrying
-    // only a small accent tint. NOTE `accent.mix(base, f)` = f*accent + (1-f)*base,
-    // so a SMALL f keeps the surface mostly the neutral dark base. (The previous code
-    // wrote `base.mix(accent, 0.04)` which is ~96% accent — that is what turned the
-    // whole app washed-out blue.)
-    out property <color> bg:            is-light ? accent.mix(#ffffff, 0.05)  : accent.mix(#0c1016, 0.05);
-    out property <color> surface:       is-light ? accent.mix(#ffffff, 0.06)  : accent.mix(#12161f, 0.06);
-    out property <color> surface-2:     is-light ? accent.mix(#ffffff, 0.07)  : accent.mix(#171d27, 0.06);
-    out property <color> surface-hover: is-light ? accent.mix(#e9ecf1, 0.09)  : accent.mix(#212835, 0.07);
-    out property <color> elevated:      is-light ? #ffffff                    : accent.mix(#1b212c, 0.06);
+    out property <color> effective-accent: (is-dynamic && has-art-accent) ? art-accent : accent;
+    out property <color> ambient-tint: has-art-accent ? art-accent : effective-accent;
 
-    // Panel/menu surfaces (kept the glass-* names) — now fully OPAQUE for the clean,
-    // crisp look of the reference instead of the previous frosted haze.
-    out property <color> glass:        is-light ? #ffffff : accent.mix(#12161f, 0.06);
-    out property <color> glass-strong: is-light ? #ffffff : accent.mix(#1a2029, 0.06);
-    out property <color> glass-hover:  is-light ? #eceef3 : accent.mix(#232b38, 0.06);
+    out property <color> canvas: is-light ? effective-accent.mix(#e9edf5, 0.06) : effective-accent.mix(#06080d, 0.04);
+    out property <color> bg: is-light ? effective-accent.mix(#f7f9fc, 0.05) : effective-accent.mix(#0d1118, 0.06);
+    out property <color> surface: is-light ? effective-accent.mix(#ffffff, 0.06) : effective-accent.mix(#12161f, 0.06);
+    out property <color> surface-2: is-light ? effective-accent.mix(#ffffff, 0.07) : effective-accent.mix(#171d27, 0.06);
+    out property <color> surface-hover: is-light ? effective-accent.mix(#e9ecf1, 0.09) : effective-accent.mix(#212835, 0.11);
+    out property <color> elevated: is-light ? #ffffff : effective-accent.mix(#1b212c, 0.06);
 
-    // Frosted chrome (player bar / queue pane). Slightly translucent for a premium
-    // glass hint, kept high-opacity so it never turns muddy.
-    out property <color> frost:    is-light ? #ffffff.with-alpha(0.82) : accent.mix(#141a24, 0.06).with-alpha(0.9);
-    out property <color> frost-hi: is-light ? #000000.with-alpha(0.06) : #ffffff.with-alpha(0.08);
+    out property <color> glass: is-light ? #ffffff.with-alpha(0.76) : effective-accent.mix(#141923, 0.08).with-alpha(0.78);
+    out property <color> glass-strong: is-light ? effective-accent.mix(#ffffff, 0.04).with-alpha(0.95) : effective-accent.mix(#181f2c, 0.09).with-alpha(0.94);
+    out property <color> glass-hover: is-light ? effective-accent.mix(#e6ebf4, 0.12).with-alpha(0.85) : effective-accent.mix(#222b3a, 0.12).with-alpha(0.86);
+    
+    out property <color> frost: is-light ? #ffffff.with-alpha(0.84) : ambient-tint.mix(#131822, 0.10).with-alpha(0.86);
+    out property <color> frost-hi: is-light ? #ffffff.with-alpha(0.90) : #ffffff.with-alpha(0.14);
 
-    // Text
     out property <color> text:       is-light ? #171a20 : #f2f4f8;
     out property <color> text-muted: is-light ? #565d69 : #97a1ae;
     out property <color> text-dim:   is-light ? #838b98 : #5a6470;
 
-    // Accent variants
-    out property <color> accent-strong: accent.brighter(0.15);
-    out property <color> accent-soft:   accent.with-alpha(0.16);
-    out property <color> on-accent:     is-light ? #111318 : #ffffff;
+    out property <color> pill-active: effective-accent.with-alpha(is-light ? 0.16 : 0.20);
+    out property <color> accent-strong: effective-accent.brighter(0.14);
+    out property <color> accent-soft:   effective-accent.with-alpha(0.16);
+    out property <color> accent-glow:   effective-accent.with-alpha(is-light ? 0.28 : 0.38);
+    out property <color> on-accent:     #ffffff;
 
-    // Lines / borders
-    out property <color> border:      is-light ? #000000.with-alpha(0.09) : #ffffff.with-alpha(0.07);
-    out property <color> border-soft: is-light ? #000000.with-alpha(0.05) : #ffffff.with-alpha(0.045);
+    out property <color> border:      is-light ? #0f172a.with-alpha(0.09) : #ffffff.with-alpha(0.09);
+    out property <color> border-soft: is-light ? #0f172a.with-alpha(0.05) : #ffffff.with-alpha(0.05);
 
-    // Hover veils (used over images / transparent rows)
     out property <color> hover-veil:  is-light ? #000000.with-alpha(0.05) : #ffffff.with-alpha(0.05);
     out property <color> press-veil:  is-light ? #000000.with-alpha(0.10) : #ffffff.with-alpha(0.10);
 
-    // Semantic status colors (theme-aware so they stay legible in light mode)
     out property <color> success:     is-light ? #1d7a3a : #62c97e;
     out property <color> danger:      is-light ? #c62828 : #f0685f;
     out property <color> danger-bg:   is-light ? #c62828 : #b3352e;
     out property <color> on-danger:   #ffffff;
 
-    // Text drawn ON TOP of artwork / colored hero banners. Artwork is arbitrary,
-    // so these stay light in BOTH modes and rely on the scrim below.
     out property <color> on-art:       #ffffff;
     out property <color> on-art-muted: #ffffff.with-alpha(0.78);
     out property <color> on-art-dim:   #ffffff.with-alpha(0.60);
@@ -123,22 +123,30 @@ export global Theme {
     out property <color> art-veil:     #ffffff.with-alpha(0.14);
     out property <color> art-veil-hi:  #ffffff.with-alpha(0.22);
 
-    // Placeholder tile behind missing artwork
-    out property <color> art-placeholder: is-light ? accent.mix(#dfe3ea, 0.07) : accent.mix(#1e2530, 0.07);
+    out property <color> art-placeholder: is-light ? effective-accent.mix(#dfe3ea, 0.07) : effective-accent.mix(#1e2530, 0.07);
 
-    // Corner radii
-    out property <length> radius-sm: 8px;
-    out property <length> radius:    14px;
-    out property <length> radius-lg: 20px;
+    out property <length> radius-sm: 10px;
+    out property <length> radius:    16px;
+    out property <length> radius-lg: 22px;
 
-    // Layout — caps line length on ultrawide monitors so lists don't stretch
-    // into a wall of dead space between the title and the duration column.
     out property <length> content-max: 1180px;
     out property <length> section-gap: 24px;
     out property <length> heading-gap: 12px;
 }
 
 // ─── Shared components ────────────────────────────────────────────────────────
+
+component EqualizerBars inherits Rectangle {
+    in property <bool> playing: false;
+    in property <color> bar-color: Theme.effective-accent;
+    width: 16px; height: 16px; background: transparent;
+    // Driven by the 500ms playback poll (`Theme.eq-phase`) with no internal Timer or
+    // continuous `animate` interpolation, avoiding continuous 60-144 FPS full-window
+    // GPU redraws while a song plays.
+    Rectangle { width: 3px; border-radius: 1.5px; background: root.bar-color; x: 1px; height: root.playing ? (Theme.eq-phase == 0 ? 7px : Theme.eq-phase == 1 ? 13px : Theme.eq-phase == 2 ? 15px : 5px) : 5px; y: parent.height - self.height; }
+    Rectangle { width: 3px; border-radius: 1.5px; background: root.bar-color; x: 6.5px; height: root.playing ? (Theme.eq-phase == 0 ? 15px : Theme.eq-phase == 1 ? 6px : Theme.eq-phase == 2 ? 11px : 9px) : 10px; y: parent.height - self.height; }
+    Rectangle { width: 3px; border-radius: 1.5px; background: root.bar-color; x: 12px; height: root.playing ? (Theme.eq-phase == 0 ? 6px : Theme.eq-phase == 1 ? 14px : Theme.eq-phase == 2 ? 5px : 12px) : 6px; y: parent.height - self.height; }
+}
 
 component IconBtn inherits Rectangle {
     in property <string> icon;
@@ -147,8 +155,9 @@ component IconBtn inherits Rectangle {
     in property <image> svg-icon;
     in property <bool> use-svg: false;
     callback clicked();
-    width: 36px; height: 36px; border-radius: Theme.radius-sm;
+    width: 36px; height: 36px; border-radius: 18px;
     background: ta.has-hover ? Theme.hover-veil : (active ? Theme.accent-soft : transparent);
+    animate background { duration: 140ms; }
     if !use-svg: Text {
         text: root.icon;
         color: ta.has-hover ? Theme.text : (root.active ? Theme.text : root.icon-color);
@@ -234,14 +243,20 @@ component NavBtn inherits Rectangle {
     in property <bool> expanded: true;
     callback clicked();
     height: 44px; border-radius: Theme.radius-sm;
-    background: ta.has-hover ? Theme.hover-veil : (active ? Theme.accent-soft : transparent);
-    animate background { duration: 100ms; }
+    background: ta.has-hover ? Theme.hover-veil : (active ? Theme.pill-active : transparent);
+    animate background { duration: 150ms; }
+    Rectangle {
+        x: 2px; y: (parent.height - self.height) / 2; width: 3px; border-radius: 1.5px;
+        height: root.active ? 20px : 0px; background: Theme.effective-accent;
+        animate height { duration: 180ms; easing: ease-out; }
+    }
     HorizontalLayout {
-        padding-left: expanded ? 14px : 7px; padding-right: expanded ? 14px : 7px;
-        padding-top: 11px; padding-bottom: 11px; spacing: 14px; alignment: start;
+        padding-left: expanded ? 14px : 0px; padding-right: expanded ? 14px : 0px;
+        padding-top: 11px; padding-bottom: 11px; spacing: 14px;
+        alignment: expanded ? start : center;
         Image {
             source: root.nav-icon; width: 22px; height: 22px;
-            colorize: root.active ? Theme.accent : Theme.text-muted;
+            colorize: root.active ? Theme.effective-accent : Theme.text-muted;
             vertical-alignment: center;
         }
         if root.expanded: Text { text: root.label; font-size: 15px; font-weight: root.active ? 700 : 500; color: root.active ? Theme.text : Theme.text-muted; vertical-alignment: center; }
@@ -254,13 +269,14 @@ component TabPill inherits Rectangle {
     in property <string> label; in property <bool> active;
     callback clicked();
     height: 32px; border-radius: 16px;
-    background: active ? Theme.accent-soft : (ta.has-hover ? Theme.hover-veil : transparent);
-    border-color: active ? Theme.border : transparent; border-width: 1px;
+    background: active ? Theme.pill-active : (ta.has-hover ? Theme.hover-veil : Theme.surface);
+    border-color: active ? Theme.effective-accent.with-alpha(0.45) : Theme.border-soft; border-width: 1px;
+    animate background, border-color { duration: 150ms; }
     HorizontalLayout {
         padding-left: 14px; padding-right: 14px;
         Text {
             text: root.label; font-size: 13px; font-weight: root.active ? 700 : 500;
-            color: root.active ? Theme.text : Theme.text-muted;
+            color: root.active ? Theme.effective-accent.brighter(Theme.is-light ? -0.2 : 0.25) : Theme.text-muted;
             horizontal-alignment: center; vertical-alignment: center;
         }
     }
@@ -282,7 +298,7 @@ component ThemeChoice inherits Rectangle {
             y: (parent.height - self.height) / 2;
         }
         Text { text: root.theme-label; font-size: 13px; color: Theme.text; vertical-alignment: center; horizontal-stretch: 1; }
-        if selected: Text { text: "✓"; font-size: 13px; color: Theme.accent; vertical-alignment: center; }
+        if selected: Image { source: @image-url("icons/check.svg"); width: 16px; height: 16px; colorize: Theme.effective-accent; y: (parent.height - self.height) / 2; }
     }
     choice-ta := TouchArea { clicked => { root.picked(); } }
 }
@@ -352,11 +368,13 @@ component SongRow inherits Rectangle {
     in property <bool> show-album-column: false;
     // On an album page the artist is the same on every row — redundant.
     in property <bool> hide-artist: false;
+    in property <bool> is-playing: Theme.is-playing;
     callback play-clicked(); callback queue-clicked();
     // Right-click reports the cursor position; the window-root menu supplies the actions.
     callback context-requested(length, length);
     height: 56px; border-radius: Theme.radius-sm;
     background: ta.has-hover ? Theme.hover-veil : (is-current ? Theme.accent-soft : transparent);
+    animate background { duration: 120ms; }
     HorizontalLayout {
         padding-left: 12px; padding-right: 14px; spacing: 12px;
         // Track number column (album/playlist context only). Swaps to a play
@@ -372,10 +390,16 @@ component SongRow inherits Rectangle {
                 width: parent.width; height: parent.height;
                 horizontal-alignment: right; vertical-alignment: center;
             }
-            if root.is-current || ta.has-hover: Image {
+            if root.is-current && !ta.has-hover: EqualizerBars {
+                playing: root.is-playing;
+                bar-color: Theme.effective-accent;
+                x: parent.width - self.width;
+                y: (parent.height - self.height) / 2;
+            }
+            if ta.has-hover: Image {
                 source: @image-url("icons/play.svg");
                 width: 12px; height: 12px;
-                colorize: root.is-current ? Theme.accent : Theme.text;
+                colorize: root.is-current ? Theme.effective-accent : Theme.text;
                 x: parent.width - self.width;
                 y: (parent.height - self.height) / 2;
             }
@@ -389,22 +413,29 @@ component SongRow inherits Rectangle {
             if has-thumbnail: Image {
                 source: thumbnail; width: parent.width; height: parent.height; image-fit: cover;
             }
-            if !has-thumbnail: Text {
-                text: avatar-letter == "" ? root.idx-str : avatar-letter;
-                color: is-current ? Theme.accent : Theme.text-dim;
-                font-size: 13px;
-                font-weight: 700;
+            if !has-thumbnail: Rectangle {
                 width: parent.width; height: parent.height;
-                horizontal-alignment: center; vertical-alignment: center;
+                if avatar-letter != "" || root.show-index: Text {
+                    text: avatar-letter == "" ? root.idx-str : avatar-letter;
+                    color: is-current ? Theme.effective-accent : Theme.text-dim;
+                    font-size: 13px; font-weight: 700;
+                    width: parent.width; height: parent.height;
+                    horizontal-alignment: center; vertical-alignment: center;
+                }
+                if avatar-letter == "" && !root.show-index: Image {
+                    source: @image-url("icons/music-note.svg");
+                    width: 20px; height: 20px; colorize: Theme.text-dim;
+                    x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                }
             }
             // Playing overlay — skipped when a track-number column is present,
             // otherwise the row shows two "now playing" markers side by side.
             if is-current && has-thumbnail && !root.show-index: Rectangle {
                 width: parent.width; height: parent.height;
                 background: Theme.art-scrim;
-                Image {
-                    source: @image-url("icons/play.svg");
-                    width: 14px; height: 14px; colorize: Theme.on-art;
+                EqualizerBars {
+                    playing: root.is-playing;
+                    bar-color: Theme.on-art;
                     x: (parent.width - self.width) / 2;
                     y: (parent.height - self.height) / 2;
                 }
@@ -483,6 +514,7 @@ component SongRow inherits Rectangle {
             x: parent.width - self.width;
             y: (parent.height - self.height) / 2;
             background: ta.has-hover ? (qa.has-hover ? Theme.surface-hover : Theme.hover-veil) : transparent;
+            animate background { duration: 120ms; }
             if ta.has-hover: Text { text: "+ Queue"; color: qa.has-hover ? Theme.text : Theme.text-muted; font-size: 10px; font-weight: 600;
                 width: parent.width; height: parent.height;
                 horizontal-alignment: center; vertical-alignment: center; }
@@ -527,15 +559,21 @@ component EdgeFade inherits Rectangle {
 }
 
 component GenreTile inherits Rectangle {
-    in property <string> label; in property <color> tile-color; in property <string> icon;
+    in property <string> label; in property <color> tile-color; in property <string> icon: "";
+    in property <image> svg-icon;
     callback clicked();
-    height: 100px; border-radius: 12px;
-    background: ta.has-hover ? tile-color.brighter(0.1) : tile-color;
-    HorizontalLayout {
-        padding: 20px; spacing: 12px; alignment: start;
-        Text { text: root.icon; font-size: 26px; vertical-alignment: center; }
-        Text { text: root.label; font-size: 16px; font-weight: 600; color: Theme.on-art; vertical-alignment: center; }
+    // Avoid `clip: true` alongside `border-radius`: in FemtoVG, rounded clipping
+    // allocates an offscreen FBO per tile instead of using hardware glScissor.
+    height: 104px; border-radius: Theme.radius; border-width: 1px; border-color: #ffffff.with-alpha(0.14);
+    background: ta.has-hover ? @linear-gradient(135deg, tile-color.brighter(0.18) 0%, tile-color.darker(0.22) 100%) : @linear-gradient(135deg, tile-color 0%, tile-color.darker(0.35) 100%);
+    Rectangle {
+        width: 40px; height: 40px; border-radius: 12px;
+        background: #ffffff.with-alpha(0.16);
+        x: 16px; y: 16px;
+        Image { source: root.svg-icon; width: 24px; height: 24px; colorize: #ffffff; x: 8px; y: 8px; }
     }
+    Text { text: root.label; font-size: 16px; font-weight: 600; color: Theme.on-art; x: 16px; y: 64px; }
+    Image { source: root.svg-icon; width: 52px; height: 52px; x: parent.width - 68px; y: (parent.height - 52px) / 2; colorize: #ffffff.with-alpha(0.12); }
     ta := TouchArea { clicked => { root.clicked(); } }
 }
 
@@ -557,6 +595,7 @@ component SongCard inherits Rectangle {
     width: 200px; height: 260px; border-radius: Theme.radius;
     background: root.card-hovered ? Theme.glass-hover : Theme.glass;
     border-color: root.card-hovered ? Theme.border : Theme.border-soft; border-width: 1px;
+    animate background, border-color { duration: 150ms; }
 
     VerticalLayout {
         padding: 12px; spacing: 12px;
@@ -570,17 +609,22 @@ component SongCard inherits Rectangle {
             if !has-thumbnail: Rectangle {
                 width: parent.width; height: parent.height;
                 background: Theme.art-placeholder;
-                Text {
-                    text: is-now-playing ? "▶" : (avatar-letter == "" ? "♪" : avatar-letter);
-                    color: is-now-playing ? Theme.accent : Theme.text-dim;
+                if avatar-letter != "": Text {
+                    text: avatar-letter;
+                    color: Theme.text-dim;
                     font-size: 36px; font-weight: 700;
                     horizontal-alignment: center; vertical-alignment: center;
                 }
+                if avatar-letter == "": Image {
+                    source: @image-url("icons/music-note.svg");
+                    width: 36px; height: 36px; colorize: Theme.text-dim;
+                    x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                }
             }
-            // Now playing indicator bar
             if is-now-playing: Rectangle {
-                x: 0; y: parent.height - 3px; width: parent.width; height: 3px;
-                background: Theme.accent;
+                x: parent.width - 30px; y: 8px; width: 22px; height: 22px; border-radius: 11px;
+                background: #000000.with-alpha(0.68);
+                EqualizerBars { playing: root.is-playing; bar-color: Theme.effective-accent; x: 3px; y: 3px; }
             }
         }
         VerticalLayout {
@@ -647,6 +691,7 @@ export component NativeShellWindow inherits Window {
     in-out property <string> current-time: "0:00";
     in-out property <string> total-time: "--:--";
     in-out property <float> volume: 0.8;
+    property <float> pre-mute-volume: 0.8;
     in-out property <string> track-initial: "?";
     in-out property <image> album-art;
     in-out property <bool> has-album-art: false;
@@ -818,9 +863,12 @@ export component NativeShellWindow inherits Window {
     callback search-category(string);
     callback activate-search-entry(SearchEntry);
             callback search-view-changed(string);
-            changed current-view => { search-view-changed(current-view); discography-view-changed(current-view); }
+            changed current-view => { search-view-changed(current-view); discography-view-changed(current-view); view-offset-y = 10px; view-anim-timer.running = true; }
 
     in-out property <bool> is-loading: false;
+
+    private property <length> view-offset-y: 0px;
+
 
     // Callbacks
     callback toggle-play-pause();
@@ -973,7 +1021,10 @@ export component NativeShellWindow inherits Window {
         ctx-reset-state(px, py);
         prepare-context(ctx-kind, ctx-id, ctx-title, ctx-artist, ctx-album, ctx-generation);
     }
-    public function open-entity-ctx(kind: string, id: string, title: string, artist: string, px: length, py: length) {
+    
+    view-anim-timer := Timer { interval: 16ms; running: false; triggered => { root.view-offset-y = 0px; self.running = false; } }
+
+public function open-entity-ctx(kind: string, id: string, title: string, artist: string, px: length, py: length) {
         ctx-kind = kind;
         ctx-id = id;
         ctx-video-id = "";
@@ -1070,8 +1121,8 @@ export component NativeShellWindow inherits Window {
     icon: @image-url("../icons/icon.png");
     preferred-width: 1280px; preferred-height: 800px;
     min-width: 800px; min-height: 500px;
-    background: Theme.bg;
-    default-font-family: "Segoe UI Variable";
+    background: Theme.canvas;
+    default-font-family: "Plus Jakarta Sans";
     default-font-size: 14px;
     default-font-weight: 500;
 
@@ -1105,6 +1156,7 @@ export component NativeShellWindow inherits Window {
     VerticalLayout {
         width: root.width;
         height: root.height;
+        padding: 8px; spacing: 8px;
 
             // Width probe — an inner element whose width tracks the window. Its
             // `changed width` fires reliably during layout/resize (the Window's own
@@ -1125,18 +1177,27 @@ export component NativeShellWindow inherits Window {
                 // the horizontal room on a compact window.
                 if !(compact && queue-pane-open): Rectangle {
                     width: sidebar-open ? 260px : 72px; background: Theme.glass;
+                    border-radius: Theme.radius; border-width: 1px; border-color: Theme.border;
                     animate width { duration: 180ms; easing: ease-out; }
-                    Rectangle { x: parent.width - 1px; y: 0; width: 1px; height: parent.height; background: Theme.border; }
+                    Rectangle { x: 14px; y: 0; width: max(0px, parent.width - 28px); height: 1px; background: Theme.frost-hi; }
 
                     VerticalLayout {
                         padding-left: sidebar-open ? 18px : 12px; padding-right: sidebar-open ? 18px : 12px;
                         padding-top: 20px; padding-bottom: 16px;
 
                         // Logo
-                        HorizontalLayout {
-                            height: 44px; spacing: 10px; alignment: sidebar-open ? start : center;
-                            Text { text: "▶"; color: Theme.accent; font-size: 22px; vertical-alignment: center; }
-                            if sidebar-open: Text { text: "Auricle"; color: Theme.text; font-size: 18px; font-weight: 700; vertical-alignment: center; }
+                        Rectangle {
+                            height: 44px;
+                            HorizontalLayout {
+                                spacing: 10px; alignment: sidebar-open ? start : center;
+                                Rectangle {
+                                    width: 34px; height: 34px; border-radius: 10px;
+                                    background: @linear-gradient(135deg, Theme.effective-accent 0%, Theme.effective-accent.darker(0.32) 100%);
+                                    y: (parent.height - self.height) / 2;
+                                    Image { source: @image-url("icons/auricle-logo.svg"); width: 20px; height: 20px; colorize: Theme.on-accent; x: 7px; y: 7px; }
+                                }
+                                if sidebar-open: Text { text: "Auricle"; color: Theme.text; font-size: 18px; font-weight: 800; vertical-alignment: center; }
+                            }
                         }
 
                         Rectangle { height: 20px; }
@@ -1159,9 +1220,9 @@ export component NativeShellWindow inherits Window {
                                 padding-left: sidebar-open ? 12px : 6px; padding-right: sidebar-open ? 12px : 6px;
                                 padding-top: 10px; padding-bottom: 10px; spacing: 12px; alignment: sidebar-open ? start : center;
                                 Rectangle {
-                                    width: 36px; height: 36px; border-radius: 4px;
-                                    background: @linear-gradient(135deg, Theme.accent 0%, Theme.accent.darker(0.35) 100%);
-                                    Text { text: "♥"; color: Theme.on-accent; font-size: 16px; horizontal-alignment: center; vertical-alignment: center; }
+                                    width: 36px; height: 36px; border-radius: 10px;
+                                    background: @linear-gradient(135deg, Theme.effective-accent 0%, Theme.effective-accent.darker(0.35) 100%);
+                                    Image { source: @image-url("icons/heart-fill.svg"); width: 17px; height: 17px; colorize: Theme.on-accent; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
                                 }
                                 if sidebar-open: VerticalLayout {
                                     alignment: center; spacing: 2px; horizontal-stretch: 1;
@@ -1294,14 +1355,31 @@ export component NativeShellWindow inherits Window {
                     }
                 }
 
+                if !(compact && queue-pane-open): Rectangle { width: 8px; }
+
                 // ── Center content area ───────────────────────────────────
-                VerticalLayout {
+                Rectangle {
                     horizontal-stretch: 1; min-width: 0px;
+                    // No `clip: true` on this rounded island: combining `border-radius` + `clip: true`
+                    // on a full-window container forces a full-screen offscreen FBO pass every frame in FemtoVG.
+                    // Instead, top children round their top corners and `View area` clips via 0-radius glScissor.
+                    border-radius: Theme.radius; background: Theme.bg; border-width: 1px; border-color: Theme.border;
+                    Rectangle {
+                        x: 1px; y: 1px; width: max(0px, parent.width - 2px); height: 240px;
+                        border-top-left-radius: Theme.radius; border-top-right-radius: Theme.radius;
+                        background: @linear-gradient(180deg, Theme.ambient-tint.with-alpha(Theme.is-light ? 0.10 : 0.15) 0%, transparent 100%);
+                        animate background { duration: 350ms; easing: ease-out; }
+                    }
+                    VerticalLayout {
+                        width: parent.width; height: parent.height;
+                        padding: 1px;
 
                     // Header bar
                     Rectangle {
-                        height: 60px; background: Theme.glass;
+                        height: 60px; background: Theme.frost;
+                        border-top-left-radius: Theme.radius; border-top-right-radius: Theme.radius;
                         Rectangle { y: parent.height - 1px; height: 1px; width: parent.width; background: Theme.border-soft; }
+                        Rectangle { x: 14px; y: 0; width: max(0px, parent.width - 28px); height: 1px; background: Theme.frost-hi; }
                         HorizontalLayout {
                             padding-left: 20px; padding-right: 20px; spacing: 8px;
 
@@ -1323,9 +1401,8 @@ export component NativeShellWindow inherits Window {
                                     Rectangle {
                                         width: 36px; height: 36px; border-radius: 18px;
                                         background: can-go-back && nav-back-ta.has-hover ? Theme.hover-veil : transparent;
-                                        Text { text: "←"; font-size: 18px; color: can-go-back ? Theme.text : Theme.text-dim;
-                                            width: parent.width; height: parent.height;
-                                            horizontal-alignment: center; vertical-alignment: center; }
+                                        animate background { duration: 140ms; }
+                                        Image { source: @image-url("icons/chevron-left.svg"); width: 18px; height: 18px; colorize: can-go-back ? Theme.text : Theme.text-dim; x: 9px; y: 9px; }
                                         nav-back-ta := TouchArea { enabled: can-go-back; clicked => { nav-back(); } }
                                     }
                                 }
@@ -1334,9 +1411,8 @@ export component NativeShellWindow inherits Window {
                                     Rectangle {
                                         width: 36px; height: 36px; border-radius: 18px;
                                         background: can-go-forward && nav-fwd-ta.has-hover ? Theme.hover-veil : transparent;
-                                        Text { text: "→"; font-size: 18px; color: can-go-forward ? Theme.text : Theme.text-dim;
-                                            width: parent.width; height: parent.height;
-                                            horizontal-alignment: center; vertical-alignment: center; }
+                                        animate background { duration: 140ms; }
+                                        Image { source: @image-url("icons/chevron-right.svg"); width: 18px; height: 18px; colorize: can-go-forward ? Theme.text : Theme.text-dim; x: 9px; y: 9px; }
                                         nav-fwd-ta := TouchArea { enabled: can-go-forward; clicked => { nav-forward(); } }
                                     }
                                 }
@@ -1349,17 +1425,18 @@ export component NativeShellWindow inherits Window {
                                 alignment: center;
                                 horizontal-stretch: 10; min-width: 150px; max-width: 420px;
                                 search-bar-rect := Rectangle {
-                                height: 40px; border-radius: 20px;
-                                background: search-inp.has-focus ? Theme.glass-hover : Theme.glass;
-                                border-color: search-inp.has-focus ? Theme.accent : Theme.border;
+                                height: 42px; border-radius: 21px;
+                                background: search-inp.has-focus ? Theme.elevated : Theme.surface-2;
+                                border-color: search-inp.has-focus ? Theme.effective-accent : Theme.border;
                                 border-width: 1px;
+                                animate background, border-color { duration: 160ms; }
                                 HorizontalLayout {
                                     padding-left: 14px; padding-right: 40px; spacing: 10px;
                                     VerticalLayout {
                                         alignment: center;
                                         Rectangle {
-                                            width: 18px; height: 24px;
-                                            Image { source: @image-url("icons/search.svg"); width: 18px; height: 18px; y: 3px; colorize: search-inp.has-focus ? Theme.accent : Theme.text-muted; }
+                                            width: 18px; height: 18px;
+                                            Image { source: @image-url("icons/search.svg"); width: 18px; height: 18px; colorize: search-inp.has-focus ? Theme.effective-accent : Theme.text-muted; }
                                             TouchArea { clicked => { search-inp.focus(); open-search-preview(); } }
                                         }
                                     }
@@ -1374,7 +1451,7 @@ export component NativeShellWindow inherits Window {
                                         search-inp := TextInput {
                                             width: parent.width; height: parent.height;
                                             font-size: 14px; color: Theme.text;
-                                            selection-background-color: Theme.accent;
+                                            selection-background-color: Theme.effective-accent;
                                             selection-foreground-color: Theme.on-accent;
                                             vertical-alignment: center; single-line: true;
                                             changed has-focus => {
@@ -1428,9 +1505,12 @@ export component NativeShellWindow inherits Window {
 
                     // View area
                     Rectangle {
-                        vertical-stretch: 1; min-width: 0px; background: Theme.bg; clip: true;
+                        vertical-stretch: 1; min-width: 0px; background: transparent; clip: true;
+                        Rectangle {
+                            x: 0; y: root.view-offset-y; width: parent.width; height: parent.height;
+                            animate y { duration: 200ms; easing: cubic-bezier(0.2, 0.0, 0.0, 1.0); }
 
-                        // Loading
+                            // Loading
                         if is-loading && current-view != "Search": VerticalLayout {
                             alignment: center; spacing: 10px;
                             Text { text: "Searching..."; font-size: 18px; color: Theme.text-muted; horizontal-alignment: center; }
@@ -1448,7 +1528,7 @@ export component NativeShellWindow inherits Window {
                                 Rectangle {
                                     // Grows instead of clipping: on a narrow window the title wraps
                                     // to two lines and pushed the Listen Now button out of a fixed box.
-                                    min-height: 190px; border-radius: Theme.radius-lg; clip: true;
+                                    min-height: 190px; border-radius: Theme.radius-lg;
                                     background: @linear-gradient(120deg, Theme.accent-soft 0%, Theme.glass-hover 38%, Theme.glass 100%);
                                     border-color: Theme.border; border-width: 1px;
                                     drop-shadow-blur: 28px; drop-shadow-color: #00000045; drop-shadow-offset-y: 10px;
@@ -1485,7 +1565,7 @@ export component NativeShellWindow inherits Window {
                                             }
                                             Text {
                                                 text: now-playing-video-id != "" ? track-title : "Find your next favorite";
-                                                font-size: 26px; font-weight: 750; color: Theme.text;
+                                                font-size: 26px; font-weight: 800; color: Theme.text;
                                                 wrap: word-wrap; overflow: elide;
                                             }
                                             Text {
@@ -1502,14 +1582,17 @@ export component NativeShellWindow inherits Window {
                                             HorizontalLayout {
                                                 alignment: start;
                                                 Rectangle {
-                                                    width: hero-listen-text.preferred-width + 36px; height: 36px; border-radius: 18px;
-                                                    background: hero-listen-ta.has-hover ? Theme.accent-strong : Theme.accent;
+                                                    width: hero-listen-text.preferred-width + 56px; height: 36px; border-radius: 18px;
+                                                    background: hero-listen-ta.has-hover ? Theme.accent-strong : Theme.effective-accent;
                                                     border-color: Theme.accent-strong; border-width: 1px;
-                                                    hero-listen-text := Text {
-                                                        text: now-playing-video-id != "" ? (is-playing ? "Pause" : "Listen Now") : "Explore Music";
-                                                        color: Theme.on-accent; font-size: 13px; font-weight: 650;
-                                                        width: parent.width; height: parent.height;
-                                                        horizontal-alignment: center; vertical-alignment: center;
+                                                    HorizontalLayout {
+                                                        alignment: center; spacing: 8px;
+                                                        Image { source: (is-playing && now-playing-video-id != "") ? @image-url("icons/pause.svg") : @image-url("icons/play.svg"); width: 14px; height: 14px; colorize: Theme.on-accent; y: (parent.height - self.height) / 2; }
+                                                        hero-listen-text := Text {
+                                                            text: now-playing-video-id != "" ? (is-playing ? "Pause" : "Listen Now") : "Explore Music";
+                                                            color: Theme.on-accent; font-size: 13px; font-weight: 700;
+                                                            vertical-alignment: center;
+                                                        }
                                                     }
                                                     hero-listen-ta := TouchArea { clicked => { if (now-playing-video-id != "") { toggle-play-pause(); } else { navigate("Explore"); } } }
                                                 }
@@ -1525,9 +1608,9 @@ export component NativeShellWindow inherits Window {
                                     height: self.preferred-height; alignment: start;
                                     padding-top: Theme.section-gap; spacing: Theme.heading-gap;
                                     HorizontalLayout {
-                                        height: 28px; spacing: 8px; alignment: start;
+                                        height: 28px; spacing: 10px; alignment: start;
                                         Text { text: "Trending Now"; font-size: 22px; font-weight: 700; color: Theme.text; vertical-alignment: center; }
-                                        Text { text: "🔥"; font-size: 16px; vertical-alignment: center; }
+                                        VerticalLayout { alignment: center; Image { source: @image-url("icons/flame.svg"); width: 19px; height: 19px; colorize: Theme.effective-accent; } }
                                     }
                                     Rectangle {
                                         height: 270px; clip: true;
@@ -1560,9 +1643,9 @@ export component NativeShellWindow inherits Window {
                                     height: self.preferred-height; alignment: start;
                                     padding-top: Theme.section-gap; spacing: Theme.heading-gap;
                                     HorizontalLayout {
-                                        height: 28px; spacing: 8px; alignment: start;
+                                        height: 28px; spacing: 10px; alignment: start;
                                         Text { text: "From artists you follow"; font-size: 22px; font-weight: 700; color: Theme.text; vertical-alignment: center; }
-                                        Text { text: "♥"; font-size: 16px; color: Theme.accent; vertical-alignment: center; }
+                                        VerticalLayout { alignment: center; Image { source: @image-url("icons/heart-fill.svg"); width: 18px; height: 18px; colorize: Theme.effective-accent; } }
                                     }
                                     Rectangle {
                                         height: 270px; clip: true;
@@ -1593,9 +1676,9 @@ export component NativeShellWindow inherits Window {
                                     height: self.preferred-height; alignment: start;
                                     padding-top: Theme.section-gap; spacing: Theme.heading-gap;
                                     HorizontalLayout {
-                                        height: 28px; spacing: 8px; alignment: start;
+                                        height: 28px; spacing: 10px; alignment: start;
                                         Text { text: "Based on your listening"; font-size: 22px; font-weight: 700; color: Theme.text; vertical-alignment: center; }
-                                        Text { text: "✨"; font-size: 16px; vertical-alignment: center; }
+                                        VerticalLayout { alignment: center; Image { source: @image-url("icons/sparkles.svg"); width: 18px; height: 18px; colorize: Theme.effective-accent; } }
                                     }
                                     Rectangle {
                                         height: 270px; clip: true;
@@ -1627,9 +1710,9 @@ export component NativeShellWindow inherits Window {
                                     height: self.preferred-height; alignment: start;
                                     padding-top: Theme.section-gap; spacing: Theme.heading-gap;
                                     HorizontalLayout {
-                                        height: 28px; spacing: 8px; alignment: start;
+                                        height: 28px; spacing: 10px; alignment: start;
                                         Text { text: "New releases for you"; font-size: 22px; font-weight: 700; color: Theme.text; vertical-alignment: center; }
-                                        Text { text: "💿"; font-size: 16px; vertical-alignment: center; }
+                                        VerticalLayout { alignment: center; Image { source: @image-url("icons/disc.svg"); width: 19px; height: 19px; colorize: Theme.effective-accent; } }
                                     }
                                     Rectangle {
                                         height: 272px; clip: true;
@@ -1818,9 +1901,9 @@ export component NativeShellWindow inherits Window {
                                     height: self.preferred-height; alignment: start;
                                     padding-top: Theme.section-gap; spacing: Theme.heading-gap;
                                     HorizontalLayout {
-                                        height: 28px; spacing: 8px; alignment: start;
+                                        height: 28px; spacing: 10px; alignment: start;
                                         Text { text: home-language-title; font-size: 22px; font-weight: 700; color: Theme.text; vertical-alignment: center; }
-                                        Text { text: "🌍"; font-size: 16px; vertical-alignment: center; }
+                                        VerticalLayout { alignment: center; Image { source: @image-url("icons/globe.svg"); width: 18px; height: 18px; colorize: Theme.effective-accent; } }
                                     }
                                     Rectangle {
                                         height: 270px; clip: true;
@@ -1894,19 +1977,24 @@ export component NativeShellWindow inherits Window {
                                             background: Theme.surface;
                                             border-color: Theme.border; border-width: 1px;
                                             x: (parent.width - self.width) / 2;
-                                            Text { text: "♪"; font-size: 36px; color: Theme.text-dim;
-                                                width: parent.width; height: parent.height;
-                                                horizontal-alignment: center; vertical-alignment: center; }
+                                            Image {
+                                                source: @image-url("icons/music-note.svg");
+                                                width: 34px; height: 34px; colorize: Theme.text-dim;
+                                                x: (parent.width - self.width) / 2;
+                                                y: (parent.height - self.height) / 2;
+                                            }
                                         }
                                         Text { text: "Nothing playing yet"; font-size: 20px; font-weight: 600; color: Theme.text; horizontal-alignment: center; }
                                         Text { text: "Search above or explore to discover music"; font-size: 13px; color: Theme.text-muted; horizontal-alignment: center; }
                                         Rectangle {
-                                            height: 40px; width: 130px; border-radius: 20px; x: (parent.width - self.width) / 2;
+                                            height: 40px; width: 138px; border-radius: 20px; x: (parent.width - self.width) / 2;
                                             background: go-exp.has-hover ? Theme.accent-strong : Theme.accent;
-                                            animate background { duration: 100ms; }
-                                            Text { text: "Explore →"; font-size: 13px; font-weight: 700; color: Theme.on-accent;
-                                                width: parent.width; height: parent.height;
-                                                horizontal-alignment: center; vertical-alignment: center; }
+                                            animate background { duration: 140ms; }
+                                            HorizontalLayout {
+                                                alignment: center; spacing: 8px;
+                                                Text { text: "Explore"; font-size: 13px; font-weight: 700; color: Theme.on-accent; vertical-alignment: center; }
+                                                VerticalLayout { alignment: center; Image { source: @image-url("icons/arrow-right.svg"); width: 15px; height: 15px; colorize: Theme.on-accent; } }
+                                            }
                                             go-exp := TouchArea { clicked => { navigate("Explore"); } }
                                         }
                                     }
@@ -2579,10 +2667,11 @@ export component NativeShellWindow inherits Window {
                                                                 source: vid.thumbnail;
                                                                 width: parent.width; height: parent.height; image-fit: cover;
                                                             }
-                                                            if !vid.has-thumbnail: Text {
-                                                                text: "♪"; font-size: 36px; color: Theme.text-dim;
-                                                                width: parent.width; height: parent.height;
-                                                                horizontal-alignment: center; vertical-alignment: center;
+                                                            if !vid.has-thumbnail: Image {
+                                                                source: @image-url("icons/music-note.svg");
+                                                                width: 34px; height: 34px; colorize: Theme.text-dim;
+                                                                x: (parent.width - self.width) / 2;
+                                                                y: (parent.height - self.height) / 2;
                                                             }
                                                         }
                                                         VerticalLayout {
@@ -2616,17 +2705,22 @@ export component NativeShellWindow inherits Window {
                                                     width: 160px; height: 210px; border-radius: 8px;
                                                     background: ra-card-ta.has-hover ? Theme.glass-hover : transparent;
                                                     VerticalLayout {
-                                                        padding: 8px; spacing: 8px;
-                                                        Rectangle {
-                                                            width: 120px; height: 120px; border-radius: 60px; clip: true;
-                                                            background: Theme.art-placeholder;
-                                                            if ra.has-thumbnail: Image {
-                                                                source: ra.thumbnail;
-                                                                width: parent.width; height: parent.height; image-fit: cover;
-                                                            }
-                                                            if !ra.has-thumbnail: Text {
-                                                                text: "♪"; font-size: 36px; color: Theme.text-dim;
-                                                                horizontal-alignment: center; vertical-alignment: center;
+                                                        padding: 12px; spacing: 10px;
+                                                        HorizontalLayout {
+                                                            alignment: center;
+                                                            Rectangle {
+                                                                width: 120px; height: 120px; border-radius: 60px; clip: true;
+                                                                background: Theme.art-placeholder;
+                                                                if ra.has-thumbnail: Image {
+                                                                    source: ra.thumbnail;
+                                                                    width: parent.width; height: parent.height; image-fit: cover;
+                                                                }
+                                                                if !ra.has-thumbnail: Image {
+                                                                    source: @image-url("icons/artist.svg");
+                                                                    width: 40px; height: 40px; colorize: Theme.text-dim;
+                                                                    x: (parent.width - self.width) / 2;
+                                                                    y: (parent.height - self.height) / 2;
+                                                                }
                                                             }
                                                         }
                                                         VerticalLayout {
@@ -3088,9 +3182,8 @@ export component NativeShellWindow inherits Window {
                                                                 source: pl.thumbnail;
                                                                 width: parent.width; height: parent.height; image-fit: cover;
                                                             }
-                                                            if !pl.has-thumbnail: Text {
-                                                                text: "\u{1f3b6}"; font-size: 40px;
-                                                                horizontal-alignment: center; vertical-alignment: center;
+                                                            if !pl.has-thumbnail: Image {
+                                                                source: @image-url("icons/music-note.svg"); width: 32px; height: 32px; colorize: Theme.text-dim; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
                                                             }
                                                         }
                                                         VerticalLayout {
@@ -3142,6 +3235,7 @@ export component NativeShellWindow inherits Window {
                                             border-radius: Theme.radius;
                                             background: mood-ta.has-hover ? Theme.glass-hover : Theme.glass;
                                             border-color: Theme.border; border-width: 1px;
+                                            animate background, border-color { duration: 150ms; }
                                             HorizontalLayout {
                                                 padding-left: 14px; padding-right: 14px; spacing: 12px;
                                                 Rectangle {
@@ -3152,11 +3246,10 @@ export component NativeShellWindow inherits Window {
                                                     background: @linear-gradient(135deg,
                                                         Colors.hsv(Math.mod(i * 37, 360), 0.52, 0.68) 0%,
                                                         Colors.hsv(Math.mod(i * 37, 360), 0.60, 0.44) 100%);
-                                                    Text {
-                                                        text: "♪";
-                                                        font-size: 17px; color: Theme.on-accent;
-                                                        width: parent.width; height: parent.height;
-                                                        horizontal-alignment: center; vertical-alignment: center;
+                                                    Image {
+                                                        source: @image-url("icons/music-note.svg");
+                                                        width: 18px; height: 18px; colorize: Theme.on-accent;
+                                                        x: 11px; y: 11px;
                                                     }
                                                 }
                                                 Text {
@@ -3177,20 +3270,20 @@ export component NativeShellWindow inherits Window {
                                 GridLayout {
                                     spacing: 14px;
                                     Row {
-                                        GenreTile { label: "Pop";          icon: "🎵"; tile-color: #5020a0; clicked => { explore-genre("pop music hits"); } }
-                                        GenreTile { label: "Hip-Hop";      icon: "🎤"; tile-color: #8a2020; clicked => { explore-genre("hip hop rap"); } }
+                                        GenreTile { label: "Pop";          svg-icon: @image-url("icons/headphones.svg"); tile-color: #6d28d9; clicked => { explore-genre("pop music hits"); } }
+                                        GenreTile { label: "Hip-Hop";      svg-icon: @image-url("icons/mic.svg"); tile-color: #be123c; clicked => { explore-genre("hip hop rap"); } }
                                     }
                                     Row {
-                                        GenreTile { label: "Electronic";   icon: "⚡"; tile-color: #1a4070; clicked => { explore-genre("electronic edm dance"); } }
-                                        GenreTile { label: "Rock";         icon: "🎸"; tile-color: #2a3050; clicked => { explore-genre("rock music"); } }
+                                        GenreTile { label: "Electronic";   svg-icon: @image-url("icons/zap.svg"); tile-color: #0369a1; clicked => { explore-genre("electronic edm dance"); } }
+                                        GenreTile { label: "Rock";         svg-icon: @image-url("icons/guitar.svg"); tile-color: #334155; clicked => { explore-genre("rock music"); } }
                                     }
                                     Row {
-                                        GenreTile { label: "Bollywood";    icon: "🎭"; tile-color: #7a3010; clicked => { explore-genre("bollywood hindi songs"); } }
-                                        GenreTile { label: "Lofi Chill";   icon: "🌙"; tile-color: #0a2a2a; clicked => { explore-genre("lofi chill study beats"); } }
+                                        GenreTile { label: "Bollywood";    svg-icon: @image-url("icons/clapperboard.svg"); tile-color: #c2410c; clicked => { explore-genre("bollywood hindi songs"); } }
+                                        GenreTile { label: "Lofi Chill";   svg-icon: @image-url("icons/moon.svg"); tile-color: #0f766e; clicked => { explore-genre("lofi chill study beats"); } }
                                     }
                                     Row {
-                                        GenreTile { label: "Classical";    icon: "🎻"; tile-color: #1a2a10; clicked => { explore-genre("classical orchestral piano"); } }
-                                        GenreTile { label: "K-Pop";        icon: "✨"; tile-color: #401a50; clicked => { explore-genre("kpop korean pop"); } }
+                                        GenreTile { label: "Classical";    svg-icon: @image-url("icons/piano.svg"); tile-color: #3f6212; clicked => { explore-genre("classical orchestral piano"); } }
+                                        GenreTile { label: "K-Pop";        svg-icon: @image-url("icons/sparkles.svg"); tile-color: #86198f; clicked => { explore-genre("kpop korean pop"); } }
                                     }
                                 }
                                 }
@@ -3234,12 +3327,12 @@ export component NativeShellWindow inherits Window {
                                 GridLayout {
                                     spacing: 14px;
                                     Row {
-                                        GenreTile { label: "Top 100 Global";  icon: "🌍"; tile-color: #1a3a6a; clicked => { explore-genre("top 100 global hits 2026"); } }
-                                        GenreTile { label: "Top 50 USA";      icon: "🇺🇸"; tile-color: #2a1a5a; clicked => { explore-genre("top 50 USA hits 2026"); } }
+                                        GenreTile { label: "Top 100 Global";  svg-icon: @image-url("icons/globe.svg"); tile-color: #1d4ed8; clicked => { explore-genre("top 100 global hits 2026"); } }
+                                        GenreTile { label: "Top 50 USA";      svg-icon: @image-url("icons/trending-up.svg"); tile-color: #4338ca; clicked => { explore-genre("top 50 USA hits 2026"); } }
                                     }
                                     Row {
-                                        GenreTile { label: "Top 50 India";    icon: "🇮🇳"; tile-color: #5a2a0a; clicked => { explore-genre("top 50 India hits 2026"); } }
-                                        GenreTile { label: "Top 50 UK";       icon: "🇬🇧"; tile-color: #0a3a3a; clicked => { explore-genre("top 50 UK hits 2026"); } }
+                                        GenreTile { label: "Top 50 India";    svg-icon: @image-url("icons/flame.svg"); tile-color: #b45309; clicked => { explore-genre("top 50 India hits 2026"); } }
+                                        GenreTile { label: "Top 50 UK";       svg-icon: @image-url("icons/disc.svg"); tile-color: #0e7490; clicked => { explore-genre("top 50 UK hits 2026"); } }
                                     }
                                 }
                                 }
@@ -3321,9 +3414,12 @@ export component NativeShellWindow inherits Window {
                                     if liked-songs.length == 0: Rectangle {
                                         height: 260px;
                                         VerticalLayout { alignment: center; spacing: 10px;
-                                            Text { text: "♥"; font-size: 44px; color: Theme.text-dim; horizontal-alignment: center; }
+                                            HorizontalLayout {
+                                                alignment: center;
+                                                Image { source: @image-url("icons/heart.svg"); width: 44px; height: 44px; colorize: Theme.text-dim; }
+                                            }
                                             Text { text: "No liked songs yet"; font-size: 18px; font-weight: 600; color: Theme.text; horizontal-alignment: center; }
-                                            Text { text: "Tap ♥ while a song plays, or find something new."; font-size: 13px; color: Theme.text-muted; horizontal-alignment: center; }
+                                            Text { text: "Click the heart icon while a song plays, or find something new."; font-size: 13px; color: Theme.text-muted; horizontal-alignment: center; }
                                             Rectangle { height: 6px; }
                                             HorizontalLayout {
                                                 alignment: center;
@@ -3484,10 +3580,11 @@ export component NativeShellWindow inherits Window {
                                     // Create a new local playlist
                                     HorizontalLayout { alignment: start;
                                         Rectangle {
-                                            width: 156px; height: 40px; border-radius: Theme.radius-sm;
+                                            width: 156px; height: 40px; border-radius: 20px;
                                             background: new-pl-ta.has-hover ? Theme.accent-strong : Theme.accent;
+                                            animate background { duration: 140ms; }
                                             HorizontalLayout { alignment: center; spacing: 8px;
-                                                Text { text: "+"; color: Theme.on-accent; font-size: 17px; font-weight: 700; vertical-alignment: center; }
+                                                VerticalLayout { alignment: center; Image { source: @image-url("icons/plus.svg"); width: 16px; height: 16px; colorize: Theme.on-accent; } }
                                                 Text { text: "New playlist"; color: Theme.on-accent; font-size: 13px; font-weight: 600; vertical-alignment: center; }
                                             }
                                             new-pl-ta := TouchArea { clicked => { new-playlist(); } }
@@ -3545,16 +3642,25 @@ export component NativeShellWindow inherits Window {
                         if !is-loading && current-view == "Settings": SmoothFlickable {
                             viewport-width: self.width; viewport-height: set-col.preferred-height;
                             set-col := VerticalLayout {
-                                width: parent.width; height: self.preferred-height; alignment: start;
+                                width: min(parent.width, 900px); height: self.preferred-height; alignment: start;
                                 padding: 32px; spacing: Theme.section-gap;
                                 Text { text: "Settings"; font-size: 28px; font-weight: 700; color: Theme.text; }
                                 // About
                                 Rectangle {
-                                    height: 72px; border-radius: 12px;
-                                    background: Theme.surface; border-color: Theme.border; border-width: 1px;
+                                    height: 76px; border-radius: Theme.radius;
+                                    background: Theme.glass; border-color: Theme.border; border-width: 1px;
                                     HorizontalLayout {
-                                        padding: 20px; spacing: 14px; alignment: start;
-                                        Text { text: "▶"; color: Theme.accent; font-size: 26px; vertical-alignment: center; }
+                                        padding: 16px; spacing: 14px; alignment: start;
+                                        Rectangle {
+                                            width: 42px; height: 42px; border-radius: 12px;
+                                            background: @linear-gradient(135deg, Theme.effective-accent 0%, Theme.effective-accent.darker(0.32) 100%);
+                                            y: (parent.height - self.height) / 2;
+                                            Image {
+                                                source: @image-url("icons/auricle-logo.svg");
+                                                width: 22px; height: 22px; colorize: Theme.on-accent;
+                                                x: 10px; y: 10px;
+                                            }
+                                        }
                                         VerticalLayout { alignment: center; spacing: 4px;
                                             Text { text: "Auricle"; font-size: 16px; font-weight: 600; color: Theme.text; }
                                             Text { text: "Native • Rust + Slint"; font-size: 12px; color: Theme.text-muted; }
@@ -3564,8 +3670,8 @@ export component NativeShellWindow inherits Window {
                                 // Appearance
                                 Text { text: "Appearance"; font-size: 14px; font-weight: 600; color: Theme.text-muted; }
                                 Rectangle {
-                                    height: 148px; border-radius: Theme.radius;
-                                    background: Theme.surface; border-color: Theme.border; border-width: 1px;
+                                    border-radius: Theme.radius;
+                                    background: Theme.glass; border-color: Theme.border; border-width: 1px;
                                     VerticalLayout { padding: 18px; spacing: 14px;
                                         HorizontalLayout { alignment: space-between; spacing: 16px;
                                             VerticalLayout { alignment: center; spacing: 3px; horizontal-stretch: 1;
@@ -3573,32 +3679,33 @@ export component NativeShellWindow inherits Window {
                                                 Text { text: "Accent and complementary surfaces"; font-size: 12px; color: Theme.text-muted; }
                                             }
                                             theme-picker := Rectangle {
-                                                width: 190px; height: 36px; border-radius: Theme.radius-sm;
+                                                width: 214px; height: 38px; border-radius: Theme.radius-sm;
                                                 background: theme-picker-ta.has-hover ? Theme.surface-hover : Theme.surface-2;
                                                 border-color: Theme.border; border-width: 1px;
                                                 HorizontalLayout { padding-left: 10px; padding-right: 10px; spacing: 9px;
-                                                    Rectangle { width: 16px; height: 16px; border-radius: 8px; background: Theme.accent; }
-                                                    Text { text: theme-name; font-size: 13px; color: Theme.text; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
-                                                    Text { text: "⌄"; font-size: 14px; color: Theme.text-muted; vertical-alignment: center; }
+                                                    Rectangle { width: 16px; height: 16px; border-radius: 8px; y: (parent.height - self.height) / 2; background: Theme.effective-accent; border-color: Theme.border; border-width: 1px; }
+                                                    Text { text: theme-name == "Dynamic" ? "Dynamic (Album Art)" : theme-name; font-size: 13px; color: Theme.text; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                                                    VerticalLayout { alignment: center; Image { source: @image-url("icons/chevron-down.svg"); width: 15px; height: 15px; colorize: Theme.text-muted; } }
                                                 }
                                                 theme-picker-ta := TouchArea { clicked => { theme-menu.show(); } }
                                                 theme-menu := PopupWindow {
-                                                    x: 0px; y: 40px; width: 220px; height: 406px;
+                                                    x: 0px; y: 42px; width: 236px; height: 444px;
                                                     Rectangle {
-                                                        width: 220px; height: 406px; border-radius: Theme.radius;
+                                                        width: 236px; height: 444px; border-radius: Theme.radius;
                                                         background: Theme.glass-strong; border-color: Theme.border; border-width: 1px;
                                                         drop-shadow-blur: 24px; drop-shadow-color: #00000080; drop-shadow-offset-y: 7px;
                                                         VerticalLayout { padding: 8px; spacing: 1px;
-                                                            ThemeChoice { theme-label: "Default Blue"; theme-color: #6486b0; selected: theme-name == "Default Blue"; picked => { set-theme-name("Default Blue"); theme-menu.close(); } }
-                                                            ThemeChoice { theme-label: "Solar Red"; theme-color: #e2503f; selected: theme-name == "Solar Red"; picked => { set-theme-name("Solar Red"); theme-menu.close(); } }
-                                                            ThemeChoice { theme-label: "Ember"; theme-color: #f2703a; selected: theme-name == "Ember"; picked => { set-theme-name("Ember"); theme-menu.close(); } }
-                                                            ThemeChoice { theme-label: "Earth"; theme-color: #b06a43; selected: theme-name == "Earth"; picked => { set-theme-name("Earth"); theme-menu.close(); } }
-                                                            ThemeChoice { theme-label: "Forest"; theme-color: #3fa96a; selected: theme-name == "Forest"; picked => { set-theme-name("Forest"); theme-menu.close(); } }
-                                                            ThemeChoice { theme-label: "Ocean"; theme-color: #1699a8; selected: theme-name == "Ocean"; picked => { set-theme-name("Ocean"); theme-menu.close(); } }
-                                                            ThemeChoice { theme-label: "Sky"; theme-color: #46a6e6; selected: theme-name == "Sky"; picked => { set-theme-name("Sky"); theme-menu.close(); } }
-                                                            ThemeChoice { theme-label: "Twilight"; theme-color: #8b5cf6; selected: theme-name == "Twilight"; picked => { set-theme-name("Twilight"); theme-menu.close(); } }
-                                                            ThemeChoice { theme-label: "Rose"; theme-color: #e26aa0; selected: theme-name == "Rose"; picked => { set-theme-name("Rose"); theme-menu.close(); } }
-                                                            ThemeChoice { theme-label: "Mono"; theme-color: #6b7280; selected: theme-name == "Mono"; picked => { set-theme-name("Mono"); theme-menu.close(); } }
+                                                            ThemeChoice { theme-label: "Dynamic (Album Art)"; theme-color: Theme.art-accent; selected: theme-name == "Dynamic"; picked => { set-theme-name("Dynamic"); theme-menu.close(); } }
+                                                            ThemeChoice { theme-label: "Default Blue"; theme-color: #5b8def; selected: theme-name == "Default Blue"; picked => { set-theme-name("Default Blue"); theme-menu.close(); } }
+                                                            ThemeChoice { theme-label: "Solar Red"; theme-color: #fa2d48; selected: theme-name == "Solar Red"; picked => { set-theme-name("Solar Red"); theme-menu.close(); } }
+                                                            ThemeChoice { theme-label: "Ember"; theme-color: #f97316; selected: theme-name == "Ember"; picked => { set-theme-name("Ember"); theme-menu.close(); } }
+                                                            ThemeChoice { theme-label: "Earth"; theme-color: #c27849; selected: theme-name == "Earth"; picked => { set-theme-name("Earth"); theme-menu.close(); } }
+                                                            ThemeChoice { theme-label: "Forest"; theme-color: #24c466; selected: theme-name == "Forest"; picked => { set-theme-name("Forest"); theme-menu.close(); } }
+                                                            ThemeChoice { theme-label: "Ocean"; theme-color: #14b8c4; selected: theme-name == "Ocean"; picked => { set-theme-name("Ocean"); theme-menu.close(); } }
+                                                            ThemeChoice { theme-label: "Sky"; theme-color: #38bdf8; selected: theme-name == "Sky"; picked => { set-theme-name("Sky"); theme-menu.close(); } }
+                                                            ThemeChoice { theme-label: "Twilight"; theme-color: #9b6dff; selected: theme-name == "Twilight"; picked => { set-theme-name("Twilight"); theme-menu.close(); } }
+                                                            ThemeChoice { theme-label: "Rose"; theme-color: #ec4899; selected: theme-name == "Rose"; picked => { set-theme-name("Rose"); theme-menu.close(); } }
+                                                            ThemeChoice { theme-label: "Mono"; theme-color: #8b95a5; selected: theme-name == "Mono"; picked => { set-theme-name("Mono"); theme-menu.close(); } }
                                                         }
                                                     }
                                                 }
@@ -4015,16 +4122,24 @@ export component NativeShellWindow inherits Window {
                             }
                         }
                     }
+                    }
+                    }
                 }
 
                 // ── Right queue pane (Spotify-style) ─────────────────────────
-                if queue-pane-open: Rectangle {
-                    width: compact ? 288px : 320px;
-                    background: Theme.frost;
-                    // Left glass-edge highlight for a premium frosted look.
-                    Rectangle { x: 0; y: 0; width: 1px; height: parent.height; background: Theme.frost-hi; }
-                    VerticalLayout {
-                        padding: 12px; padding-left: 12px; padding-right: 12px; spacing: 0px;
+                Rectangle {
+                    property <length> pane-w: compact ? 288px : 320px;
+                    width: queue-pane-open ? (self.pane-w + 8px) : 0px;
+                    clip: true;
+                    animate width { duration: 220ms; easing: cubic-bezier(0.2, 0.0, 0.0, 1.0); }
+                    if self.width > 1px: Rectangle {
+                        x: 8px; y: 0; width: parent.pane-w; height: parent.height;
+                        border-radius: Theme.radius;
+                        background: Theme.frost;
+                        border-color: Theme.border; border-width: 1px;
+                        Rectangle { x: 14px; y: 0; width: max(0px, parent.width - 28px); height: 1px; background: Theme.frost-hi; }
+                        VerticalLayout {
+                            padding: 12px; padding-left: 12px; padding-right: 12px; spacing: 0px;
                         // Header
                         HorizontalLayout {
                             height: 40px; alignment: space-between;
@@ -4043,10 +4158,12 @@ export component NativeShellWindow inherits Window {
                             changed now-playing-video-id => { qpane-fl.viewport-y = queue-history.length > 0 ? -qp-history.height : 0px; }
                         }
 
-                        qpane-fl := SmoothFlickable {
-                            vertical-stretch: 1;
-                            viewport-height: qpane-col.preferred-height;
-                            qpane-col := VerticalLayout {
+                        Rectangle {
+                            vertical-stretch: 1; clip: true; width: 100%;
+                            qpane-fl := SmoothFlickable {
+                                width: 100%; height: 100%;
+                                viewport-height: qpane-col.preferred-height;
+                                qpane-col := VerticalLayout {
                                 spacing: 0px;
 
                                 // ── Recently played ──
@@ -4119,6 +4236,13 @@ export component NativeShellWindow inherits Window {
                                                 alignment: center; spacing: 3px; horizontal-stretch: 1;
                                                 Text { text: track-title; font-size: 14px; font-weight: 600; color: Theme.accent; overflow: elide; }
                                                 Text { text: track-artist; font-size: 12px; color: Theme.text-muted; overflow: elide; }
+                                            }
+                                            VerticalLayout {
+                                                alignment: center;
+                                                EqualizerBars {
+                                                    playing: root.is-playing;
+                                                    bar-color: Theme.effective-accent;
+                                                }
                                             }
                                         }
                                         np-ta := TouchArea {
@@ -4289,6 +4413,8 @@ export component NativeShellWindow inherits Window {
                                 }
                             }
                         }
+                        }
+                    }
                     }
                 }
             }
@@ -4305,31 +4431,44 @@ export component NativeShellWindow inherits Window {
 
             // ── Player bar ────────────────────────────────────────────────
             Rectangle {
-                height: 86px;
-                border-radius: Theme.radius; border-color: Theme.border; border-width: 1px;
+                height: 88px;
+                border-radius: Theme.radius-lg; border-color: Theme.border; border-width: 1px;
                 background: Theme.frost;
                 drop-shadow-blur: 24px; drop-shadow-color: #00000045; drop-shadow-offset-y: -6px;
+                // Ambient album-art wash
+                Rectangle {
+                    x: 1px; y: 1px; width: max(0px, parent.width - 2px); height: max(0px, parent.height - 2px);
+                    border-radius: Theme.radius-lg;
+                    background: @linear-gradient(95deg, Theme.ambient-tint.with-alpha(Theme.is-light ? 0.14 : 0.22) 0%, transparent 46%, Theme.effective-accent.with-alpha(Theme.is-light ? 0.06 : 0.10) 100%);
+                    animate background { duration: 350ms; easing: ease-out; }
+                }
                 // Top glass-edge highlight for a premium frosted look.
-                Rectangle { x: 0; y: 0; height: 1px; width: parent.width; background: Theme.frost-hi; }
+                Rectangle { x: 18px; y: 0; height: 1px; width: max(0px, parent.width - 36px); background: Theme.frost-hi; }
 
                 HorizontalLayout {
                     padding-left: 16px; padding-right: 16px; padding-top: 12px; padding-bottom: 12px;
 
                     // Now playing info (left)
                     HorizontalLayout {
-                        width: compact ? 210px : 300px; spacing: 12px; alignment: start;
+                        width: compact ? 176px : 272px; spacing: 12px; alignment: start;
 
-                        if has-album-art: Rectangle {
-                            width: 60px; height: 60px; border-radius: 12px; clip: true;
-                            Image { source: album-art; width: parent.width; height: parent.height; image-fit: cover; }
+                        if has-album-art: VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 60px; height: 60px; border-radius: 12px; clip: true;
+                                Image { source: album-art; width: parent.width; height: parent.height; image-fit: cover; }
+                            }
                         }
-                        if !has-album-art: Rectangle {
-                            width: 60px; height: 60px; border-radius: 12px;
-                            background: Theme.surface-hover;
-                            Text {
-                                text: track-initial; color: is-playing ? Theme.accent : Theme.text-dim;
-                                font-size: 20px; font-weight: 700;
-                                horizontal-alignment: center; vertical-alignment: center;
+                        if !has-album-art: VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 60px; height: 60px; border-radius: 12px;
+                                background: Theme.surface-hover;
+                                Text {
+                                    text: track-initial; color: is-playing ? Theme.accent : Theme.text-dim;
+                                    font-size: 20px; font-weight: 700;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                }
                             }
                         }
 
@@ -4359,59 +4498,100 @@ export component NativeShellWindow inherits Window {
                             }
                         }
 
-                        Rectangle {
-                            width: 36px; height: 36px;
-                            property <bool> like-bounce: false;
-                            like-heart := Image {
-                                source: is-liked ? @image-url("icons/heart-fill.svg") : @image-url("icons/heart.svg");
-                                width: like-bounce ? 28px : (is-liked ? 22px : 20px);
-                                height: like-bounce ? 28px : (is-liked ? 22px : 20px);
-                                colorize: is-liked ? Theme.accent : Theme.text-dim;
-                                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-                                animate colorize { duration: 200ms; }
-                                animate width, height { duration: 150ms; easing: ease-out-back; }
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 36px; height: 36px;
+                                property <bool> like-bounce: false;
+                                like-heart := Image {
+                                    source: is-liked ? @image-url("icons/heart-fill.svg") : @image-url("icons/heart.svg");
+                                    width: like-bounce ? 28px : (is-liked ? 22px : 20px);
+                                    height: like-bounce ? 28px : (is-liked ? 22px : 20px);
+                                    colorize: is-liked ? Theme.accent : Theme.text-dim;
+                                    x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                                    animate colorize { duration: 200ms; }
+                                    animate width, height { duration: 150ms; easing: ease-out-back; }
+                                }
+                                Timer { interval: 180ms; running: parent.like-bounce; triggered => { parent.like-bounce = false; } }
+                                TouchArea { clicked => { parent.like-bounce = true; like-current(); } }
                             }
-                            TouchArea { clicked => { like-bounce = true; like-current(); like-bounce = false; } }
                         }
                     }
 
                     // Transport + progress (center)
                     VerticalLayout {
-                        horizontal-stretch: 1; spacing: 6px; alignment: center;
+                        horizontal-stretch: 1; spacing: 4px; alignment: center;
 
                         HorizontalLayout {
-                            alignment: center; spacing: 16px;
-                            Rectangle {
-                                width: 32px; height: 32px; border-radius: 16px;
-                                background: shuf-ta.has-hover ? Theme.hover-veil : transparent;
-                                Image { source: @image-url("icons/shuffle.svg"); width: 16px; height: 16px; colorize: shuf-ta.has-hover ? Theme.text : Theme.text-dim; x: 8px; y: 8px; }
-                                shuf-ta := TouchArea { }
+                            alignment: center; spacing: 14px;
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 32px; height: 32px; border-radius: 16px;
+                                    background: shuf-ta.has-hover ? Theme.hover-veil : transparent;
+                                    animate background { duration: 140ms; }
+                                    Image { source: @image-url("icons/shuffle.svg"); width: 16px; height: 16px; colorize: shuf-ta.has-hover ? Theme.text : Theme.text-dim; x: 8px; y: 8px; }
+                                    shuf-ta := TouchArea { }
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 36px; height: 36px; border-radius: 18px;
+                                    background: prev-ta.has-hover ? Theme.hover-veil : transparent;
+                                    animate background { duration: 140ms; }
+                                    Image { source: @image-url("icons/prev.svg"); width: 20px; height: 20px; colorize: prev-ta.has-hover ? Theme.text : Theme.text-muted; x: 8px; y: 8px; }
+                                    prev-ta := TouchArea { clicked => { prev-track(); } }
+                                }
                             }
                             Rectangle {
-                                width: 36px; height: 36px; border-radius: 18px;
-                                background: prev-ta.has-hover ? Theme.hover-veil : transparent;
-                                Image { source: @image-url("icons/prev.svg"); width: 20px; height: 20px; colorize: prev-ta.has-hover ? Theme.text : Theme.text-muted; x: 8px; y: 8px; }
-                                prev-ta := TouchArea { clicked => { prev-track(); } }
+                                width: 48px; height: 48px;
+                                Rectangle {
+                                    width: play-btn-ta.pressed ? 40px : (play-btn-ta.has-hover ? 46px : 44px);
+                                    height: self.width;
+                                    border-radius: self.width / 2;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                    background: play-btn-ta.has-hover ? Theme.accent-strong : Theme.effective-accent;
+                                    drop-shadow-blur: 16px;
+                                    drop-shadow-color: Theme.accent-glow;
+                                    animate width, height, background { duration: 140ms; easing: ease-out; }
+                                    if is-playing: Image {
+                                        source: @image-url("icons/pause.svg");
+                                        width: 20px; height: 20px;
+                                        colorize: Theme.on-accent;
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                    }
+                                    if !is-playing: Image {
+                                        source: @image-url("icons/play.svg");
+                                        width: 20px; height: 20px;
+                                        colorize: Theme.on-accent;
+                                        x: (parent.width - self.width) / 2 + 1px;
+                                        y: (parent.height - self.height) / 2;
+                                    }
+                                    play-btn-ta := TouchArea { clicked => { toggle-play-pause(); } }
+                                }
                             }
-                            Rectangle {
-                                width: 44px; height: 44px; border-radius: 22px;
-                                background: Theme.accent;
-                                drop-shadow-blur: 12px; drop-shadow-color: Theme.accent-soft;
-                                if is-playing: Image { source: @image-url("icons/pause.svg"); width: 20px; height: 20px; colorize: Theme.on-accent; x: 12px; y: 12px; }
-                                if !is-playing: Image { source: @image-url("icons/play.svg"); width: 20px; height: 20px; colorize: Theme.on-accent; x: 13px; y: 12px; }
-                                TouchArea { clicked => { toggle-play-pause(); } }
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 36px; height: 36px; border-radius: 18px;
+                                    background: next-ta.has-hover ? Theme.hover-veil : transparent;
+                                    animate background { duration: 140ms; }
+                                    Image { source: @image-url("icons/next.svg"); width: 20px; height: 20px; colorize: next-ta.has-hover ? Theme.text : Theme.text-muted; x: 8px; y: 8px; }
+                                    next-ta := TouchArea { clicked => { next-track(); } }
+                                }
                             }
-                            Rectangle {
-                                width: 36px; height: 36px; border-radius: 18px;
-                                background: next-ta.has-hover ? Theme.hover-veil : transparent;
-                                Image { source: @image-url("icons/next.svg"); width: 20px; height: 20px; colorize: next-ta.has-hover ? Theme.text : Theme.text-muted; x: 8px; y: 8px; }
-                                next-ta := TouchArea { clicked => { next-track(); } }
-                            }
-                            Rectangle {
-                                width: 32px; height: 32px; border-radius: 16px;
-                                background: rep-ta.has-hover ? Theme.hover-veil : transparent;
-                                Image { source: @image-url("icons/repeat.svg"); width: 16px; height: 16px; colorize: rep-ta.has-hover ? Theme.text : Theme.text-dim; x: 8px; y: 8px; }
-                                rep-ta := TouchArea { }
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 32px; height: 32px; border-radius: 16px;
+                                    background: rep-ta.has-hover ? Theme.hover-veil : transparent;
+                                    animate background { duration: 140ms; }
+                                    Image { source: @image-url("icons/repeat.svg"); width: 16px; height: 16px; colorize: rep-ta.has-hover ? Theme.text : Theme.text-dim; x: 8px; y: 8px; }
+                                    rep-ta := TouchArea { }
+                                }
                             }
                         }
 
@@ -4420,7 +4600,7 @@ export component NativeShellWindow inherits Window {
                             spacing: 10px;
                             padding-left: 16px; padding-right: 16px;
 
-                            Text { text: current-time; font-size: 11px; font-weight: 500; color: Theme.text-muted; width: 36px; horizontal-alignment: right; }
+                            Text { text: current-time; font-size: 11px; font-weight: 600; color: Theme.text-muted; width: 38px; horizontal-alignment: right; vertical-alignment: center; }
 
                             prog-ta := TouchArea {
                                 horizontal-stretch: 1; height: 14px;
@@ -4428,60 +4608,97 @@ export component NativeShellWindow inherits Window {
                                 moved  => { seek(self.mouse-x / self.width); }
                                 Rectangle {
                                     x: 0; y: (parent.height - self.height) / 2;
-                                    height: prog-ta.has-hover ? 5px : 3px;
-                                    width: parent.width; border-radius: 2px;
+                                    height: prog-ta.has-hover ? 6px : 4px;
+                                    width: parent.width; border-radius: self.height / 2;
                                     background: Theme.surface-hover;
+                                    animate height { duration: 140ms; easing: ease-out; }
                                     Rectangle {
                                         x: 0; y: 0;
                                         width: parent.width * progress;
-                                        height: parent.height; border-radius: 2px;
+                                        height: parent.height; border-radius: self.height / 2;
                                         background: prog-ta.has-hover ? Theme.accent-strong : Theme.accent;
                                     }
                                 }
-                                if prog-ta.has-hover: Rectangle {
-                                    x: prog-ta.width * progress - 6px;
-                                    y: (prog-ta.height - 12px) / 2;
-                                    width: 12px; height: 12px; border-radius: 6px;
+                                Rectangle {
+                                    width: prog-ta.has-hover ? 12px : 0px;
+                                    height: self.width;
+                                    border-radius: self.width / 2;
+                                    x: prog-ta.width * progress - self.width / 2;
+                                    y: (prog-ta.height - self.height) / 2;
                                     background: Theme.text;
+                                    animate width, height { duration: 140ms; easing: ease-out; }
                                 }
                             }
 
-                            Text { text: total-time; font-size: 11px; font-weight: 500; color: Theme.text-muted; width: 36px; }
+                            Text { text: total-time; font-size: 11px; font-weight: 600; color: Theme.text-muted; width: 38px; vertical-alignment: center; }
                         }
                     }
 
                     // Volume + queue toggle (right)
                     HorizontalLayout {
-                        width: compact ? 52px : 220px; spacing: 10px; alignment: end;
+                        width: compact ? 176px : 272px; spacing: 10px; alignment: end;
 
-                        IconBtn { svg-icon: @image-url("icons/queue.svg"); use-svg: true; active: queue-pane-open; icon-color: queue-pane-open ? Theme.accent : Theme.text-dim; clicked => { toggle-queue-pane(); } }
+                        VerticalLayout {
+                            alignment: center;
+                            IconBtn { svg-icon: @image-url("icons/queue.svg"); use-svg: true; active: queue-pane-open; icon-color: queue-pane-open ? Theme.accent : Theme.text-dim; clicked => { toggle-queue-pane(); } }
+                        }
 
                         if !compact: HorizontalLayout {
-                            spacing: 8px; alignment: center;
-                            Image { source: @image-url("icons/volume.svg"); width: 18px; height: 18px; colorize: Theme.text-muted; vertical-alignment: center; }
-
-                            vol-ta := TouchArea {
-                                width: 80px; height: 16px;
-                                clicked => { set-volume(self.mouse-x / self.width); }
-                                moved  => { set-volume(self.mouse-x / self.width); }
+                            spacing: 6px; alignment: center;
+                            VerticalLayout {
+                                alignment: center;
                                 Rectangle {
-                                    x: 0;
-                                    y: (parent.height - self.height) / 2;
-                                    height: vol-ta.has-hover ? 5px : 3px;
-                                    width: parent.width; border-radius: 2px;
-                                    background: Theme.surface-hover;
-                                    Rectangle {
-                                        x: 0; y: 0;
-                                        width: parent.width * volume;
-                                        height: parent.height; border-radius: 2px;
-                                        background: vol-ta.has-hover ? Theme.accent : Theme.text-muted;
+                                    width: 32px; height: 32px; border-radius: 16px;
+                                    background: mute-ta.has-hover ? Theme.hover-veil : transparent;
+                                    animate background { duration: 140ms; }
+                                    Image {
+                                        source: volume <= 0.005 ? @image-url("icons/volume-mute.svg") : (volume < 0.5 ? @image-url("icons/volume-low.svg") : @image-url("icons/volume.svg"));
+                                        width: 18px; height: 18px;
+                                        colorize: mute-ta.has-hover ? Theme.text : Theme.text-muted;
+                                        x: 7px; y: 7px;
+                                    }
+                                    mute-ta := TouchArea {
+                                        clicked => {
+                                            if (root.volume > 0.005) {
+                                                root.pre-mute-volume = root.volume;
+                                                set-volume(0.0);
+                                            } else {
+                                                set-volume(root.pre-mute-volume > 0.05 ? root.pre-mute-volume : 0.8);
+                                            }
+                                        }
                                     }
                                 }
-                                if vol-ta.has-hover: Rectangle {
-                                    x: parent.width * volume - 5px;
-                                    y: parent.height / 2 - 5px;
-                                    width: 10px; height: 10px; border-radius: 5px;
+                            }
+
+                            VerticalLayout {
+                                alignment: center;
+                                vol-ta := TouchArea {
+                                    width: 84px; height: 16px;
+                                    clicked => { set-volume(self.mouse-x / self.width); }
+                                    moved  => { set-volume(self.mouse-x / self.width); }
+                                    Rectangle {
+                                        x: 0;
+                                        y: (parent.height - self.height) / 2;
+                                        height: vol-ta.has-hover ? 6px : 4px;
+                                        width: parent.width; border-radius: self.height / 2;
+                                        background: Theme.surface-hover;
+                                        animate height { duration: 140ms; easing: ease-out; }
+                                        Rectangle {
+                                            x: 0; y: 0;
+                                            width: parent.width * volume;
+                                            height: parent.height; border-radius: self.height / 2;
+                                            background: vol-ta.has-hover ? Theme.accent : Theme.text-muted;
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: vol-ta.has-hover ? 11px : 0px;
+                                        height: self.width;
+                                        border-radius: self.width / 2;
+                                        x: parent.width * volume - self.width / 2;
+                                        y: (parent.height - self.height) / 2;
                                         background: Theme.accent;
+                                        animate width, height { duration: 140ms; easing: ease-out; }
+                                    }
                                 }
                             }
                         }
@@ -4665,7 +4882,7 @@ export component NativeShellWindow inherits Window {
                         if ctx-kind == "Song" && ctx-in-queue: CtxMenuItem { icon: @image-url("icons/close.svg"); label: "Remove from queue"; clicked => { remove-from-queue(ctx-index); close-ctx-menu(); } }
                         if ctx-kind == "Song" && ctx-in-autoplay: CtxMenuItem { icon: @image-url("icons/close.svg"); label: "Remove from autoplay"; clicked => { remove-from-autoplay(ctx-index); close-ctx-menu(); } }
                         if ctx-kind == "Song": Rectangle { height: 1px; background: Theme.border; }
-                        if ctx-kind == "Song": CtxMenuItem { use-image: false; glyph: "\u{1F6AB}"; glyph-size: 13px; label: "Remove from taste profile"; clicked => { dislike-song(ctx-video-id, ctx-title, ctx-artist, ctx-duration); close-ctx-menu(); } }
+                        if ctx-kind == "Song": CtxMenuItem { icon: @image-url("icons/ban.svg"); icon-color: Theme.danger; label-color: Theme.danger; glyph-size: 13px; label: "Remove from taste profile"; clicked => { dislike-song(ctx-video-id, ctx-title, ctx-artist, ctx-duration); close-ctx-menu(); } }
                     }
                 }
             }
@@ -4764,9 +4981,7 @@ export component NativeShellWindow inherits Window {
                                 Rectangle {
                                     width: 32px; height: 32px; border-radius: 6px; background: Theme.art-placeholder;
                                     y: (parent.height - self.height) / 2;
-                                    Text { text: "♪"; color: Theme.text-dim; font-size: 15px;
-                                        width: parent.width; height: parent.height;
-                                        horizontal-alignment: center; vertical-alignment: center; }
+                                    Image { source: @image-url("icons/music-note.svg"); width: 16px; height: 16px; colorize: Theme.text-dim; x: 8px; y: 8px; }
                                 }
                                 VerticalLayout { alignment: center; horizontal-stretch: 1;
                                     Text { text: pl.title; font-size: 13px; font-weight: 500; color: Theme.text; overflow: elide; }
@@ -4806,7 +5021,7 @@ export component NativeShellWindow inherits Window {
                     spacing: 14px; alignment: start;
                     Rectangle {
                         width: 46px; height: 46px; border-radius: 12px; background: Theme.accent-soft;
-                        Text { text: "\u{25B6}"; color: Theme.accent; font-size: 22px; horizontal-alignment: center; vertical-alignment: center; }
+                        Image { source: @image-url("icons/auricle-logo.svg"); width: 24px; height: 24px; colorize: Theme.effective-accent; x: 11px; y: 11px; }
                     }
                     VerticalLayout {
                         alignment: center; spacing: 3px; horizontal-stretch: 1;
@@ -4832,7 +5047,7 @@ export component NativeShellWindow inherits Window {
                                 Text { text: "yt-dlp"; font-size: 14px; font-weight: 600; color: Theme.text; }
                                 Text { text: "Required for audio streaming and downloads."; font-size: 12px; color: Theme.text-muted; }
                             }
-                            if ytdlp-installed && addon-installing != "ytdlp": Text { text: "\u{2713} Installed"; font-size: 13px; color: Theme.success; vertical-alignment: center; }
+                            if ytdlp-installed && addon-installing != "ytdlp": HorizontalLayout { spacing: 5px; alignment: center; Image { source: @image-url("icons/check.svg"); width: 14px; height: 14px; colorize: Theme.success; y: (parent.height - self.height) / 2; } Text { text: "Installed"; font-size: 13px; color: Theme.success; vertical-alignment: center; } }
                             if !ytdlp-installed && addon-installing != "ytdlp": Rectangle {
                                 width: 100px; height: 34px; border-radius: Theme.radius-sm;
                                 background: addon-busy ? Theme.surface-hover : (ob-yt-ta.has-hover ? Theme.accent-strong : Theme.accent);
@@ -4866,7 +5081,7 @@ export component NativeShellWindow inherits Window {
                                 Text { text: "ffmpeg"; font-size: 14px; font-weight: 600; color: Theme.text; }
                                 Text { text: "Optional \u{2022} improves format handling for downloads."; font-size: 12px; color: Theme.text-muted; }
                             }
-                            if ffmpeg-installed && addon-installing != "ffmpeg": Text { text: "\u{2713} Installed"; font-size: 13px; color: Theme.success; vertical-alignment: center; }
+                            if ffmpeg-installed && addon-installing != "ffmpeg": HorizontalLayout { spacing: 5px; alignment: center; Image { source: @image-url("icons/check.svg"); width: 14px; height: 14px; colorize: Theme.success; y: (parent.height - self.height) / 2; } Text { text: "Installed"; font-size: 13px; color: Theme.success; vertical-alignment: center; } }
                             if !ffmpeg-installed && addon-installing != "ffmpeg": Rectangle {
                                 width: 100px; height: 34px; border-radius: Theme.radius-sm;
                                 background: addon-busy ? Theme.surface : (ob-ff-ta.has-hover ? Theme.surface-hover : transparent);
