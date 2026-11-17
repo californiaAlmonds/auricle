@@ -9,6 +9,7 @@ mod now_playing_ui;
 mod search_ui;
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use slint::{Model, ModelRc, SharedString, VecModel};
 
 
@@ -1280,8 +1281,11 @@ fn maybe_seed_home_hero(ui: &NativeShellWindow, force_next: bool) {
                             ui.set_hero_thumbnail(slint_img);
                             ui.set_hero_has_thumbnail(true);
                             let theme = ui.global::<Theme>();
-                            theme.set_hero_accent(accent_color);
+                            if !theme.get_has_hero_accent() {
+                                theme.set_hero_accent(theme.get_effective_accent());
+                            }
                             theme.set_has_hero_accent(true);
+                            animate_theme_targets(&ui, None, None, Some(accent_color), false);
                         }
                     }
                 }).ok();
@@ -2128,33 +2132,253 @@ fn theme_is_light(mode: &str) -> bool {
     }
 }
 
-fn apply_theme(ui: &NativeShellWindow, name: &str, mode: &str) {
+fn srgb_u8_to_linear(c: u8) -> f32 {
+    let v = c as f32 / 255.0;
+    if v <= 0.04045 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb_u8(x: f32) -> u8 {
+    let x = x.clamp(0.0, 1.0);
+    let v = if x <= 0.0031308 {
+        12.92 * x
+    } else {
+        1.055 * x.powf(1.0 / 2.4) - 0.055
+    };
+    (v.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+fn color_to_oklab(c: slint::Color) -> (f32, f32, f32) {
+    let r = srgb_u8_to_linear(c.red());
+    let g = srgb_u8_to_linear(c.green());
+    let b = srgb_u8_to_linear(c.blue());
+
+    let l_cone = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b;
+    let m_cone = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b;
+    let s_cone = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b;
+
+    let l_ = l_cone.max(0.0).cbrt();
+    let m_ = m_cone.max(0.0).cbrt();
+    let s_ = s_cone.max(0.0).cbrt();
+
+    let l = 0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_;
+    let a = 1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_;
+    let b_ok = 0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_;
+
+    (l, a, b_ok)
+}
+
+fn oklab_to_color(l: f32, a: f32, b: f32) -> slint::Color {
+    let l_ = l + 0.3963377774 * a + 0.2158037573 * b;
+    let m_ = l - 0.1055613458 * a - 0.0638541728 * b;
+    let s_ = l - 0.0894841775 * a - 1.2914855480 * b;
+
+    let l_cone = l_ * l_ * l_;
+    let m_cone = m_ * m_ * m_;
+    let s_cone = s_ * s_ * s_;
+
+    let r_lin =  4.0767416621 * l_cone - 3.3077115913 * m_cone + 0.2309699292 * s_cone;
+    let g_lin = -1.2684380046 * l_cone + 2.6097574011 * m_cone - 0.3413193965 * s_cone;
+    let b_lin = -0.0041960863 * l_cone - 0.7034186147 * m_cone + 1.7076147010 * s_cone;
+
+    let r = linear_to_srgb_u8(r_lin);
+    let g = linear_to_srgb_u8(g_lin);
+    let b_u8 = linear_to_srgb_u8(b_lin);
+
+    slint::Color::from_rgb_u8(r, g, b_u8)
+}
+
+pub(crate) fn oklab_lerp_color(from: slint::Color, to: slint::Color, t: f32) -> slint::Color {
+    let t = t.clamp(0.0, 1.0);
+    if t <= 0.0 {
+        return from;
+    }
+    if t >= 1.0 {
+        return to;
+    }
+    let (l1, a1, b1) = color_to_oklab(from);
+    let (l2, a2, b2) = color_to_oklab(to);
+    let l = l1 + (l2 - l1) * t;
+    let a = a1 + (a2 - a1) * t;
+    let b = b1 + (b2 - b1) * t;
+    oklab_to_color(l, a, b)
+}
+
+fn colors_close(a: slint::Color, b: slint::Color) -> bool {
+    (a.red() as i16 - b.red() as i16).abs() <= 1
+        && (a.green() as i16 - b.green() as i16).abs() <= 1
+        && (a.blue() as i16 - b.blue() as i16).abs() <= 1
+}
+
+struct AccentAnimState {
+    timer: slint::Timer,
+    start: Instant,
+    accent_from: slint::Color,
+    accent_to: slint::Color,
+    art_from: slint::Color,
+    art_to: slint::Color,
+    hero_from: slint::Color,
+    hero_to: slint::Color,
+    running: bool,
+}
+
+impl Default for AccentAnimState {
+    fn default() -> Self {
+        Self {
+            timer: slint::Timer::default(),
+            start: Instant::now(),
+            accent_from: slint::Color::default(),
+            accent_to: slint::Color::default(),
+            art_from: slint::Color::default(),
+            art_to: slint::Color::default(),
+            hero_from: slint::Color::default(),
+            hero_to: slint::Color::default(),
+            running: false,
+        }
+    }
+}
+
+thread_local! {
+    static ACCENT_ANIM: std::cell::RefCell<AccentAnimState> = std::cell::RefCell::new(AccentAnimState::default());
+}
+
+fn animate_theme_targets(
+    ui: &NativeShellWindow,
+    accent_to: Option<slint::Color>,
+    art_to: Option<slint::Color>,
+    hero_to: Option<slint::Color>,
+    immediate: bool,
+) {
+    let theme = ui.global::<Theme>();
+    let cur_accent = theme.get_accent();
+    let cur_art = theme.get_art_accent();
+    let cur_hero = theme.get_hero_accent();
+
+    ACCENT_ANIM.with(|anim_cell| {
+        let mut anim = anim_cell.borrow_mut();
+        let final_accent_to = accent_to.unwrap_or(if anim.running { anim.accent_to } else { cur_accent });
+        let final_art_to = art_to.unwrap_or(if anim.running { anim.art_to } else { cur_art });
+        let final_hero_to = hero_to.unwrap_or(if anim.running { anim.hero_to } else { cur_hero });
+
+        if immediate {
+            anim.timer.stop();
+            anim.running = false;
+            anim.accent_from = final_accent_to;
+            anim.accent_to = final_accent_to;
+            anim.art_from = final_art_to;
+            anim.art_to = final_art_to;
+            anim.hero_from = final_hero_to;
+            anim.hero_to = final_hero_to;
+            theme.set_accent(final_accent_to);
+            theme.set_art_accent(final_art_to);
+            theme.set_hero_accent(final_hero_to);
+            return;
+        }
+
+        if colors_close(cur_accent, final_accent_to)
+            && colors_close(cur_art, final_art_to)
+            && colors_close(cur_hero, final_hero_to)
+            && (!anim.running
+                || (colors_close(anim.accent_to, final_accent_to)
+                    && colors_close(anim.art_to, final_art_to)
+                    && colors_close(anim.hero_to, final_hero_to)))
+        {
+            if !anim.running {
+                return;
+            }
+        }
+
+        anim.accent_from = cur_accent;
+        anim.accent_to = final_accent_to;
+        anim.art_from = cur_art;
+        anim.art_to = final_art_to;
+        anim.hero_from = cur_hero;
+        anim.hero_to = final_hero_to;
+        anim.start = Instant::now();
+        anim.running = true;
+
+        let ui_weak = ui.as_weak();
+        anim.timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(16),
+            move || {
+                ACCENT_ANIM.with(|anim_cell| {
+                    let mut anim = anim_cell.borrow_mut();
+                    if !anim.running {
+                        anim.timer.stop();
+                        return;
+                    }
+                    let raw_t = (anim.start.elapsed().as_secs_f32() / 1.10).clamp(0.0, 1.0);
+                    let Some(ui) = ui_weak.upgrade() else {
+                        anim.running = false;
+                        anim.timer.stop();
+                        return;
+                    };
+                    let theme = ui.global::<Theme>();
+                    if raw_t >= 1.0 {
+                        theme.set_accent(anim.accent_to);
+                        theme.set_art_accent(anim.art_to);
+                        theme.set_hero_accent(anim.hero_to);
+                        anim.running = false;
+                        anim.timer.stop();
+                    } else {
+                        let eased = raw_t * raw_t * (3.0 - 2.0 * raw_t);
+                        theme.set_accent(oklab_lerp_color(anim.accent_from, anim.accent_to, eased));
+                        theme.set_art_accent(oklab_lerp_color(anim.art_from, anim.art_to, eased));
+                        theme.set_hero_accent(oklab_lerp_color(anim.hero_from, anim.hero_to, eased));
+                    }
+                });
+            },
+        );
+    });
+}
+
+fn apply_theme_with_mode(ui: &NativeShellWindow, name: &str, mode: &str, immediate: bool) {
     let norm = normalize_theme_name(name);
     let is_dyn = norm == "Dynamic";
     let theme = ui.global::<Theme>();
     theme.set_is_dynamic(is_dyn);
-    if is_dyn && theme.get_has_art_accent() {
-        theme.set_accent(theme.get_art_accent());
-    } else {
-        theme.set_accent(theme_accent(norm));
-    }
     theme.set_is_light(theme_is_light(mode));
+
+    let art_target = ACCENT_ANIM.with(|anim_cell| {
+        let anim = anim_cell.borrow();
+        if anim.running {
+            anim.art_to
+        } else {
+            theme.get_art_accent()
+        }
+    });
+    let target_accent = if is_dyn && theme.get_has_art_accent() {
+        art_target
+    } else {
+        theme_accent(norm)
+    };
+    animate_theme_targets(ui, Some(target_accent), None, None, immediate);
+}
+
+fn apply_theme(ui: &NativeShellWindow, name: &str, mode: &str) {
+    apply_theme_with_mode(ui, name, mode, false);
 }
 
 fn apply_art_accent(ui: &NativeShellWindow, art_color: Option<slint::Color>) {
     let theme = ui.global::<Theme>();
     match art_color {
         Some(c) => {
-            theme.set_art_accent(c);
             theme.set_has_art_accent(true);
-            if theme.get_is_dynamic() {
-                theme.set_accent(c);
-            }
+            let accent_target = if theme.get_is_dynamic() {
+                Some(c)
+            } else {
+                None
+            };
+            animate_theme_targets(ui, accent_target, Some(c), None, false);
         }
         None => {
             theme.set_has_art_accent(false);
             if theme.get_is_dynamic() {
-                theme.set_accent(theme_accent("Dynamic"));
+                animate_theme_targets(ui, Some(theme_accent("Dynamic")), None, None, false);
             }
         }
     }
@@ -2336,7 +2560,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         let mode = normalize_theme_mode(&settings.theme_mode);
         ui.set_theme_name(SharedString::from(name));
         ui.set_theme_mode(SharedString::from(mode));
-        apply_theme(&ui, name, mode);
+        apply_theme_with_mode(&ui, name, mode, true);
     }
 
     // Open at a comfortable desktop size instead of the content's (short) preferred
@@ -3313,6 +3537,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     ui.set_current_view(SharedString::from("Home"));
                 }
             } else {
+                ui.set_is_loading(false);
                 ui.set_queue_pane_open(false);
                 context_ui::invalidate(&ui);
                 push_nav_entry(&nav_history, &nav_cursor, "NowPlaying".to_string(), String::new());
@@ -6245,5 +6470,23 @@ mod tests {
         // The winning hue bin is orange; hue binning prevents muddy brown averaging
         assert!(accent.red() > accent.blue() + 50);
         assert!(accent.red() > 180);
+    }
+
+    #[test]
+    fn test_oklab_lerp_endpoints_and_chroma() {
+        let solar_red = slint::Color::from_rgb_u8(0xfa, 0x2d, 0x48); // #fa2d48
+        let ocean_teal = slint::Color::from_rgb_u8(0x14, 0xb8, 0xc4); // #14b8c4
+
+        // Test t = 0.0 and t = 1.0 round-trip within <= 1 channel unit
+        let at_0 = oklab_lerp_color(solar_red, ocean_teal, 0.0);
+        let at_1 = oklab_lerp_color(solar_red, ocean_teal, 1.0);
+        assert!(colors_close(at_0, solar_red));
+        assert!(colors_close(at_1, ocean_teal));
+
+        // Test midpoint (t = 0.5) preserves perceptual chroma/saturation rather than collapsing to muddy mid-gray
+        let mid = oklab_lerp_color(solar_red, ocean_teal, 0.5);
+        let max_c = mid.red().max(mid.green()).max(mid.blue());
+        let min_c = mid.red().min(mid.green()).min(mid.blue());
+        assert!(max_c - min_c > 30, "Midpoint must preserve chroma/saturation (spread: {}), not collapse to gray", max_c - min_c);
     }
 }
