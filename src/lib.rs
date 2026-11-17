@@ -904,6 +904,18 @@ fn fetch_autoplay_queue(
     let songs = fetch_radio_songs(&video_id);
     if songs.is_empty() {
         eprintln!("[autoplay] watch playlist returned 0 songs");
+        if resume {
+            let pb = crate::core::bridge::playback_core();
+            if pb.is_awaiting_autoplay_after_end() {
+                pb.stop_at_queue_end();
+                let ui_w = ui_weak.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_w.upgrade() {
+                        refresh_native_shell_ui(&ui, crate::core::bridge::playback_core());
+                    }
+                }).ok();
+            }
+        }
         return;
     }
     // Store in shared state
@@ -4664,7 +4676,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
 
                 // Auto-advance when track ends
                 if playback.take_advance_pending() {
-                    playback.next_track();
+                    playback.advance_after_track_end();
                     let ui_w = ui_weak.clone();
                     slint::invoke_from_event_loop(move || {
                         if let Some(ui) = ui_w.upgrade() {
@@ -4713,10 +4725,26 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                 });
                             } else {
                                 eprintln!("[autoplay] queue exhausted but no seed available — stopping");
+                                if playback.is_awaiting_autoplay_after_end() {
+                                    playback.stop_at_queue_end();
+                                    let ui_w = ui_weak.clone();
+                                    slint::invoke_from_event_loop(move || {
+                                        if let Some(ui) = ui_w.upgrade() {
+                                            refresh_native_shell_ui(&ui, playback);
+                                        }
+                                    }).ok();
+                                }
                             }
                         }
+                    } else if playback.is_awaiting_autoplay_after_end() {
+                        playback.stop_at_queue_end();
+                        let ui_w = ui_weak.clone();
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui_w.upgrade() {
+                                refresh_native_shell_ui(&ui, playback);
+                            }
+                        }).ok();
                     }
-                    // If autoplay disabled, do nothing — playback stops
                 }
 
                 if autoplay_enabled.load(std::sync::atomic::Ordering::Relaxed)
