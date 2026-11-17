@@ -75,8 +75,9 @@ export global Theme {
     in property <color> art-accent: #5b8def;
     in property <bool> has-art-accent: false;
     in property <bool> is-dynamic: false;
-    in property <int> eq-phase: 0;
-    in property <bool> is-playing: false;
+    in property <color> hero-accent: #5b8def;
+    in property <bool> has-hero-accent: false;
+    out property <color> hero-tint: has-hero-accent ? hero-accent : effective-accent;
 
     out property <color> effective-accent: (is-dynamic && has-art-accent) ? art-accent : accent;
     out property <color> ambient-tint: has-art-accent ? art-accent : effective-accent;
@@ -135,18 +136,6 @@ export global Theme {
 }
 
 // ─── Shared components ────────────────────────────────────────────────────────
-
-component EqualizerBars inherits Rectangle {
-    in property <bool> playing: false;
-    in property <color> bar-color: Theme.effective-accent;
-    width: 16px; height: 16px; background: transparent;
-    // Driven by the 500ms playback poll (`Theme.eq-phase`) with no internal Timer or
-    // continuous `animate` interpolation, avoiding continuous 60-144 FPS full-window
-    // GPU redraws while a song plays.
-    Rectangle { width: 3px; border-radius: 1.5px; background: root.bar-color; x: 1px; height: root.playing ? (Theme.eq-phase == 0 ? 7px : Theme.eq-phase == 1 ? 13px : Theme.eq-phase == 2 ? 15px : 5px) : 5px; y: parent.height - self.height; }
-    Rectangle { width: 3px; border-radius: 1.5px; background: root.bar-color; x: 6.5px; height: root.playing ? (Theme.eq-phase == 0 ? 15px : Theme.eq-phase == 1 ? 6px : Theme.eq-phase == 2 ? 11px : 9px) : 10px; y: parent.height - self.height; }
-    Rectangle { width: 3px; border-radius: 1.5px; background: root.bar-color; x: 12px; height: root.playing ? (Theme.eq-phase == 0 ? 6px : Theme.eq-phase == 1 ? 14px : Theme.eq-phase == 2 ? 5px : 12px) : 6px; y: parent.height - self.height; }
-}
 
 component IconBtn inherits Rectangle {
     in property <string> icon;
@@ -368,7 +357,7 @@ component SongRow inherits Rectangle {
     in property <bool> show-album-column: false;
     // On an album page the artist is the same on every row — redundant.
     in property <bool> hide-artist: false;
-    in property <bool> is-playing: Theme.is-playing;
+    in property <bool> is-playing: false;
     callback play-clicked(); callback queue-clicked();
     // Right-click reports the cursor position; the window-root menu supplies the actions.
     callback context-requested(length, length);
@@ -390,9 +379,9 @@ component SongRow inherits Rectangle {
                 width: parent.width; height: parent.height;
                 horizontal-alignment: right; vertical-alignment: center;
             }
-            if root.is-current && !ta.has-hover: EqualizerBars {
-                playing: root.is-playing;
-                bar-color: Theme.effective-accent;
+            if root.is-current && !ta.has-hover: Image {
+                source: root.is-playing ? @image-url("icons/pause.svg") : @image-url("icons/play.svg");
+                width: 13px; height: 13px; colorize: Theme.effective-accent;
                 x: parent.width - self.width;
                 y: (parent.height - self.height) / 2;
             }
@@ -433,9 +422,9 @@ component SongRow inherits Rectangle {
             if is-current && has-thumbnail && !root.show-index: Rectangle {
                 width: parent.width; height: parent.height;
                 background: Theme.art-scrim;
-                EqualizerBars {
-                    playing: root.is-playing;
-                    bar-color: Theme.on-art;
+                Image {
+                    source: root.is-playing ? @image-url("icons/pause.svg") : @image-url("icons/play.svg");
+                    width: 13px; height: 13px; colorize: Theme.on-art;
                     x: (parent.width - self.width) / 2;
                     y: (parent.height - self.height) / 2;
                 }
@@ -594,7 +583,7 @@ component SongCard inherits Rectangle {
     private property <bool> card-hovered: ta.has-hover || play-ta.has-hover;
     width: 200px; height: 260px; border-radius: Theme.radius;
     background: root.card-hovered ? Theme.glass-hover : Theme.glass;
-    border-color: root.card-hovered ? Theme.border : Theme.border-soft; border-width: 1px;
+    border-color: is-now-playing ? Theme.effective-accent.with-alpha(0.6) : (root.card-hovered ? Theme.border : Theme.border-soft); border-width: 1px;
     animate background, border-color { duration: 150ms; }
 
     VerticalLayout {
@@ -622,14 +611,13 @@ component SongCard inherits Rectangle {
                 }
             }
             if is-now-playing: Rectangle {
-                x: parent.width - 30px; y: 8px; width: 22px; height: 22px; border-radius: 11px;
-                background: #000000.with-alpha(0.68);
-                EqualizerBars { playing: root.is-playing; bar-color: Theme.effective-accent; x: 3px; y: 3px; }
+                width: parent.width; height: parent.height;
+                background: @linear-gradient(180deg, #000000.with-alpha(0.14) 0%, Theme.effective-accent.with-alpha(0.42) 100%);
             }
         }
         VerticalLayout {
             spacing: 4px; padding-left: 2px;
-            Text { text: card-title; font-size: 14px; font-weight: 700; color: Theme.text; overflow: elide; }
+            Text { text: card-title; font-size: 14px; font-weight: 700; color: is-now-playing ? Theme.effective-accent : Theme.text; overflow: elide; }
             Text { text: card-artist; font-size: 12px; font-weight: 500; color: Theme.text-muted; overflow: elide; }
         }
     }
@@ -653,16 +641,25 @@ component SongCard inherits Rectangle {
     // shadow: both force a FemtoVG offscreen layer, which at one per visible
     // card was what stalled fast scrolling.
     Rectangle {
-        x: 12px + (176px - 46px) / 2;
-        y: 12px + (176px - 46px) / 2;
-        width: 46px; height: 46px; border-radius: 23px;
-        background: root.card-hovered
-            ? (play-ta.has-hover ? #000000.with-alpha(0.72) : #000000.with-alpha(0.5))
-            : transparent;
-        border-color: root.card-hovered ? #ffffff.with-alpha(0.56) : transparent;
+        x: 12px + (176px - 48px) / 2;
+        y: 12px + (176px - 48px) / 2;
+        width: 48px; height: 48px; border-radius: 24px;
+        background: root.is-now-playing && root.is-playing
+            ? (play-ta.has-hover ? Theme.accent-strong : Theme.effective-accent)
+            : (root.is-now-playing && !root.is-playing
+                ? (play-ta.has-hover ? #000000.with-alpha(0.80) : #000000.with-alpha(0.64))
+                : (root.card-hovered
+                    ? (play-ta.has-hover ? #000000.with-alpha(0.72) : #000000.with-alpha(0.5))
+                    : transparent));
+        border-color: root.is-now-playing && root.is-playing
+            ? #ffffff.with-alpha(0.35)
+            : (root.is-now-playing && !root.is-playing
+                ? Theme.effective-accent
+                : (root.card-hovered ? #ffffff.with-alpha(0.56) : transparent));
         border-width: 1px;
-        if root.card-hovered && !(is-now-playing && is-playing): Image { source: @image-url("icons/play.svg"); width: 20px; height: 20px; colorize: Theme.on-art; x: 14px; y: 13px; }
-        if root.card-hovered && is-now-playing && is-playing: Image { source: @image-url("icons/pause.svg"); width: 20px; height: 20px; colorize: Theme.on-art; x: 13px; y: 13px; }
+        if root.is-now-playing && root.is-playing: Image { source: @image-url("icons/pause.svg"); width: 20px; height: 20px; colorize: Theme.on-accent; x: 14px; y: 14px; }
+        if root.is-now-playing && !root.is-playing: Image { source: @image-url("icons/play.svg"); width: 20px; height: 20px; colorize: Theme.effective-accent; x: 15px; y: 14px; }
+        if !root.is-now-playing && root.card-hovered: Image { source: @image-url("icons/play.svg"); width: 20px; height: 20px; colorize: Theme.on-art; x: 15px; y: 14px; }
         play-ta := TouchArea {
             pointer-event(event) => {
                 if event.button == PointerEventButton.right && event.kind == PointerEventKind.up {
@@ -697,6 +694,42 @@ export component NativeShellWindow inherits Window {
     in-out property <bool> has-album-art: false;
     in-out property <bool> is-liked: false;
     in-out property <string> now-playing-video-id: "";
+
+    // Sticky taste-driven Home Hero
+    in-out property <string> hero-video-id: "";
+    in-out property <string> hero-title: "Find your next favorite";
+    in-out property <string> hero-artist: "Personalized picks from your taste";
+    in-out property <int> hero-duration-secs: 0;
+    in-out property <string> hero-eyebrow: "FEATURED FOR YOU";
+    in-out property <image> hero-thumbnail;
+    in-out property <bool> hero-has-thumbnail: false;
+    callback refresh-hero-pick();
+
+    // Transport Shuffle / Repeat & NowPlaying view
+    in-out property <bool> can-shuffle-queue: false;
+    in-out property <string> repeat-mode: "off"; // "off" | "all" | "one"
+    callback shuffle-queue();
+    callback cycle-repeat();
+    callback open-now-playing();
+
+    // Shared-window NowPlaying view (Up Next / Lyrics / Related)
+    in-out property <string> np-tab: "UpNext";
+    in-out property <image> np-highres-art;
+    in-out property <bool> np-has-highres-art: false;
+    in-out property <bool> np-lyrics-busy: false;
+    in-out property <bool> np-lyrics-available: false;
+    in-out property <string> np-lyrics-text: "";
+    in-out property <string> np-lyrics-source: "";
+    in-out property <bool> np-related-busy: false;
+    in-out property <[ArtistCredit]> np-credits-artists: [];
+    in-out property <string> np-album-title: "";
+    in-out property <string> np-album-id: "";
+    in-out property <string> np-album-year: "";
+    in-out property <string> np-duration-text: "";
+    in-out property <[SongItem]> np-album-songs: [];
+    in-out property <[SongItem]> np-related-songs: [];
+    in-out property <[ArtistItem]> np-related-artists: [];
+    callback np-tab-changed(string);
 
     // Navigation
     in-out property <string> current-view: "Home";
@@ -1192,11 +1225,17 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                 spacing: 10px; alignment: sidebar-open ? start : center;
                                 Rectangle {
                                     width: 34px; height: 34px; border-radius: 10px;
-                                    background: @linear-gradient(135deg, Theme.effective-accent 0%, Theme.effective-accent.darker(0.32) 100%);
+                                    background: logo-ta.has-hover ? @linear-gradient(135deg, Theme.accent-strong 0%, Theme.effective-accent 100%) : @linear-gradient(135deg, Theme.effective-accent 0%, Theme.effective-accent.darker(0.32) 100%);
                                     y: (parent.height - self.height) / 2;
-                                    Image { source: @image-url("icons/auricle-logo.svg"); width: 20px; height: 20px; colorize: Theme.on-accent; x: 7px; y: 7px; }
+                                    Image { source: logo-ta.has-hover ? @image-url("icons/sidebar.svg") : @image-url("icons/auricle-logo.svg"); width: 20px; height: 20px; colorize: Theme.on-accent; x: 7px; y: 7px; }
+                                    logo-ta := TouchArea { clicked => { toggle-sidebar(); } }
+                                    RailTooltip { enabled: !sidebar-open && logo-ta.has-hover; label: "Expand sidebar"; }
                                 }
-                                if sidebar-open: Text { text: "Auricle"; color: Theme.text; font-size: 18px; font-weight: 800; vertical-alignment: center; }
+                                if sidebar-open: HorizontalLayout {
+                                    horizontal-stretch: 1; alignment: space-between;
+                                    Text { text: "Auricle"; color: Theme.text; font-size: 18px; font-weight: 800; vertical-alignment: center; }
+                                    IconBtn { svg-icon: @image-url("icons/chevron-left.svg"); use-svg: true; icon-color: Theme.text-dim; clicked => { toggle-sidebar(); } }
+                                }
                             }
                         }
 
@@ -1389,12 +1428,7 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                             // sits on the bar's optical centre line instead of being
                             // stretched/top-aligned by the row.
                             HorizontalLayout {
-                                width: 124px; spacing: 4px;
-                                VerticalLayout {
-                                    alignment: center;
-                                    IconBtn { svg-icon: @image-url("icons/menu.svg"); use-svg: true; icon-color: Theme.text-muted; clicked => { toggle-sidebar(); } }
-                                }
-
+                                width: 44px; spacing: 4px;
                                 // Back / Forward
                                 VerticalLayout {
                                     alignment: center;
@@ -1404,16 +1438,6 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                         animate background { duration: 140ms; }
                                         Image { source: @image-url("icons/chevron-left.svg"); width: 18px; height: 18px; colorize: can-go-back ? Theme.text : Theme.text-dim; x: 9px; y: 9px; }
                                         nav-back-ta := TouchArea { enabled: can-go-back; clicked => { nav-back(); } }
-                                    }
-                                }
-                                VerticalLayout {
-                                    alignment: center;
-                                    Rectangle {
-                                        width: 36px; height: 36px; border-radius: 18px;
-                                        background: can-go-forward && nav-fwd-ta.has-hover ? Theme.hover-veil : transparent;
-                                        animate background { duration: 140ms; }
-                                        Image { source: @image-url("icons/chevron-right.svg"); width: 18px; height: 18px; colorize: can-go-forward ? Theme.text : Theme.text-dim; x: 9px; y: 9px; }
-                                        nav-fwd-ta := TouchArea { enabled: can-go-forward; clicked => { nav-forward(); } }
                                     }
                                 }
                             }
@@ -1498,7 +1522,7 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                             }
 
                             Rectangle { horizontal-stretch: 1; }
-                            Rectangle { width: 124px; }
+                            Rectangle { width: 44px; }
                         }
 
                     }
@@ -1526,10 +1550,8 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
 
                                 // ── Featured listening hero ──────────────────────────────────
                                 Rectangle {
-                                    // Grows instead of clipping: on a narrow window the title wraps
-                                    // to two lines and pushed the Listen Now button out of a fixed box.
                                     min-height: 190px; border-radius: Theme.radius-lg;
-                                    background: @linear-gradient(120deg, Theme.accent-soft 0%, Theme.glass-hover 38%, Theme.glass 100%);
+                                    background: @linear-gradient(125deg, Theme.hero-tint.with-alpha(Theme.is-light ? 0.22 : 0.30) 0%, Theme.glass-hover 48%, Theme.glass 100%);
                                     border-color: Theme.border; border-width: 1px;
                                     drop-shadow-blur: 28px; drop-shadow-color: #00000045; drop-shadow-offset-y: 10px;
 
@@ -1537,64 +1559,72 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                         padding-left: 42px; padding-right: 42px; padding-top: 24px; padding-bottom: 24px;
                                         spacing: 34px;
 
-                                        // Featured artwork (current track) with a centered hover play control.
                                         Rectangle {
                                             width: 142px; height: 142px; border-radius: Theme.radius; clip: true;
                                             background: Theme.art-placeholder;
                                             drop-shadow-blur: 26px; drop-shadow-color: #00000070; drop-shadow-offset-y: 8px;
-                                            if has-album-art: Image { source: album-art; width: parent.width; height: parent.height; image-fit: cover; }
-                                            if !has-album-art: Rectangle {
+                                            if hero-has-thumbnail: Image { source: hero-thumbnail; width: parent.width; height: parent.height; image-fit: cover; }
+                                            if !hero-has-thumbnail: Rectangle {
                                                 width: parent.width; height: parent.height;
-                                                background: @linear-gradient(135deg, Theme.accent 0%, Theme.accent.darker(0.4) 100%);
-                                                Text { text: track-initial; color: Theme.on-accent; font-size: 44px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
+                                                background: @linear-gradient(135deg, Theme.hero-tint 0%, Theme.hero-tint.darker(0.4) 100%);
+                                                Image { source: @image-url("icons/music-note.svg"); width: 44px; height: 44px; colorize: Theme.on-accent; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
                                             }
                                             if hero-art-ta.has-hover: Rectangle {
                                                 x: (parent.width - 42px) / 2; y: (parent.height - 42px) / 2;
                                                 width: 42px; height: 42px; border-radius: 21px;
                                                 background: #000000.with-alpha(0.6); border-color: #ffffff.with-alpha(0.44); border-width: 1px;
-                                                Image { source: is-playing ? @image-url("icons/pause.svg") : @image-url("icons/play.svg"); width: 18px; height: 18px; colorize: Theme.on-art; x: is-playing ? 12px : 13px; y: 12px; }
+                                                Image { source: (hero-video-id != "" && now-playing-video-id == hero-video-id && is-playing) ? @image-url("icons/pause.svg") : @image-url("icons/play.svg"); width: 18px; height: 18px; colorize: Theme.on-art; x: (hero-video-id != "" && now-playing-video-id == hero-video-id && is-playing) ? 12px : 13px; y: 12px; }
                                             }
-                                            hero-art-ta := TouchArea { clicked => { if (now-playing-video-id != "") { toggle-play-pause(); } else { navigate("Explore"); } } }
+                                            hero-art-ta := TouchArea { clicked => { if (hero-video-id != "") { if (now-playing-video-id == hero-video-id) { toggle-play-pause(); } else { play-song(hero-video-id, hero-title, hero-artist, hero-duration-secs); } } else { navigate("Explore"); } } }
                                         }
 
                                         VerticalLayout {
                                             alignment: center; spacing: 8px; horizontal-stretch: 1;
-                                            Text {
-                                                text: now-playing-video-id != "" ? "FEATURED NOW" : "DISCOVER SOMETHING NEW";
-                                                font-size: 11px; font-weight: 700; color: Theme.accent;
+                                            HorizontalLayout {
+                                                alignment: space-between;
+                                                Text { text: hero-eyebrow; font-size: 11px; font-weight: 700; letter-spacing: 0.8px; color: Theme.effective-accent; vertical-alignment: center; }
+                                                if hero-video-id != "": IconBtn { svg-icon: @image-url("icons/sparkles.svg"); use-svg: true; icon-color: Theme.text-muted; clicked => { refresh-hero-pick(); } }
                                             }
                                             Text {
-                                                text: now-playing-video-id != "" ? track-title : "Find your next favorite";
+                                                text: hero-title;
                                                 font-size: 26px; font-weight: 800; color: Theme.text;
                                                 wrap: word-wrap; overflow: elide;
                                             }
                                             Text {
-                                                text: now-playing-video-id != "" ? track-artist
-                                                    : (queue.length > 0 ? "\{queue.length} songs waiting in your queue" : "Search artists, albums, and songs");
+                                                text: hero-artist;
                                                 font-size: 14px; color: Theme.text-muted; overflow: elide;
                                             }
                                             Rectangle { height: 5px; }
-                                            // NOTE: a fixed-`width` child inside a VerticalLayout also caps
-                                            // that layout's max-width, which previously collapsed this whole
-                                            // text column to the button's width (~110px) and made the title
-                                            // elide to "KHA...". Wrapping the button in a HorizontalLayout
-                                            // keeps its size local.
                                             HorizontalLayout {
-                                                alignment: start;
+                                                alignment: start; spacing: 10px;
                                                 Rectangle {
                                                     width: hero-listen-text.preferred-width + 56px; height: 36px; border-radius: 18px;
                                                     background: hero-listen-ta.has-hover ? Theme.accent-strong : Theme.effective-accent;
                                                     border-color: Theme.accent-strong; border-width: 1px;
                                                     HorizontalLayout {
                                                         alignment: center; spacing: 8px;
-                                                        Image { source: (is-playing && now-playing-video-id != "") ? @image-url("icons/pause.svg") : @image-url("icons/play.svg"); width: 14px; height: 14px; colorize: Theme.on-accent; y: (parent.height - self.height) / 2; }
+                                                        Image { source: (hero-video-id != "" && now-playing-video-id == hero-video-id && is-playing) ? @image-url("icons/pause.svg") : @image-url("icons/play.svg"); width: 14px; height: 14px; colorize: Theme.on-accent; y: (parent.height - self.height) / 2; }
                                                         hero-listen-text := Text {
-                                                            text: now-playing-video-id != "" ? (is-playing ? "Pause" : "Listen Now") : "Explore Music";
+                                                            text: (hero-video-id != "" && now-playing-video-id == hero-video-id) ? (is-playing ? "Pause" : "Resume") : (hero-video-id != "" ? "Listen Now" : "Explore Music");
                                                             color: Theme.on-accent; font-size: 13px; font-weight: 700;
                                                             vertical-alignment: center;
                                                         }
                                                     }
-                                                    hero-listen-ta := TouchArea { clicked => { if (now-playing-video-id != "") { toggle-play-pause(); } else { navigate("Explore"); } } }
+                                                    hero-listen-ta := TouchArea { clicked => { if (hero-video-id != "" && now-playing-video-id == hero-video-id) { toggle-play-pause(); } else if (hero-video-id != "") { play-song(hero-video-id, hero-title, hero-artist, hero-duration-secs); } else { navigate("Explore"); } } }
+                                                }
+                                                if hero-video-id != "" && now-playing-video-id != hero-video-id: Rectangle {
+                                                    width: hero-q-text.preferred-width + 42px; height: 36px; border-radius: 18px;
+                                                    background: hero-q-ta.has-hover ? Theme.surface-hover : Theme.surface;
+                                                    border-color: Theme.border; border-width: 1px;
+                                                    HorizontalLayout {
+                                                        alignment: center; spacing: 6px;
+                                                        Image { source: @image-url("icons/plus.svg"); width: 14px; height: 14px; colorize: Theme.text; y: (parent.height - self.height) / 2; }
+                                                        hero-q-text := Text {
+                                                            text: "Queue"; color: Theme.text; font-size: 13px; font-weight: 600;
+                                                            vertical-alignment: center;
+                                                        }
+                                                    }
+                                                    hero-q-ta := TouchArea { clicked => { queue-song(hero-video-id, hero-title, hero-artist); } }
                                                 }
                                             }
                                         }
@@ -2134,6 +2164,7 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                         idx-str: "\{i + 1}"; avatar-letter: item.avatar-letter;
                                         thumbnail: item.thumbnail; has-thumbnail: item.has-thumbnail;
                                         is-current: item.video-id == now-playing-video-id;
+                                        is-playing: root.is-playing && item.video-id == now-playing-video-id;
                                         play-clicked => { play-song(item.video-id, item.title, item.artist, item.duration-secs); }
                                         queue-clicked => { queue-song(item.video-id, item.title, item.artist); }
                                         context-requested(px, py) => { open-ctx(item.video-id, item.title, item.artist, item.album, item.duration-secs, px, py); }
@@ -2572,6 +2603,7 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                         idx-str: "\{i + 1}"; avatar-letter: item.avatar-letter;
                                         thumbnail: item.thumbnail; has-thumbnail: item.has-thumbnail;
                                         is-current: item.video-id == now-playing-video-id;
+                                        is-playing: root.is-playing && item.video-id == now-playing-video-id;
                                         play-clicked => { play-song(item.video-id, item.title, item.artist, item.duration-secs); }
                                         queue-clicked => { queue-song(item.video-id, item.title, item.artist); }
                                         context-requested(px, py) => { open-ctx(item.video-id, item.title, item.artist, item.album, item.duration-secs, px, py); }
@@ -2580,7 +2612,7 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                         Rectangle { horizontal-stretch: 1; }
                                     }
                                 }
-                                if artist-view-albums.length > 0 || artist-row-sorting: VerticalLayout {
+                                if artist-view-albums.length > 0: VerticalLayout {
                                     height: self.preferred-height; alignment: start;
                                     padding-left: 32px; padding-right: 32px; padding-top: Theme.section-gap; spacing: Theme.heading-gap;
                                     HorizontalLayout {
@@ -2593,12 +2625,7 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                             view-discography := TouchArea { clicked => { open-discography(); } }
                                         }
                                     }
-                                    if artist-row-sorting: Rectangle {
-                                        height: 230px; border-radius: Theme.radius;
-                                        background: Theme.hover-veil;
-                                        Text { text: "Sorting releases by popularity…"; color: Theme.text-muted; font-size: 14px; horizontal-alignment: center; vertical-alignment: center; width: parent.width; height: parent.height; }
-                                    }
-                                    if !artist-row-sorting: Rectangle {
+                                    Rectangle {
                                         height: 230px; clip: true;
                                         disco-fl := SmoothFlickable {
                                             width: parent.width; height: parent.height;
@@ -2871,6 +2898,7 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                         idx-str: "\{i + 1}"; avatar-letter: item.avatar-letter;
                                         thumbnail: item.thumbnail; has-thumbnail: item.has-thumbnail;
                                         is-current: item.video-id == now-playing-video-id;
+                                        is-playing: root.is-playing && item.video-id == now-playing-video-id;
                                         play-clicked => { play-song(item.video-id, item.title, item.artist, item.duration-secs); }
                                         queue-clicked => { queue-song(item.video-id, item.title, item.artist); }
                                         context-requested(px, py) => { open-ctx(item.video-id, item.title, item.artist, item.album, item.duration-secs, px, py); }
@@ -3037,6 +3065,7 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                         idx-str: "\{i + 1}"; avatar-letter: item.avatar-letter;
                                         thumbnail: item.thumbnail; has-thumbnail: item.has-thumbnail;
                                         is-current: item.video-id == now-playing-video-id;
+                                        is-playing: root.is-playing && item.video-id == now-playing-video-id;
                                         play-clicked => { play-song(item.video-id, item.title, item.artist, item.duration-secs); }
                                         queue-clicked => { queue-song(item.video-id, item.title, item.artist); }
                                         context-requested(px, py) => { open-ctx(item.video-id, item.title, item.artist, item.album, item.duration-secs, px, py); }
@@ -3151,6 +3180,7 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                         idx-str: "\{i + 1}"; avatar-letter: item.avatar-letter;
                                         thumbnail: item.thumbnail; has-thumbnail: item.has-thumbnail;
                                         is-current: item.video-id == now-playing-video-id;
+                                        is-playing: root.is-playing && item.video-id == now-playing-video-id;
                                         play-clicked => { play-song(item.video-id, item.title, item.artist, item.duration-secs); }
                                         queue-clicked => { queue-song(item.video-id, item.title, item.artist); }
                                         context-requested(px, py) => { open-ctx-playlist(item.video-id, item.title, item.artist, item.album, item.duration-secs, playlist-view-is-local ? playlist-view-id : "", px, py); }
@@ -3404,6 +3434,7 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                         idx-str: "\{i + 1}"; avatar-letter: item.avatar-letter;
                                         thumbnail: item.thumbnail; has-thumbnail: item.has-thumbnail;
                                         is-current: item.video-id == now-playing-video-id;
+                                        is-playing: root.is-playing && item.video-id == now-playing-video-id;
                                         play-clicked => { play-song(item.video-id, item.title, item.artist, item.duration-secs); }
                                         queue-clicked => { queue-song(item.video-id, item.title, item.artist); }
                                         context-requested(px, py) => { open-ctx-liked(item.video-id, item.title, item.artist, item.album, item.duration-secs, px, py); }
@@ -4239,10 +4270,7 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                             }
                                             VerticalLayout {
                                                 alignment: center;
-                                                EqualizerBars {
-                                                    playing: root.is-playing;
-                                                    bar-color: Theme.effective-accent;
-                                                }
+                                                Image { source: root.is-playing ? @image-url("icons/pause.svg") : @image-url("icons/play.svg"); width: 16px; height: 16px; colorize: Theme.effective-accent; }
                                             }
                                         }
                                         np-ta := TouchArea {
@@ -4452,23 +4480,20 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                     HorizontalLayout {
                         width: compact ? 176px : 272px; spacing: 12px; alignment: start;
 
-                        if has-album-art: VerticalLayout {
+                        VerticalLayout {
                             alignment: center;
                             Rectangle {
                                 width: 60px; height: 60px; border-radius: 12px; clip: true;
-                                Image { source: album-art; width: parent.width; height: parent.height; image-fit: cover; }
-                            }
-                        }
-                        if !has-album-art: VerticalLayout {
-                            alignment: center;
-                            Rectangle {
-                                width: 60px; height: 60px; border-radius: 12px;
                                 background: Theme.surface-hover;
-                                Text {
-                                    text: track-initial; color: is-playing ? Theme.accent : Theme.text-dim;
+                                if has-album-art: Image { source: album-art; width: parent.width; height: parent.height; image-fit: cover; }
+                                if !has-album-art: Text {
+                                    text: track-initial; color: is-playing ? Theme.effective-accent : Theme.text-dim;
                                     font-size: 20px; font-weight: 700;
                                     horizontal-alignment: center; vertical-alignment: center;
+                                    width: parent.width; height: parent.height;
                                 }
+                                if pb-art-ta.has-hover: Rectangle { width: parent.width; height: parent.height; border-radius: 12px; background: #000000.with-alpha(0.45); Image { source: current-view == "NowPlaying" ? @image-url("icons/chevron-down.svg") : @image-url("icons/lyrics.svg"); width: 20px; height: 20px; colorize: #ffffff; x: 20px; y: 20px; } }
+                                pb-art-ta := TouchArea { clicked => { open-now-playing(); } }
                             }
                         }
 
@@ -4530,8 +4555,8 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                     width: 32px; height: 32px; border-radius: 16px;
                                     background: shuf-ta.has-hover ? Theme.hover-veil : transparent;
                                     animate background { duration: 140ms; }
-                                    Image { source: @image-url("icons/shuffle.svg"); width: 16px; height: 16px; colorize: shuf-ta.has-hover ? Theme.text : Theme.text-dim; x: 8px; y: 8px; }
-                                    shuf-ta := TouchArea { }
+                                    Image { source: @image-url("icons/shuffle.svg"); width: 16px; height: 16px; colorize: can-shuffle-queue ? (shuf-ta.has-hover ? Theme.text : Theme.text-muted) : Theme.text-dim.with-alpha(0.45); x: 8px; y: 8px; }
+                                    shuf-ta := TouchArea { enabled: can-shuffle-queue; clicked => { if (root.can-shuffle-queue) { shuffle-queue(); } } }
                                 }
                             }
                             VerticalLayout {
@@ -4587,10 +4612,11 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                 alignment: center;
                                 Rectangle {
                                     width: 32px; height: 32px; border-radius: 16px;
-                                    background: rep-ta.has-hover ? Theme.hover-veil : transparent;
+                                    background: rep-ta.has-hover ? Theme.hover-veil : (repeat-mode != "off" ? Theme.accent-soft : transparent);
                                     animate background { duration: 140ms; }
-                                    Image { source: @image-url("icons/repeat.svg"); width: 16px; height: 16px; colorize: rep-ta.has-hover ? Theme.text : Theme.text-dim; x: 8px; y: 8px; }
-                                    rep-ta := TouchArea { }
+                                    Image { source: repeat-mode == "one" ? @image-url("icons/repeat-one.svg") : @image-url("icons/repeat.svg"); width: 16px; height: 16px; colorize: repeat-mode != "off" ? Theme.effective-accent : (rep-ta.has-hover ? Theme.text : Theme.text-dim); x: 8px; y: 8px; }
+                                    if repeat-mode != "off": Rectangle { width: 4px; height: 4px; border-radius: 2px; background: Theme.effective-accent; y: parent.height - 5px; x: (parent.width - 4px) / 2; }
+                                    rep-ta := TouchArea { clicked => { cycle-repeat(); } }
                                 }
                             }
                         }
@@ -5184,3 +5210,4 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
         }
     }
 }
+
