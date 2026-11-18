@@ -2951,6 +2951,10 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         ui.on_toggle_queue_pane(move || {
             if let Some(ui) = ui_weak.upgrade() {
+                if ui.get_current_view().as_str() == "NowPlaying" {
+                    ui.set_queue_pane_open(false);
+                    return;
+                }
                 ui.set_queue_pane_open(!ui.get_queue_pane_open());
             }
         });
@@ -3178,6 +3182,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 let cur = *nav_cursor.lock().unwrap();
                 update_nav_buttons(&ui, &hist, cur);
                 if view.as_str() == "NowPlaying" {
+                    ui.set_queue_pane_open(false);
                     let playback = crate::core::bridge::playback_core();
                     let np = playback.now_playing();
                     if !np.video_id.is_empty() {
@@ -3246,6 +3251,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                         ui.invoke_navigate_to_playlist(SharedString::from(entry.context_id.as_str()));
                         nav_restoring.store(false, std::sync::atomic::Ordering::Relaxed);
                     } else if entry.view == "NowPlaying" {
+                        ui.set_queue_pane_open(false);
                         let playback = crate::core::bridge::playback_core();
                         let np = playback.now_playing();
                         if !np.video_id.is_empty() {
@@ -3304,6 +3310,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                         ui.invoke_navigate_to_playlist(SharedString::from(entry.context_id.as_str()));
                         nav_restoring.store(false, std::sync::atomic::Ordering::Relaxed);
                     } else if entry.view == "NowPlaying" {
+                        ui.set_queue_pane_open(false);
                         let playback = crate::core::bridge::playback_core();
                         let np = playback.now_playing();
                         if !np.video_id.is_empty() {

@@ -11,6 +11,12 @@ export struct ArtistCredit {
     browse-id: string,
 }
 
+export struct LyricLine {
+    primary: string,
+    secondary: string,
+    is-spacer: bool,
+}
+
 export struct SearchEntry {
     kind: string,
     id: string,
@@ -239,16 +245,16 @@ component NavBtn inherits Rectangle {
         height: root.active ? 20px : 0px; background: Theme.effective-accent;
         animate height { duration: 180ms; easing: ease-out; }
     }
-    HorizontalLayout {
-        padding-left: expanded ? 14px : 0px; padding-right: expanded ? 14px : 0px;
-        padding-top: 11px; padding-bottom: 11px; spacing: 14px;
-        alignment: expanded ? start : center;
-        Image {
-            source: root.nav-icon; width: 22px; height: 22px;
-            colorize: root.active ? Theme.effective-accent : Theme.text-muted;
-            vertical-alignment: center;
-        }
-        if root.expanded: Text { text: root.label; font-size: 15px; font-weight: root.active ? 700 : 500; color: root.active ? Theme.text : Theme.text-muted; vertical-alignment: center; }
+    Image {
+        source: root.nav-icon; x: 13px; y: 11px; width: 22px; height: 22px;
+        colorize: root.active ? Theme.effective-accent : Theme.text-muted;
+    }
+    Text {
+        text: root.label; x: 50px; y: 0; width: 176px; height: parent.height;
+        visible: parent.width > 50px;
+        font-size: 15px; font-weight: root.active ? 700 : 500;
+        color: root.active ? Theme.text : Theme.text-muted;
+        vertical-alignment: center; overflow: elide;
     }
     RailTooltip { enabled: !root.expanded && ta.has-hover; label: root.label; }
     ta := TouchArea { clicked => { root.clicked(); } }
@@ -720,6 +726,13 @@ export component NativeShellWindow inherits Window {
     in-out property <bool> np-lyrics-available: false;
     in-out property <string> np-lyrics-text: "";
     in-out property <string> np-lyrics-source: "";
+    in-out property <string> np-lyrics-lang: "Original"; // "Original" | "English"
+    in-out property <bool> np-lyrics-en-busy: false;
+    in-out property <bool> np-lyrics-en-available: false;
+    in-out property <string> np-lyrics-en-error: "";
+    in-out property <bool> np-lyrics-is-already-en: false;
+    in-out property <[LyricLine]> np-lyrics-en-lines: [];
+    callback set-lyrics-lang(string);
     in-out property <bool> np-related-busy: false;
     in-out property <[ArtistCredit]> np-credits-artists: [];
     in-out property <string> np-album-title: "";
@@ -1211,185 +1224,178 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                 if !(compact && queue-pane-open): Rectangle {
                     width: sidebar-open ? 260px : 72px; background: Theme.glass;
                     border-radius: Theme.radius; border-width: 1px; border-color: Theme.border;
-                    animate width { duration: 180ms; easing: ease-out; }
+                    animate width { duration: 200ms; easing: cubic-bezier(0.2, 0.0, 0.0, 1.0); }
                     Rectangle { x: 14px; y: 0; width: max(0px, parent.width - 28px); height: 1px; background: Theme.frost-hi; }
 
-                    VerticalLayout {
-                        padding-left: sidebar-open ? 18px : 12px; padding-right: sidebar-open ? 18px : 12px;
-                        padding-top: 20px; padding-bottom: 16px;
+                    sb-clip := Rectangle {
+                        x: 12px; y: 20px; width: max(48px, parent.width - 24px); height: max(0px, parent.height - 36px);
+                        clip: true;
 
-                        // Logo
-                        Rectangle {
-                            height: 44px;
-                            HorizontalLayout {
-                                spacing: 10px; alignment: sidebar-open ? start : center;
+                        VerticalLayout {
+                            width: parent.width; height: parent.height; spacing: 0px;
+
+                            // Logo
+                            Rectangle {
+                                height: 44px;
                                 Rectangle {
-                                    width: 34px; height: 34px; border-radius: 10px;
+                                    x: 7px; y: 5px; width: 34px; height: 34px; border-radius: 10px;
                                     background: logo-ta.has-hover ? @linear-gradient(135deg, Theme.accent-strong 0%, Theme.effective-accent 100%) : @linear-gradient(135deg, Theme.effective-accent 0%, Theme.effective-accent.darker(0.32) 100%);
-                                    y: (parent.height - self.height) / 2;
                                     Image { source: logo-ta.has-hover ? @image-url("icons/sidebar.svg") : @image-url("icons/auricle-logo.svg"); width: 20px; height: 20px; colorize: Theme.on-accent; x: 7px; y: 7px; }
                                     logo-ta := TouchArea { clicked => { toggle-sidebar(); } }
                                     RailTooltip { enabled: !sidebar-open && logo-ta.has-hover; label: "Expand sidebar"; }
                                 }
-                                if sidebar-open: HorizontalLayout {
-                                    horizontal-stretch: 1;
-                                    Text { text: "Auricle"; color: Theme.text; font-size: 18px; font-weight: 800; vertical-alignment: center; }
+                                Text {
+                                    x: 52px; y: 0; width: 176px; height: 44px;
+                                    visible: parent.width > 50px;
+                                    text: "Auricle"; color: Theme.text; font-size: 18px; font-weight: 800; vertical-alignment: center;
                                 }
                             }
-                        }
 
-                        Rectangle { height: 20px; }
+                            Rectangle { height: 20px; }
 
-                        // Navigation
-                        NavBtn { label: "Home";     expanded: sidebar-open; nav-icon: @image-url("icons/home.svg"); active: current-view == "Home";     clicked => { navigate("Home"); }     }
-                        NavBtn { label: "Explore";  expanded: sidebar-open; nav-icon: @image-url("icons/explore.svg"); active: current-view == "Explore";  clicked => { navigate("Explore"); }  }
-                        NavBtn { label: "Library";  expanded: sidebar-open; nav-icon: @image-url("icons/library.svg"); active: current-view == "Library";  clicked => { navigate("Library"); }  }
-                        NavBtn { label: "Settings"; expanded: sidebar-open; nav-icon: @image-url("icons/settings.svg"); active: current-view == "Settings"; clicked => { navigate("Settings"); } }
+                            // Navigation
+                            NavBtn { label: "Home";     expanded: sidebar-open; nav-icon: @image-url("icons/home.svg"); active: current-view == "Home";     clicked => { navigate("Home"); }     }
+                            NavBtn { label: "Explore";  expanded: sidebar-open; nav-icon: @image-url("icons/explore.svg"); active: current-view == "Explore";  clicked => { navigate("Explore"); }  }
+                            NavBtn { label: "Library";  expanded: sidebar-open; nav-icon: @image-url("icons/library.svg"); active: current-view == "Library";  clicked => { navigate("Library"); }  }
+                            NavBtn { label: "Settings"; expanded: sidebar-open; nav-icon: @image-url("icons/settings.svg"); active: current-view == "Settings"; clicked => { navigate("Settings"); } }
 
-                        Rectangle { height: 24px; }
-                        Rectangle { height: 1px; background: Theme.border; }
-                        Rectangle { height: 20px; }
+                            Rectangle { height: 24px; }
+                            Rectangle { height: 1px; background: Theme.border; }
+                            Rectangle { height: 20px; }
 
-                        // Liked Songs shortcut
-                        Rectangle {
-                            height: 56px; border-radius: Theme.radius-sm;
-                            background: ls-ta.has-hover ? Theme.hover-veil : Theme.border-soft;
-                            HorizontalLayout {
-                                padding-left: sidebar-open ? 12px : 6px; padding-right: sidebar-open ? 12px : 6px;
-                                padding-top: 10px; padding-bottom: 10px; spacing: 12px; alignment: sidebar-open ? start : center;
+                            // Liked Songs shortcut
+                            Rectangle {
+                                height: 52px; border-radius: Theme.radius-sm;
+                                background: ls-ta.has-hover ? Theme.hover-veil : Theme.border-soft;
                                 Rectangle {
-                                    width: 36px; height: 36px; border-radius: 10px;
+                                    x: 7px; y: 9px; width: 34px; height: 34px; border-radius: 10px;
                                     background: @linear-gradient(135deg, Theme.effective-accent 0%, Theme.effective-accent.darker(0.35) 100%);
                                     Image { source: @image-url("icons/heart-fill.svg"); width: 17px; height: 17px; colorize: Theme.on-accent; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
                                 }
-                                if sidebar-open: VerticalLayout {
-                                    alignment: center; spacing: 2px; horizontal-stretch: 1;
-                                    Text { text: "Liked Songs"; font-size: 13px; font-weight: 600; color: Theme.text; vertical-alignment: center; }
+                                Text {
+                                    x: 52px; y: 0; width: 174px; height: parent.height;
+                                    visible: parent.width > 50px;
+                                    text: "Liked Songs"; font-size: 13px; font-weight: 600; color: Theme.text; vertical-alignment: center; overflow: elide;
                                 }
+                                RailTooltip { enabled: !sidebar-open && ls-ta.has-hover; label: "Liked Songs"; detail: "Your liked tracks"; }
+                                ls-ta := TouchArea { clicked => { library-tab = "Liked"; navigate("Library"); } }
                             }
-                            RailTooltip { enabled: !sidebar-open && ls-ta.has-hover; label: "Liked Songs"; detail: "Your liked tracks"; }
-                            ls-ta := TouchArea { clicked => { library-tab = "Liked"; navigate("Library"); } }
-                        }
 
-                        Rectangle { height: 14px; }
+                            Rectangle { height: 14px; }
 
-                        // Your artists + albums + playlists — scrollable. Wrapped in a
-                        // clipping, vertical-stretch Rectangle (same pattern as the main
-                        // content area) so the sidebar's height is DECOUPLED from its content
-                        // length. Without this, the scroll content's height became the
-                        // sidebar's max-height and propagated up the layout tree, capping how
-                        // tall the whole window could be maximized/resized.
-                        Rectangle {
-                            vertical-stretch: 1; clip: true;
-                            SmoothFlickable {
-                                width: 100%; height: 100%;
-                                viewport-height: sb-col.preferred-height;
-                                sb-col := VerticalLayout {
-                                spacing: 2px;
-                                if sidebar-artists.length > 0: Rectangle { height: 1px; background: Theme.border; }
-                                if sidebar-artists.length > 0: Rectangle { height: 6px; }
-                                if sidebar-artists.length > 0 && sidebar-open: Text {
-                                    text: "ARTISTS"; font-size: 10px; font-weight: 700; letter-spacing: 0.8px;
-                                    color: Theme.text-dim;
-                                }
-                                if sidebar-artists.length > 0 && sidebar-open: Rectangle { height: 4px; }
-                                for a in sidebar-artists: Rectangle {
-                                    height: 40px; border-radius: 6px;
-                                    background: sba-ta.has-hover ? Theme.hover-veil : transparent;
-                                    HorizontalLayout {
-                                        padding-left: sidebar-open ? 8px : 7px; padding-right: sidebar-open ? 8px : 7px;
-                                        spacing: 10px; alignment: sidebar-open ? start : center;
-                                        Rectangle {
-                                            width: 34px; height: 34px; border-radius: 17px; clip: true;
-                                            background: Theme.art-placeholder; y: (parent.height - self.height) / 2;
-                                            if a.has-thumbnail: Image { source: a.thumbnail; width: parent.width; height: parent.height; image-fit: cover; }
-                                            if !a.has-thumbnail: Image { source: @image-url("icons/artist.svg"); width: 16px; height: 16px; colorize: Theme.text-muted; x: 9px; y: 9px; }
+                            // Your artists + albums + playlists — scrollable. Wrapped in a
+                            // clipping, vertical-stretch Rectangle (same pattern as the main
+                            // content area) so the sidebar's height is DECOUPLED from its content
+                            // length. Without this, the scroll content's height became the
+                            // sidebar's max-height and propagated up the layout tree, capping how
+                            // tall the whole window could be maximized/resized.
+                            Rectangle {
+                                vertical-stretch: 1; clip: true;
+                                SmoothFlickable {
+                                    width: 100%; height: 100%;
+                                    viewport-height: sb-col.preferred-height;
+                                    sb-col := VerticalLayout {
+                                        spacing: 2px;
+                                        if sidebar-artists.length > 0: Rectangle { height: 1px; background: Theme.border; }
+                                        if sidebar-artists.length > 0: Rectangle { height: 6px; }
+                                        if sidebar-artists.length > 0: Rectangle {
+                                            height: sidebar-open ? 20px : 0px; clip: true;
+                                            animate height { duration: 200ms; easing: cubic-bezier(0.2, 0.0, 0.0, 1.0); }
+                                            Text { x: 8px; y: 2px; width: 180px; visible: parent.width > 50px; text: "ARTISTS"; font-size: 10px; font-weight: 700; letter-spacing: 0.8px; color: Theme.text-dim; }
                                         }
-                                        if sidebar-open: VerticalLayout { alignment: center; horizontal-stretch: 1;
-                                            Text { text: a.name; font-size: 13px; font-weight: 500; color: Theme.text; overflow: elide; }
-                                        }
-                                    }
-                                    RailTooltip { enabled: !sidebar-open && sba-ta.has-hover; label: a.name; detail: "Artist"; }
-                                    sba-ta := TouchArea {
-                                        clicked => { if a.browse-id != "" { navigate-to-artist(a.browse-id); } else { go-to-song-artist(a.name); } }
-                                        pointer-event(event) => {
-                                            if event.button == PointerEventButton.right && event.kind == PointerEventKind.up {
-                                                open-entity-ctx("Artist", a.browse-id, a.name, a.name,
-                                                    self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                        for a in sidebar-artists: Rectangle {
+                                            height: 42px; border-radius: 6px;
+                                            background: sba-ta.has-hover ? Theme.hover-veil : transparent;
+                                            Rectangle {
+                                                x: 7px; y: (parent.height - 34px) / 2; width: 34px; height: 34px; border-radius: 17px; clip: true;
+                                                background: Theme.art-placeholder;
+                                                if a.has-thumbnail: Image { source: a.thumbnail; width: parent.width; height: parent.height; image-fit: cover; }
+                                                if !a.has-thumbnail: Image { source: @image-url("icons/artist.svg"); width: 16px; height: 16px; colorize: Theme.text-muted; x: 9px; y: 9px; }
+                                            }
+                                            VerticalLayout {
+                                                x: 51px; y: 0; width: 175px; height: parent.height;
+                                                visible: parent.width > 50px;
+                                                alignment: center; spacing: 1px;
+                                                Text { text: a.name; font-size: 13px; font-weight: 500; color: Theme.text; overflow: elide; }
+                                            }
+                                            RailTooltip { enabled: !sidebar-open && sba-ta.has-hover; label: a.name; detail: "Artist"; }
+                                            sba-ta := TouchArea {
+                                                clicked => { if a.browse-id != "" { navigate-to-artist(a.browse-id); } else { go-to-song-artist(a.name); } }
+                                                pointer-event(event) => {
+                                                    if event.button == PointerEventButton.right && event.kind == PointerEventKind.up {
+                                                        open-entity-ctx("Artist", a.browse-id, a.name, a.name,
+                                                            self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                                    }
+                                                }
                                             }
                                         }
-                                    }
-                                }
-                                // Recently-listened albums.
-                                if sidebar-albums.length > 0: Rectangle { height: 8px; }
-                                if sidebar-albums.length > 0: Rectangle { height: 1px; background: Theme.border; }
-                                if sidebar-albums.length > 0: Rectangle { height: 6px; }
-                                if sidebar-albums.length > 0 && sidebar-open: Text {
-                                    text: "ALBUMS"; font-size: 10px; font-weight: 700; letter-spacing: 0.8px;
-                                    color: Theme.text-dim;
-                                }
-                                if sidebar-albums.length > 0 && sidebar-open: Rectangle { height: 4px; }
-                                for al in sidebar-albums: Rectangle {
-                                    height: 46px; border-radius: 6px;
-                                    background: sbal-ta.has-hover ? Theme.hover-veil : transparent;
-                                    HorizontalLayout {
-                                        padding-left: sidebar-open ? 8px : 7px; padding-right: sidebar-open ? 8px : 7px;
-                                        spacing: 10px; alignment: sidebar-open ? start : center;
-                                        Rectangle {
-                                            width: 34px; height: 34px; border-radius: 6px; clip: true;
-                                            background: Theme.surface-hover;
-                                            y: (parent.height - self.height) / 2;
-                                            if al.has-thumbnail: Image { source: al.thumbnail; width: parent.width; height: parent.height; image-fit: cover; }
-                                            if !al.has-thumbnail: Image { source: @image-url("icons/album.svg"); width: 16px; height: 16px; colorize: Theme.text-muted; x: 9px; y: 9px; }
+                                        // Recently-listened albums.
+                                        if sidebar-albums.length > 0: Rectangle { height: 8px; }
+                                        if sidebar-albums.length > 0: Rectangle { height: 1px; background: Theme.border; }
+                                        if sidebar-albums.length > 0: Rectangle { height: 6px; }
+                                        if sidebar-albums.length > 0: Rectangle {
+                                            height: sidebar-open ? 20px : 0px; clip: true;
+                                            animate height { duration: 200ms; easing: cubic-bezier(0.2, 0.0, 0.0, 1.0); }
+                                            Text { x: 8px; y: 2px; width: 180px; visible: parent.width > 50px; text: "ALBUMS"; font-size: 10px; font-weight: 700; letter-spacing: 0.8px; color: Theme.text-dim; }
                                         }
-                                        if sidebar-open: VerticalLayout { alignment: center; spacing: 1px; horizontal-stretch: 1;
-                                            Text { text: al.title; font-size: 13px; font-weight: 500; color: Theme.text; overflow: elide; }
-                                            Text { text: al.artist; font-size: 10px; color: Theme.text-muted; overflow: elide; }
-                                        }
-                                    }
-                                    RailTooltip { enabled: !sidebar-open && sbal-ta.has-hover; label: al.title; detail: al.artist; }
-                                    sbal-ta := TouchArea {
-                                        clicked => { navigate-to-album(al.browse-id); }
-                                        pointer-event(event) => {
-                                            if event.button == PointerEventButton.right && event.kind == PointerEventKind.up {
-                                                open-entity-ctx("Album", al.browse-id, al.title, al.artist,
-                                                    self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                        for al in sidebar-albums: Rectangle {
+                                            height: 46px; border-radius: 6px;
+                                            background: sbal-ta.has-hover ? Theme.hover-veil : transparent;
+                                            Rectangle {
+                                                x: 7px; y: (parent.height - 34px) / 2; width: 34px; height: 34px; border-radius: 6px; clip: true;
+                                                background: Theme.surface-hover;
+                                                if al.has-thumbnail: Image { source: al.thumbnail; width: parent.width; height: parent.height; image-fit: cover; }
+                                                if !al.has-thumbnail: Image { source: @image-url("icons/album.svg"); width: 16px; height: 16px; colorize: Theme.text-muted; x: 9px; y: 9px; }
+                                            }
+                                            VerticalLayout {
+                                                x: 51px; y: 0; width: 175px; height: parent.height;
+                                                visible: parent.width > 50px;
+                                                alignment: center; spacing: 1px;
+                                                Text { text: al.title; font-size: 13px; font-weight: 500; color: Theme.text; overflow: elide; }
+                                                Text { text: al.artist; font-size: 10px; color: Theme.text-muted; overflow: elide; }
+                                            }
+                                            RailTooltip { enabled: !sidebar-open && sbal-ta.has-hover; label: al.title; detail: al.artist; }
+                                            sbal-ta := TouchArea {
+                                                clicked => { navigate-to-album(al.browse-id); }
+                                                pointer-event(event) => {
+                                                    if event.button == PointerEventButton.right && event.kind == PointerEventKind.up {
+                                                        open-entity-ctx("Album", al.browse-id, al.title, al.artist,
+                                                            self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                                                    }
+                                                }
                                             }
                                         }
-                                    }
-                                }
-                                if sidebar-playlists.length > 0: Rectangle { height: 8px; }
-                                if sidebar-playlists.length > 0: Rectangle { height: 1px; background: Theme.border; }
-                                if sidebar-playlists.length > 0: Rectangle { height: 6px; }
-                                if sidebar-playlists.length > 0 && sidebar-open: Text {
-                                    text: "PLAYLISTS"; font-size: 10px; font-weight: 700; letter-spacing: 0.8px;
-                                    color: Theme.text-dim;
-                                }
-                                if sidebar-playlists.length > 0 && sidebar-open: Rectangle { height: 4px; }
-                                for p in sidebar-playlists: Rectangle {
-                                    height: 42px; border-radius: 6px;
-                                    background: sbp-ta.has-hover ? Theme.hover-veil : transparent;
-                                    HorizontalLayout {
-                                        padding-left: sidebar-open ? 8px : 7px; padding-right: sidebar-open ? 8px : 7px;
-                                        spacing: 10px; alignment: sidebar-open ? start : center;
-                                        Rectangle {
-                                            width: 34px; height: 34px; border-radius: 6px; clip: true;
-                                            background: Theme.surface-hover;
-                                            y: (parent.height - self.height) / 2;
-                                            if p.has-thumbnail: Image { source: p.thumbnail; width: parent.width; height: parent.height; image-fit: cover; }
-                                            if !p.has-thumbnail: Image { source: @image-url("icons/library.svg"); width: 16px; height: 16px; colorize: Theme.text-muted; x: 9px; y: 9px; }
+                                        if sidebar-playlists.length > 0: Rectangle { height: 8px; }
+                                        if sidebar-playlists.length > 0: Rectangle { height: 1px; background: Theme.border; }
+                                        if sidebar-playlists.length > 0: Rectangle { height: 6px; }
+                                        if sidebar-playlists.length > 0: Rectangle {
+                                            height: sidebar-open ? 20px : 0px; clip: true;
+                                            animate height { duration: 200ms; easing: cubic-bezier(0.2, 0.0, 0.0, 1.0); }
+                                            Text { x: 8px; y: 2px; width: 180px; visible: parent.width > 50px; text: "PLAYLISTS"; font-size: 10px; font-weight: 700; letter-spacing: 0.8px; color: Theme.text-dim; }
                                         }
-                                        if sidebar-open: VerticalLayout { alignment: center; spacing: 1px; horizontal-stretch: 1;
-                                            Text { text: p.title; font-size: 13px; font-weight: 500; color: Theme.text; overflow: elide; }
-                                            Text { text: p.count-text; font-size: 10px; color: Theme.text-muted; }
+                                        for p in sidebar-playlists: Rectangle {
+                                            height: 44px; border-radius: 6px;
+                                            background: sbp-ta.has-hover ? Theme.hover-veil : transparent;
+                                            Rectangle {
+                                                x: 7px; y: (parent.height - 34px) / 2; width: 34px; height: 34px; border-radius: 6px; clip: true;
+                                                background: Theme.surface-hover;
+                                                if p.has-thumbnail: Image { source: p.thumbnail; width: parent.width; height: parent.height; image-fit: cover; }
+                                                if !p.has-thumbnail: Image { source: @image-url("icons/library.svg"); width: 16px; height: 16px; colorize: Theme.text-muted; x: 9px; y: 9px; }
+                                            }
+                                            VerticalLayout {
+                                                x: 51px; y: 0; width: 175px; height: parent.height;
+                                                visible: parent.width > 50px;
+                                                alignment: center; spacing: 1px;
+                                                Text { text: p.title; font-size: 13px; font-weight: 500; color: Theme.text; overflow: elide; }
+                                                Text { text: p.count-text; font-size: 10px; color: Theme.text-muted; overflow: elide; }
+                                            }
+                                            RailTooltip { enabled: !sidebar-open && sbp-ta.has-hover; label: p.title; detail: p.count-text; }
+                                            sbp-ta := TouchArea { clicked => { navigate-to-playlist(p.playlist-id); } }
                                         }
                                     }
-                                    RailTooltip { enabled: !sidebar-open && sbp-ta.has-hover; label: p.title; detail: p.count-text; }
-                                    sbp-ta := TouchArea { clicked => { navigate-to-playlist(p.playlist-id); } }
                                 }
                             }
                         }
-                        } // scroll-clip Rectangle (decouples sidebar height from content)
                     }
                 }
 
@@ -1743,7 +1749,7 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                         VerticalLayout { alignment: center; Image { source: @image-url("icons/disc.svg"); width: 19px; height: 19px; colorize: Theme.effective-accent; } }
                                     }
                                     Rectangle {
-                                        height: 272px; clip: true;
+                                        height: 276px; clip: true;
                                         nr-fl := SmoothFlickable {
                                             width: parent.width; height: parent.height;
                                             viewport-width: nr-row.preferred-width + 16px;
@@ -1751,7 +1757,7 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                                 spacing: 16px;
                                                 for alb[i] in home-new-releases: Rectangle {
                                                     private property <bool> nr-hover: nr-ta.has-hover || nr-play-ta.has-hover;
-                                                    width: 200px; height: 260px; border-radius: Theme.radius;
+                                                    width: 200px; height: 264px; border-radius: Theme.radius;
                                                     background: nr-hover ? Theme.glass-hover : Theme.glass;
                                                     border-color: nr-hover ? Theme.border : Theme.border-soft; border-width: 1px;
                                                     VerticalLayout {
@@ -1768,7 +1774,7 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                                             }
                                                         }
                                                         VerticalLayout {
-                                                            spacing: 2px; padding-left: 4px;
+                                                            spacing: 4px; padding-left: 4px;
                                                             Text { text: alb.title; font-size: 13px; font-weight: 600; color: Theme.text; overflow: elide; }
                                                             Text { text: alb.artist + (alb.year != "" ? "  •  " + alb.year : ""); font-size: 12px; color: Theme.text-muted; overflow: elide; }
                                                         }
@@ -2223,14 +2229,14 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                     spacing: Theme.heading-gap; padding-bottom: Theme.section-gap;
                                     Text { text: "Albums"; font-size: 18px; font-weight: 700; color: Theme.text; }
                                     Rectangle {
-                                        height: 230px; clip: true;
+                                        height: 240px; clip: true;
                                         album-results-fl := SmoothFlickable {
                                             width: parent.width; height: parent.height;
                                             viewport-width: album-results-row.preferred-width + 16px;
                                             album-results-row := HorizontalLayout {
                                                 spacing: 16px;
                                                 for alb[i] in search-albums: Rectangle {
-                                                    width: 176px; height: 220px; border-radius: Theme.radius;
+                                                    width: 176px; height: 230px; border-radius: Theme.radius;
                                                     background: alb-ta.has-hover ? Theme.glass-hover : transparent;
                                                     VerticalLayout {
                                                         padding: 8px; spacing: 8px;
@@ -2246,7 +2252,7 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                                             }
                                                         }
                                                         VerticalLayout {
-                                                            spacing: 2px; padding-left: 4px;
+                                                            spacing: 5px; padding-left: 4px;
                                                             Text { text: alb.title; font-size: 13px; font-weight: 600; color: Theme.text; overflow: elide; }
                                                             Text { text: alb.artist; font-size: 12px; color: Theme.text-muted; overflow: elide; }
                                                         }
@@ -2272,14 +2278,14 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                     spacing: Theme.heading-gap; padding-bottom: Theme.section-gap;
                                     Text { text: search-filter == "All" && search-top.kind == "Artist" ? "Public playlists" : "Playlists"; font-size: 18px; font-weight: 700; color: Theme.text; }
                                     Rectangle {
-                                        height: 230px; clip: true;
+                                        height: 240px; clip: true;
                                         playlist-results-fl := SmoothFlickable {
                                             width: parent.width; height: parent.height;
                                             viewport-width: playlist-results-row.preferred-width + 16px;
                                             playlist-results-row := HorizontalLayout {
                                                 spacing: 16px;
                                                 for playlist in search-playlists: Rectangle {
-                                                    width: 176px; height: 220px; border-radius: Theme.radius;
+                                                    width: 176px; height: 230px; border-radius: Theme.radius;
                                                     background: playlist-ta.has-hover ? Theme.glass-hover : transparent;
                                                     VerticalLayout {
                                                         padding: 8px; spacing: 8px;
@@ -2294,10 +2300,10 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                                                 x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
                                                             }
                                                         }
-                                                        Rectangle {
-                                                            height: 36px;
-                                                            Text { text: playlist.title; width: parent.width; height: 18px; font-size: 13px; font-weight: 600; color: Theme.text; overflow: elide; }
-                                                            Text { text: playlist.count-text; y: 20px; width: parent.width; height: 16px; font-size: 12px; color: Theme.text-muted; overflow: elide; }
+                                                        VerticalLayout {
+                                                            spacing: 5px; padding-left: 4px;
+                                                            Text { text: playlist.title; font-size: 13px; font-weight: 600; color: Theme.text; overflow: elide; }
+                                                            Text { text: playlist.count-text; font-size: 12px; color: Theme.text-muted; overflow: elide; }
                                                         }
                                                     }
                                                     playlist-ta := TouchArea { clicked => { navigate-to-playlist(playlist.playlist-id); } }
@@ -2624,14 +2630,14 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                         }
                                     }
                                     Rectangle {
-                                        height: 230px; clip: true;
+                                        height: 240px; clip: true;
                                         disco-fl := SmoothFlickable {
                                             width: parent.width; height: parent.height;
                                             viewport-width: disco-row.preferred-width + 16px;
                                             disco-row := HorizontalLayout {
                                                 spacing: 16px;
                                                 for album[i] in artist-view-albums: Rectangle {
-                                                    width: 176px; height: 220px; border-radius: Theme.radius;
+                                                    width: 176px; height: 230px; border-radius: Theme.radius;
                                                     background: album-card-ta.has-hover ? Theme.glass-hover : transparent;
                                                     VerticalLayout {
                                                         padding: 8px; spacing: 8px;
@@ -2648,7 +2654,7 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                                             }
                                                         }
                                                         VerticalLayout {
-                                                            spacing: 2px; padding-left: 4px;
+                                                            spacing: 5px; padding-left: 4px;
                                                             Text { text: album.title; font-size: 13px; font-weight: 600; color: Theme.text; overflow: elide; }
                                                             Text { text: album.year; font-size: 12px; color: Theme.text-muted; }
                                                         }
@@ -3192,20 +3198,20 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                     padding-left: 32px; padding-right: 32px; padding-top: Theme.section-gap; spacing: Theme.heading-gap;
                                     Text { text: "Similar playlists"; font-size: 22px; font-weight: 700; color: Theme.text; }
                                     Rectangle {
-                                        height: 230px; clip: true;
+                                        height: 240px; clip: true;
                                         similar-pl-fl := SmoothFlickable {
                                             width: parent.width; height: parent.height;
                                             viewport-width: similar-pl-row.preferred-width + 16px;
                                             similar-pl-row := HorizontalLayout {
                                                 spacing: 16px;
                                                 for pl[i] in playlist-view-similar: Rectangle {
-                                                    width: 176px; height: 220px; border-radius: 8px;
+                                                    width: 176px; height: 230px; border-radius: Theme.radius;
                                                     background: similar-pl-ta.has-hover ? Theme.glass-hover : transparent;
                                                     VerticalLayout {
                                                         padding: 8px; spacing: 8px;
                                                         Rectangle {
-                                                            width: 160px; height: 160px; border-radius: 8px; clip: true;
-                                                            background: #1a1a1a;
+                                                            width: 160px; height: 160px; border-radius: Theme.radius-sm; clip: true;
+                                                            background: Theme.art-placeholder;
                                                             if pl.has-thumbnail: Image {
                                                                 source: pl.thumbnail;
                                                                 width: parent.width; height: parent.height; image-fit: cover;
@@ -3215,9 +3221,9 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                                             }
                                                         }
                                                         VerticalLayout {
-                                                            spacing: 2px; padding-left: 4px;
+                                                            spacing: 5px; padding-left: 4px;
                                                             Text { text: pl.title; font-size: 13px; font-weight: 600; color: Theme.text; overflow: elide; }
-                                                            Text { text: pl.count-text; font-size: 12px; color: Theme.text-muted; }
+                                                            Text { text: pl.count-text; font-size: 12px; color: Theme.text-muted; overflow: elide; }
                                                         }
                                                     }
                                                     similar-pl-ta := TouchArea { clicked => { navigate-to-playlist(pl.playlist-id); } }
@@ -4521,14 +4527,112 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                             Text { text: "Try another track or explore Related info."; font-size: 12px; color: Theme.text-muted; horizontal-alignment: center; }
                                         }
 
-                                        if !np-lyrics-busy && np-lyrics-available: SmoothFlickable {
-                                            width: parent.width; height: parent.height;
-                                            viewport-width: self.width; viewport-height: np-lyr-col.preferred-height;
-                                            np-lyr-col := VerticalLayout {
-                                                width: parent.width; height: self.preferred-height;
-                                                padding: 24px; spacing: 18px; alignment: start;
-                                                Text { text: np-lyrics-text; font-size: 17px; font-weight: 600; color: Theme.text; wrap: word-wrap; }
-                                                if np-lyrics-source != "": Text { text: np-lyrics-source; font-size: 11px; color: Theme.text-dim; wrap: word-wrap; }
+                                        if !np-lyrics-busy && np-lyrics-available: VerticalLayout {
+                                            width: parent.width; height: parent.height; spacing: 0px;
+
+                                            // Top language bar
+                                            Rectangle {
+                                                height: 46px;
+                                                HorizontalLayout {
+                                                    padding-left: 20px; padding-right: 20px; alignment: space-between;
+                                                    Text {
+                                                        text: (np-lyrics-lang == "English" && !np-lyrics-is-already-en) ? "Sing-along & English meaning" : (np-lyrics-lang == "English" && np-lyrics-is-already-en ? "Lyrics are in English" : "Lyrics language");
+                                                        font-size: 12px; font-weight: 600; color: Theme.text-muted; vertical-alignment: center;
+                                                    }
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        Rectangle {
+                                                            width: 152px; height: 30px; border-radius: 15px;
+                                                            background: Theme.surface; border-color: Theme.border-soft; border-width: 1px;
+                                                            HorizontalLayout {
+                                                                padding: 2px; spacing: 2px;
+                                                                Rectangle {
+                                                                    horizontal-stretch: 1; border-radius: 13px;
+                                                                    background: np-lyrics-lang == "Original" ? Theme.effective-accent : (lyr-orig-ta.has-hover ? Theme.hover-veil : transparent);
+                                                                    animate background { duration: 140ms; }
+                                                                    Text {
+                                                                        text: "Original"; font-size: 11px; font-weight: 700;
+                                                                        color: np-lyrics-lang == "Original" ? Theme.on-accent : Theme.text-muted;
+                                                                        width: parent.width; height: parent.height;
+                                                                        horizontal-alignment: center; vertical-alignment: center;
+                                                                    }
+                                                                    lyr-orig-ta := TouchArea { clicked => { set-lyrics-lang("Original"); } }
+                                                                }
+                                                                Rectangle {
+                                                                    horizontal-stretch: 1; border-radius: 13px;
+                                                                    background: np-lyrics-lang == "English" ? Theme.effective-accent : (lyr-en-ta.has-hover ? Theme.hover-veil : transparent);
+                                                                    animate background { duration: 140ms; }
+                                                                    Text {
+                                                                        text: "English"; font-size: 11px; font-weight: 700;
+                                                                        color: np-lyrics-lang == "English" ? Theme.on-accent : Theme.text-muted;
+                                                                        width: parent.width; height: parent.height;
+                                                                        horizontal-alignment: center; vertical-alignment: center;
+                                                                    }
+                                                                    lyr-en-ta := TouchArea { clicked => { set-lyrics-lang("English"); } }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: Theme.border-soft; }
+                                            }
+
+                                            // Lyrics scroll region
+                                            Rectangle {
+                                                vertical-stretch: 1; clip: true;
+
+                                                if np-lyrics-lang == "Original" || np-lyrics-is-already-en: SmoothFlickable {
+                                                    width: parent.width; height: parent.height;
+                                                    viewport-width: self.width; viewport-height: np-lyr-col.preferred-height;
+                                                    np-lyr-col := VerticalLayout {
+                                                        width: parent.width; height: self.preferred-height;
+                                                        padding: 24px; spacing: 18px; alignment: start;
+                                                        Text { text: np-lyrics-text; font-size: 17px; font-weight: 600; color: Theme.text; wrap: word-wrap; }
+                                                        if np-lyrics-source != "": Text { text: np-lyrics-source; font-size: 11px; color: Theme.text-dim; wrap: word-wrap; }
+                                                    }
+                                                }
+
+                                                if np-lyrics-lang == "English" && !np-lyrics-is-already-en: Rectangle {
+                                                    width: parent.width; height: parent.height;
+
+                                                    if np-lyrics-en-busy: VerticalLayout {
+                                                        width: parent.width; height: parent.height; alignment: center; spacing: 8px;
+                                                        Text { text: "Translating lyrics to English…"; font-size: 14px; font-weight: 600; color: Theme.text-muted; horizontal-alignment: center; }
+                                                    }
+
+                                                    if !np-lyrics-en-busy && (!np-lyrics-en-available || np-lyrics-en-error != ""): VerticalLayout {
+                                                        width: parent.width; height: parent.height; alignment: center; spacing: 12px;
+                                                        Text { text: np-lyrics-en-error != "" ? np-lyrics-en-error : "Couldn't load English translation"; font-size: 14px; font-weight: 600; color: Theme.text; horizontal-alignment: center; }
+                                                        HorizontalLayout {
+                                                            alignment: center;
+                                                            Rectangle {
+                                                                width: 96px; height: 32px; border-radius: 16px;
+                                                                background: lyr-retry-ta.has-hover ? Theme.accent-strong : Theme.effective-accent;
+                                                                Text { text: "Retry"; font-size: 12px; font-weight: 700; color: Theme.on-accent; width: parent.width; height: parent.height; horizontal-alignment: center; vertical-alignment: center; }
+                                                                lyr-retry-ta := TouchArea { clicked => { set-lyrics-lang("English"); } }
+                                                            }
+                                                        }
+                                                    }
+
+                                                    if !np-lyrics-en-busy && np-lyrics-en-available && np-lyrics-en-error == "": SmoothFlickable {
+                                                        width: parent.width; height: parent.height;
+                                                        viewport-width: self.width; viewport-height: np-lyr-en-col.preferred-height;
+                                                        np-lyr-en-col := VerticalLayout {
+                                                            width: parent.width; height: self.preferred-height;
+                                                            padding: 24px; spacing: 0px; alignment: start;
+                                                            for line in np-lyrics-en-lines: VerticalLayout {
+                                                                if line.is-spacer: Rectangle { height: 14px; }
+                                                                if !line.is-spacer: VerticalLayout {
+                                                                    spacing: 3px; padding-bottom: 10px;
+                                                                    Text { text: line.primary; font-size: 16px; font-weight: 700; color: Theme.text; wrap: word-wrap; }
+                                                                    if line.secondary != "": Text { text: line.secondary; font-size: 13px; font-weight: 500; color: Theme.text-muted; wrap: word-wrap; }
+                                                                }
+                                                            }
+                                                            if np-lyrics-source != "": Rectangle { height: 8px; }
+                                                            if np-lyrics-source != "": Text { text: np-lyrics-source + " • Translated to English"; font-size: 11px; color: Theme.text-dim; wrap: word-wrap; }
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -5267,7 +5371,17 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
 
                         VerticalLayout {
                             alignment: center;
-                            IconBtn { svg-icon: @image-url("icons/queue.svg"); use-svg: true; active: queue-pane-open; icon-color: queue-pane-open ? Theme.effective-accent : Theme.text-dim; clicked => { toggle-queue-pane(); } }
+                            Rectangle {
+                                width: 32px; height: 32px; border-radius: 16px;
+                                background: current-view != "NowPlaying" && qbtn-ta.has-hover ? Theme.hover-veil : (current-view != "NowPlaying" && queue-pane-open ? Theme.accent-soft : transparent);
+                                animate background { duration: 140ms; }
+                                Image {
+                                    source: @image-url("icons/queue.svg"); width: 18px; height: 18px;
+                                    colorize: current-view == "NowPlaying" ? Theme.text-dim.with-alpha(0.38) : (queue-pane-open ? Theme.effective-accent : (qbtn-ta.has-hover ? Theme.text : Theme.text-dim));
+                                    x: 7px; y: 7px;
+                                }
+                                qbtn-ta := TouchArea { enabled: current-view != "NowPlaying"; clicked => { if (root.current-view != "NowPlaying") { toggle-queue-pane(); } } }
+                            }
                         }
 
                         if !compact: HorizontalLayout {
