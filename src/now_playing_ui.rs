@@ -7,7 +7,7 @@ use ytmapi_rs::common::{AlbumID, ArtistChannelID, VideoID, YoutubeID};
 use ytmapi_rs::query::{GetAlbumQuery, GetArtistQuery, GetLyricsIDQuery, GetLyricsQuery};
 
 use crate::core::{bridge::playback_core, menu_metadata, net, playback};
-use crate::{ArtistCredit, ArtistItem, NativeShellWindow, SongItem};
+use crate::{ArtistCredit, ArtistItem, LyricLine, NativeShellWindow, SongItem};
 
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 static LAST_VIDEO_ID: OnceLock<Mutex<String>> = OnceLock::new();
@@ -27,6 +27,25 @@ static LYRICS_CACHE: OnceLock<Mutex<HashMap<String, CachedLyrics>>> = OnceLock::
 
 fn lyrics_cache() -> &'static Mutex<HashMap<String, CachedLyrics>> {
     LYRICS_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PlainLyricLine {
+    pub primary: String,
+    pub secondary: String,
+    pub is_spacer: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CachedEnglishLyrics {
+    pub is_already_en: bool,
+    pub lines: Vec<PlainLyricLine>,
+}
+
+static ENGLISH_LYRICS_CACHE: OnceLock<Mutex<HashMap<String, CachedEnglishLyrics>>> = OnceLock::new();
+
+pub(crate) fn english_lyrics_cache() -> &'static Mutex<HashMap<String, CachedEnglishLyrics>> {
+    ENGLISH_LYRICS_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -169,11 +188,344 @@ fn make_credit_from_plain(c: &PlainCredit) -> ArtistCredit {
     }
 }
 
+fn make_lyric_line_from_plain(l: &PlainLyricLine) -> LyricLine {
+    LyricLine {
+        primary: SharedString::from(l.primary.as_str()),
+        secondary: SharedString::from(l.secondary.as_str()),
+        is_spacer: l.is_spacer,
+    }
+}
+
+pub(crate) fn has_non_latin_script(text: &str) -> bool {
+    text.chars()
+        .any(|c| !c.is_ascii() && c.is_alphabetic() && (c as u32) > 0x024F)
+}
+
+pub(crate) fn parse_gtx_chunk_json(val: &serde_json::Value) -> Option<(String, String, String)> {
+    let src_lang = val.get("src").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let sentences = val.get("sentences")?.as_array()?;
+    let mut translated_chunk = String::new();
+    let mut romanized_chunk = String::new();
+    for s in sentences {
+        if let Some(trans) = s.get("trans").and_then(|v| v.as_str()) {
+            translated_chunk.push_str(trans);
+        }
+        if let Some(translit) = s.get("src_translit").and_then(|v| v.as_str()) {
+            romanized_chunk.push_str(translit);
+        }
+    }
+    Some((src_lang, translated_chunk, romanized_chunk))
+}
+
+pub(crate) fn build_english_lyrics(
+    original_text: &str,
+    src_lang: &str,
+    translated_text: &str,
+    romanized_text: &str,
+) -> CachedEnglishLyrics {
+    let original_text = original_text.replace("\r\n", "\n");
+    let translated_text = translated_text.replace("\r\n", "\n");
+    let romanized_text = romanized_text.replace("\r\n", "\n");
+
+    let non_latin = has_non_latin_script(&original_text);
+    if !non_latin
+        && (src_lang.eq_ignore_ascii_case("en")
+            || src_lang.to_ascii_lowercase().starts_with("en-")
+            || (src_lang.eq_ignore_ascii_case("en")
+                && original_text.trim().eq_ignore_ascii_case(translated_text.trim()))
+            || (src_lang.is_empty()
+                && original_text.trim().eq_ignore_ascii_case(translated_text.trim())))
+    {
+        return CachedEnglishLyrics {
+            is_already_en: true,
+            lines: Vec::new(),
+        };
+    }
+
+    let mut raw_lines = Vec::new();
+    if non_latin && !romanized_text.trim().is_empty() {
+        let orig_lines: Vec<&str> = original_text.split('\n').collect();
+        let rom_lines: Vec<&str> = romanized_text.split('\n').collect();
+        let trans_lines: Vec<&str> = translated_text.split('\n').collect();
+        let count = orig_lines.len().max(rom_lines.len()).max(trans_lines.len());
+
+        for idx in 0..count {
+            let o = orig_lines.get(idx).map(|s| s.trim()).unwrap_or("");
+            let r = rom_lines.get(idx).map(|s| s.trim()).unwrap_or("");
+            let t = trans_lines.get(idx).map(|s| s.trim()).unwrap_or("");
+
+            if o.is_empty() && r.is_empty() && t.is_empty() {
+                if !raw_lines
+                    .last()
+                    .map(|l: &PlainLyricLine| l.is_spacer)
+                    .unwrap_or(false)
+                {
+                    raw_lines.push(PlainLyricLine {
+                        primary: String::new(),
+                        secondary: String::new(),
+                        is_spacer: true,
+                    });
+                }
+            } else {
+                let primary = if !r.is_empty() {
+                    r.to_string()
+                } else {
+                    t.to_string()
+                };
+                let secondary = if !t.is_empty() && !t.eq_ignore_ascii_case(&primary) {
+                    t.to_string()
+                } else {
+                    String::new()
+                };
+                raw_lines.push(PlainLyricLine {
+                    primary,
+                    secondary,
+                    is_spacer: false,
+                });
+            }
+        }
+    } else {
+        for line in translated_text.split('\n') {
+            let t = line.trim();
+            if t.is_empty() {
+                if !raw_lines
+                    .last()
+                    .map(|l: &PlainLyricLine| l.is_spacer)
+                    .unwrap_or(false)
+                {
+                    raw_lines.push(PlainLyricLine {
+                        primary: String::new(),
+                        secondary: String::new(),
+                        is_spacer: true,
+                    });
+                }
+            } else {
+                raw_lines.push(PlainLyricLine {
+                    primary: t.to_string(),
+                    secondary: String::new(),
+                    is_spacer: false,
+                });
+            }
+        }
+    }
+
+    let mut start = 0;
+    while start < raw_lines.len() && raw_lines[start].is_spacer {
+        start += 1;
+    }
+    let mut end = raw_lines.len();
+    while end > start && raw_lines[end - 1].is_spacer {
+        end -= 1;
+    }
+
+    let lines = raw_lines[start..end].to_vec();
+    CachedEnglishLyrics {
+        is_already_en: false,
+        lines,
+    }
+}
+
+fn split_stanza_chunks(text: &str, max_bytes: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let stanzas: Vec<&str> = text.split("\n\n").collect();
+    let mut cur = String::new();
+    for stanza in stanzas {
+        if stanza.len() > max_bytes {
+            if !cur.is_empty() {
+                chunks.push(cur.clone());
+                cur.clear();
+            }
+            let lines: Vec<&str> = stanza.split('\n').collect();
+            for line in lines {
+                if !cur.is_empty() && cur.len() + 1 + line.len() > max_bytes {
+                    chunks.push(cur.clone());
+                    cur.clear();
+                }
+                if !cur.is_empty() {
+                    cur.push('\n');
+                }
+                cur.push_str(line);
+            }
+            if !cur.is_empty() {
+                chunks.push(cur.clone());
+                cur.clear();
+            }
+        } else {
+            if !cur.is_empty() && cur.len() + 2 + stanza.len() > max_bytes {
+                chunks.push(cur.clone());
+                cur.clear();
+            }
+            if !cur.is_empty() {
+                cur.push_str("\n\n");
+            }
+            cur.push_str(stanza);
+        }
+    }
+    if !cur.is_empty() {
+        chunks.push(cur);
+    }
+    chunks
+}
+
+pub(crate) fn translate_lyrics_to_english(original: &str) -> Result<CachedEnglishLyrics, String> {
+    let normalized = original.replace("\r\n", "\n");
+    if normalized.trim().is_empty() {
+        return Ok(CachedEnglishLyrics {
+            is_already_en: false,
+            lines: Vec::new(),
+        });
+    }
+
+    let chunks = split_stanza_chunks(&normalized, 2800);
+    let http = net::http();
+    let url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&dt=rm&dj=1";
+
+    let mut all_trans_chunks = Vec::new();
+    let mut all_rom_chunks = Vec::new();
+    let mut detected_lang = String::new();
+
+    for chunk in chunks {
+        let resp = http
+            .post(url)
+            .form(&[("q", chunk.as_str())])
+            .send()
+            .map_err(|_| {
+                "Couldn't reach translation service. Check your connection and try again."
+                    .to_string()
+            })?;
+
+        if !resp.status().is_success() {
+            return Err(
+                "Couldn't reach translation service. Check your connection and try again."
+                    .to_string(),
+            );
+        }
+
+        let json_val: serde_json::Value = resp.json().map_err(|_| {
+            "Couldn't reach translation service. Check your connection and try again."
+                .to_string()
+        })?;
+
+        let (src_lang, trans_chunk, rom_chunk) = parse_gtx_chunk_json(&json_val).ok_or_else(|| {
+            "Couldn't reach translation service. Check your connection and try again."
+                .to_string()
+        })?;
+
+        if detected_lang.is_empty()
+            || (detected_lang == "en" && !src_lang.is_empty() && src_lang != "en")
+        {
+            detected_lang = src_lang;
+        }
+
+        all_trans_chunks.push(trans_chunk);
+        all_rom_chunks.push(rom_chunk);
+    }
+
+    let translated_text = all_trans_chunks.join("\n\n");
+    let romanized_text = all_rom_chunks.join("\n\n");
+
+    Ok(build_english_lyrics(
+        &normalized,
+        &detected_lang,
+        &translated_text,
+        &romanized_text,
+    ))
+}
+
 fn apply_lyrics_to_ui(ui: &NativeShellWindow, lyrics: &CachedLyrics) {
     ui.set_np_lyrics_busy(false);
     ui.set_np_lyrics_available(lyrics.available);
     ui.set_np_lyrics_text(SharedString::from(lyrics.text.as_str()));
     ui.set_np_lyrics_source(SharedString::from(lyrics.source.as_str()));
+}
+
+fn apply_english_lyrics_to_ui(ui: &NativeShellWindow, en: &CachedEnglishLyrics) {
+    ui.set_np_lyrics_en_busy(false);
+    ui.set_np_lyrics_en_error(SharedString::default());
+    ui.set_np_lyrics_en_available(true);
+    ui.set_np_lyrics_is_already_en(en.is_already_en);
+    let lines: Vec<LyricLine> = en.lines.iter().map(make_lyric_line_from_plain).collect();
+    ui.set_np_lyrics_en_lines(ModelRc::new(VecModel::from(lines)));
+}
+
+fn spawn_english_lyrics_fetch(
+    ui_weak: slint::Weak<NativeShellWindow>,
+    video_id: String,
+    original_text: String,
+    gen: u64,
+) {
+    let cached = english_lyrics_cache()
+        .lock()
+        .ok()
+        .and_then(|c| c.get(&video_id).cloned());
+    if let Some(cached) = cached {
+        let ui_w = ui_weak.clone();
+        let vid = video_id.clone();
+        slint::invoke_from_event_loop(move || {
+            if let Some(ui) = ui_w.upgrade() {
+                if GENERATION.load(Ordering::SeqCst) == gen
+                    && ui.get_now_playing_video_id().as_str() == vid.as_str()
+                {
+                    apply_english_lyrics_to_ui(&ui, &cached);
+                }
+            }
+        })
+        .ok();
+        return;
+    }
+
+    {
+        let ui_w = ui_weak.clone();
+        let vid = video_id.clone();
+        slint::invoke_from_event_loop(move || {
+            if let Some(ui) = ui_w.upgrade() {
+                if GENERATION.load(Ordering::SeqCst) == gen
+                    && ui.get_now_playing_video_id().as_str() == vid.as_str()
+                {
+                    ui.set_np_lyrics_en_busy(true);
+                    ui.set_np_lyrics_en_error(SharedString::default());
+                }
+            }
+        })
+        .ok();
+    }
+
+    net::spawn(move || {
+        let res = translate_lyrics_to_english(&original_text);
+        let ui_w = ui_weak.clone();
+        let vid = video_id.clone();
+        match res {
+            Ok(en) => {
+                if let Ok(mut cache) = english_lyrics_cache().lock() {
+                    cache.insert(video_id.clone(), en.clone());
+                }
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_w.upgrade() {
+                        if GENERATION.load(Ordering::SeqCst) == gen
+                            && ui.get_now_playing_video_id().as_str() == vid.as_str()
+                        {
+                            apply_english_lyrics_to_ui(&ui, &en);
+                        }
+                    }
+                })
+                .ok();
+            }
+            Err(err_msg) => {
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_w.upgrade() {
+                        if GENERATION.load(Ordering::SeqCst) == gen
+                            && ui.get_now_playing_video_id().as_str() == vid.as_str()
+                        {
+                            ui.set_np_lyrics_en_busy(false);
+                            ui.set_np_lyrics_en_available(false);
+                            ui.set_np_lyrics_en_error(SharedString::from(err_msg.as_str()));
+                        }
+                    }
+                })
+                .ok();
+            }
+        }
+    });
 }
 
 fn apply_related_to_ui(ui: &NativeShellWindow, rel: &CachedRelated) {
@@ -309,7 +661,11 @@ fn spawn_lyrics_fetch(
     video_id: String,
     gen: u64,
 ) {
-    if let Some(cached) = lyrics_cache().lock().unwrap().get(&video_id).cloned() {
+    let cached = lyrics_cache()
+        .lock()
+        .ok()
+        .and_then(|c| c.get(&video_id).cloned());
+    if let Some(cached) = cached {
         let ui_w = ui_weak.clone();
         let vid = video_id.clone();
         slint::invoke_from_event_loop(move || {
@@ -318,6 +674,17 @@ fn spawn_lyrics_fetch(
                     && ui.get_now_playing_video_id().as_str() == vid.as_str()
                 {
                     apply_lyrics_to_ui(&ui, &cached);
+                    if cached.available {
+                        let cached_en = english_lyrics_cache()
+                            .lock()
+                            .ok()
+                            .and_then(|c| c.get(&vid).cloned());
+                        if let Some(en) = cached_en {
+                            apply_english_lyrics_to_ui(&ui, &en);
+                        } else if ui.get_np_lyrics_lang().as_str() == "English" {
+                            spawn_english_lyrics_fetch(ui.as_weak(), vid, cached.text.clone(), gen);
+                        }
+                    }
                 }
             }
         })
@@ -337,6 +704,11 @@ fn spawn_lyrics_fetch(
                     ui.set_np_lyrics_available(false);
                     ui.set_np_lyrics_text(SharedString::default());
                     ui.set_np_lyrics_source(SharedString::default());
+                    ui.set_np_lyrics_en_busy(false);
+                    ui.set_np_lyrics_en_available(false);
+                    ui.set_np_lyrics_en_error(SharedString::default());
+                    ui.set_np_lyrics_is_already_en(false);
+                    ui.set_np_lyrics_en_lines(ModelRc::new(VecModel::default()));
                 }
             }
         })
@@ -424,6 +796,17 @@ fn spawn_lyrics_fetch(
                     && ui.get_now_playing_video_id().as_str() == vid.as_str()
                 {
                     apply_lyrics_to_ui(&ui, &lyrics_result);
+                    if lyrics_result.available {
+                        let cached_en = english_lyrics_cache()
+                            .lock()
+                            .ok()
+                            .and_then(|c| c.get(&vid).cloned());
+                        if let Some(en) = cached_en {
+                            apply_english_lyrics_to_ui(&ui, &en);
+                        } else if ui.get_np_lyrics_lang().as_str() == "English" {
+                            spawn_english_lyrics_fetch(ui.as_weak(), vid, lyrics_result.text.clone(), gen);
+                        }
+                    }
                 }
             }
         })
@@ -439,7 +822,11 @@ fn spawn_related_fetch(
     duration_secs: u64,
     gen: u64,
 ) {
-    if let Some(cached) = related_cache().lock().unwrap().get(&video_id).cloned() {
+    let cached = related_cache()
+        .lock()
+        .ok()
+        .and_then(|c| c.get(&video_id).cloned());
+    if let Some(cached) = cached {
         let ui_w = ui_weak.clone();
         let vid = video_id.clone();
         slint::invoke_from_event_loop(move || {
@@ -759,9 +1146,41 @@ pub fn wire(ui: &NativeShellWindow) {
             let title = ui.get_track_title().to_string();
             let artist = ui.get_track_artist().to_string();
             let duration_secs = playback_core().now_playing().duration_secs;
-            let already_loaded = last_video_id().lock().map(|l| l.as_str() == vid.as_str()).unwrap_or(false);
+            let already_loaded = last_video_id()
+                .lock()
+                .map(|l| l.as_str() == vid.as_str())
+                .unwrap_or(false);
             if !already_loaded {
                 notify_track_changed(ui.as_weak(), vid, title, artist, duration_secs);
+            }
+        }
+    });
+
+    let ui_weak = ui.as_weak();
+    ui.on_set_lyrics_lang(move |lang| {
+        let Some(ui) = ui_weak.upgrade() else { return };
+        ui.set_np_lyrics_lang(lang.clone());
+        if lang.as_str() == "English"
+            && ui.get_np_lyrics_available()
+            && !ui.get_np_lyrics_en_busy()
+        {
+            let vid = ui.get_now_playing_video_id().to_string();
+            let cached = english_lyrics_cache()
+                .lock()
+                .ok()
+                .and_then(|c| c.get(&vid).cloned());
+            if let Some(cached) = cached {
+                apply_english_lyrics_to_ui(&ui, &cached);
+            } else {
+                let orig = ui.get_np_lyrics_text().to_string();
+                if !orig.trim().is_empty() {
+                    spawn_english_lyrics_fetch(
+                        ui.as_weak(),
+                        vid,
+                        orig,
+                        GENERATION.load(Ordering::SeqCst),
+                    );
+                }
             }
         }
     });
@@ -787,6 +1206,11 @@ pub fn notify_track_changed(
                 ui.set_np_lyrics_available(false);
                 ui.set_np_lyrics_text(SharedString::default());
                 ui.set_np_lyrics_source(SharedString::default());
+                ui.set_np_lyrics_en_busy(false);
+                ui.set_np_lyrics_en_available(false);
+                ui.set_np_lyrics_en_error(SharedString::default());
+                ui.set_np_lyrics_is_already_en(false);
+                ui.set_np_lyrics_en_lines(ModelRc::new(VecModel::default()));
                 ui.set_np_related_busy(false);
                 ui.set_np_credits_artists(ModelRc::new(VecModel::default()));
                 ui.set_np_album_title(SharedString::default());
@@ -854,13 +1278,11 @@ mod tests {
     #[test]
     fn test_deduplicate_related_songs() {
         let current_vid = "song1";
-        let album_songs = vec![
-            PlainSong {
-                video_id: "song2".into(),
-                title: "Track 2".into(),
-                ..Default::default()
-            },
-        ];
+        let album_songs = vec![PlainSong {
+            video_id: "song2".into(),
+            title: "Track 2".into(),
+            ..Default::default()
+        }];
         let candidates = vec![
             PlainSong {
                 video_id: "song1".into(), // matches current
@@ -893,5 +1315,112 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].video_id, "song3");
         assert_eq!(result[1].video_id, "song4");
+    }
+
+    #[test]
+    fn test_non_latin_lyrics_produces_singalong_and_meaning() {
+        let val = serde_json::json!({
+            "src": "ur",
+            "sentences": [
+                {
+                    "trans": "May I be sacrificed for you\n",
+                    "orig": "تجھ پہ قربان جاواں\n",
+                    "src_translit": "Tujh pe qurbaan jaawaan\n"
+                },
+                {
+                    "trans": "You are my heart's solace\n\n",
+                    "orig": "توں ہے میرے دل دا قرار\n\n",
+                    "src_translit": "Tu hai mere dil da qaraar\n\n"
+                },
+                {
+                    "trans": "I will love you forever",
+                    "orig": "میں کراں گا پیار سدا",
+                    "src_translit": "Main karaan ga pyaar sada"
+                }
+            ]
+        });
+
+        let (src_lang, trans, rom) = parse_gtx_chunk_json(&val).expect("parse gtx chunk");
+        assert_eq!(src_lang, "ur");
+
+        let orig = "تجھ پہ قربان جاواں\nتوں ہے میرے دل دا قرار\n\nمیں کراں گا پیار سدا";
+        let res = build_english_lyrics(orig, &src_lang, &trans, &rom);
+
+        assert!(!res.is_already_en);
+        assert_eq!(res.lines.len(), 4);
+
+        assert_eq!(res.lines[0].primary, "Tujh pe qurbaan jaawaan");
+        assert_eq!(res.lines[0].secondary, "May I be sacrificed for you");
+        assert!(!res.lines[0].is_spacer);
+
+        assert_eq!(res.lines[1].primary, "Tu hai mere dil da qaraar");
+        assert_eq!(res.lines[1].secondary, "You are my heart's solace");
+        assert!(!res.lines[1].is_spacer);
+
+        assert!(res.lines[2].is_spacer);
+
+        assert_eq!(res.lines[3].primary, "Main karaan ga pyaar sada");
+        assert_eq!(res.lines[3].secondary, "I will love you forever");
+        assert!(!res.lines[3].is_spacer);
+    }
+
+    #[test]
+    fn test_latin_foreign_lyrics_produces_clean_translation() {
+        let val = serde_json::json!({
+            "src": "es",
+            "sentences": [
+                {
+                    "trans": "Slowly\n",
+                    "orig": "Despacito\n"
+                },
+                {
+                    "trans": "I want to breathe your neck slowly",
+                    "orig": "Quiero respirar tu cuello despacito"
+                }
+            ]
+        });
+
+        let (src_lang, trans, rom) = parse_gtx_chunk_json(&val).expect("parse gtx chunk");
+        assert_eq!(src_lang, "es");
+
+        let orig = "Despacito\nQuiero respirar tu cuello despacito";
+        let res = build_english_lyrics(orig, &src_lang, &trans, &rom);
+
+        assert!(!res.is_already_en);
+        assert_eq!(res.lines.len(), 2);
+
+        assert_eq!(res.lines[0].primary, "Slowly");
+        assert_eq!(res.lines[0].secondary, "");
+        assert!(!res.lines[0].is_spacer);
+
+        assert_eq!(res.lines[1].primary, "I want to breathe your neck slowly");
+        assert_eq!(res.lines[1].secondary, "");
+        assert!(!res.lines[1].is_spacer);
+    }
+
+    #[test]
+    fn test_already_english_lyrics_detected() {
+        let val = serde_json::json!({
+            "src": "en",
+            "sentences": [
+                {
+                    "trans": "Hello world\n",
+                    "orig": "Hello world\n"
+                },
+                {
+                    "trans": "This is an English song",
+                    "orig": "This is an English song"
+                }
+            ]
+        });
+
+        let (src_lang, trans, rom) = parse_gtx_chunk_json(&val).expect("parse gtx chunk");
+        assert_eq!(src_lang, "en");
+
+        let orig = "Hello world\nThis is an English song";
+        let res = build_english_lyrics(orig, &src_lang, &trans, &rom);
+
+        assert!(res.is_already_en);
+        assert!(res.lines.is_empty());
     }
 }
