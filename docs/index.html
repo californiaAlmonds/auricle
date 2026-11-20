@@ -3,520 +3,971 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Auricle — Native Windows Music Player</title>
-  <meta name="description" content="Auricle is a native Windows music player for the YouTube Music catalogue, with song, album, artist and playlist search, a local library, queue, autoplay and audio caching." />
-  <meta property="og:title" content="Auricle — Native Windows Music Player" />
-  <meta property="og:description" content="Search, build your local library, and keep listening in a native Rust and Slint app for Windows." />
+  <meta name="color-scheme" content="dark" />
+  <title>Auricle — Native Windows &amp; Android Music Player</title>
+  <meta name="description" content="Auricle is a fast, open-source music player for Windows (Rust + Slint) and Android (Kotlin + Compose + Rust) with dynamic Material You themes, split Now Playing with lyrics, Windows media controls, and cross-platform P2P Listen Together sync." />
+  <meta property="og:title" content="Auricle — Native Windows &amp; Android Music Player" />
+  <meta property="og:description" content="Native Rust + Slint desktop player and companion Android app with live P2P Listen Together sync, dynamic themes, lyrics, and local caching." />
   <meta property="og:image" content="https://californiaalmonds.github.io/auricle/screenshot.png" />
   <style>
     :root {
-      --bg: #0e0e10;
-      --surface: #1a1a1f;
-      --surface2: #24242c;
-      --accent: #e85d04;
-      --accent2: #f48c06;
-      --text: #e8e8ee;
-      --muted: #8888a0;
-      --radius: 10px;
+      color-scheme: dark;
+      --bg: #0c0a10;
+      --surface: #15121b;
+      --surface2: #1e1926;
+      --surface3: #272133;
+      --border: #2c2638;
+      --accent: #f43f5e;
+      --accent2: #fb7185;
+      --accent-glow: rgba(244, 63, 94, 0.22);
+      --text: #f2f0f7;
+      --muted: #9c95ad;
+      --radius: 14px;
+      --scrollbar-track: #121018;
+      --scrollbar-thumb: #3c344c;
+      scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+      accent-color: var(--accent);
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
+    html { scroll-behavior: smooth; }
+
     body {
       background: var(--bg);
       color: var(--text);
-      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
       line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
     }
 
     a { color: var(--accent2); text-decoration: none; }
     a:hover { text-decoration: underline; }
+    a:focus-visible, button:focus-visible {
+      outline: 2px solid var(--accent2);
+      outline-offset: 2px;
+    }
+
+    code {
+      background: var(--surface3);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.12rem 0.45rem;
+      font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+      font-size: 0.86em;
+      color: #ffd6de;
+    }
 
     /* ── Nav ── */
     nav {
       position: sticky;
       top: 0;
       z-index: 100;
-      background: rgba(14,14,16,0.92);
-      backdrop-filter: blur(10px);
-      border-bottom: 1px solid #2a2a35;
+      background: rgba(12, 10, 16, 0.88);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 0.75rem 2rem;
+      padding: 0.8rem 2rem;
     }
-    nav .logo { font-size: 1.25rem; font-weight: 700; color: var(--text); letter-spacing: 0.5px; }
-    nav .logo span { color: var(--accent); }
-    nav ul { list-style: none; display: flex; gap: 1.75rem; }
-    nav ul li a { color: var(--muted); font-size: 0.9rem; transition: color 0.2s; }
+    nav .logo {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.55rem;
+      font-size: 1.2rem;
+      font-weight: 800;
+      color: var(--text);
+      letter-spacing: -0.02em;
+    }
+    nav .logo-mark {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, var(--accent), #be123c);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.9rem;
+      color: #fff;
+      box-shadow: 0 4px 14px var(--accent-glow);
+    }
+    nav ul { list-style: none; display: flex; gap: 1.6rem; align-items: center; }
+    nav ul li a { color: var(--muted); font-size: 0.9rem; font-weight: 500; transition: color 0.15s; }
     nav ul li a:hover { color: var(--text); text-decoration: none; }
 
     /* ── Hero ── */
     .hero {
       text-align: center;
-      padding: 6rem 1.5rem 4rem;
-      background: radial-gradient(ellipse at 50% 0%, #2a1500 0%, var(--bg) 70%);
+      padding: 5rem 1.5rem 2.5rem;
+      background:
+        radial-gradient(ellipse 65% 45% at 50% 0%, rgba(244, 63, 94, 0.22) 0%, transparent 70%),
+        radial-gradient(ellipse 45% 35% at 80% 10%, rgba(139, 92, 246, 0.12) 0%, transparent 65%),
+        var(--bg);
     }
     .hero .badge {
-      display: inline-block;
-      background: var(--surface2);
-      border: 1px solid #3a3a48;
-      border-radius: 999px;
-      font-size: 0.78rem;
-      color: var(--muted);
-      padding: 0.3rem 0.9rem;
-      margin-bottom: 1.5rem;
-      letter-spacing: 0.4px;
-    }
-    .hero h1 {
-      font-size: clamp(2.2rem, 5vw, 3.5rem);
-      font-weight: 800;
-      line-height: 1.15;
-      margin-bottom: 1rem;
-    }
-    .hero h1 span { color: var(--accent); }
-    .hero p {
-      font-size: 1.1rem;
-      color: var(--muted);
-      max-width: 540px;
-      margin: 0 auto 2.5rem;
-    }
-    .btn-group { display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; }
-    .btn {
       display: inline-flex;
       align-items: center;
       gap: 0.5rem;
-      padding: 0.75rem 1.75rem;
-      border-radius: var(--radius);
-      font-size: 0.95rem;
-      font-weight: 600;
-      cursor: pointer;
-      transition: opacity 0.2s, transform 0.15s;
-    }
-    .btn:hover { opacity: 0.88; transform: translateY(-1px); text-decoration: none; }
-    .btn-primary { background: var(--accent); color: #fff; }
-    .btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid #3a3a48; }
-
-    /* ── Screenshot ── */
-    .screenshot-section {
-      padding: 2rem 1.5rem 4rem;
-      text-align: center;
-    }
-    .screenshot-frame {
-      display: inline-block;
-      background: var(--surface);
-      border: 1px solid #2a2a35;
-      border-radius: 14px;
-      padding: 1.25rem;
-      max-width: 800px;
-      width: 100%;
-      box-shadow: 0 24px 80px rgba(0,0,0,0.6);
-    }
-    .screenshot-placeholder {
       background: var(--surface2);
-      border-radius: 8px;
-      aspect-ratio: 16/9;
-      display: flex;
-      flex-direction: column;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      font-size: 0.8rem;
+      color: var(--muted);
+      padding: 0.35rem 1rem;
+      margin-bottom: 1.4rem;
+    }
+    .hero .badge strong { color: var(--text); font-weight: 600; }
+    .hero h1 {
+      font-size: clamp(2.4rem, 5.5vw, 3.8rem);
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      line-height: 1.1;
+      margin-bottom: 1rem;
+    }
+    .hero h1 span {
+      background: linear-gradient(135deg, #fff 15%, var(--accent2) 95%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .hero .lead {
+      font-size: 1.08rem;
+      color: var(--muted);
+      max-width: 640px;
+      margin: 0 auto 2.2rem;
+    }
+    .btn-group { display: flex; gap: 0.85rem; justify-content: center; flex-wrap: wrap; }
+    .btn {
+      display: inline-flex;
       align-items: center;
       justify-content: center;
-      color: var(--muted);
-      font-size: 0.9rem;
       gap: 0.5rem;
+      padding: 0.78rem 1.55rem;
+      border-radius: 10px;
+      font-size: 0.94rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.15s, background-color 0.15s, border-color 0.15s;
     }
-    .screenshot-placeholder svg { opacity: 0.35; }
+    .btn:hover { transform: translateY(-1px); text-decoration: none; }
+    .btn-primary {
+      background: var(--accent);
+      color: #fff;
+      box-shadow: 0 8px 24px var(--accent-glow);
+    }
+    .btn-primary:hover { background: #e11d48; }
+    .btn-secondary {
+      background: var(--surface2);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn-secondary:hover { background: var(--surface3); border-color: #463c5a; }
 
-    /* ── Section shared ── */
-    section { padding: 4rem 1.5rem; }
-    .container { max-width: 960px; margin: 0 auto; }
+    /* ── Live Stats Strip ── */
+    .stats-bar {
+      max-width: 860px;
+      margin: 2.5rem auto 0;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 0.85rem;
+    }
+    .stat-card {
+      background: rgba(21, 18, 27, 0.85);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 0.95rem 1rem;
+      text-align: center;
+    }
+    .stat-value {
+      font-size: 1.45rem;
+      font-weight: 800;
+      color: var(--text);
+      letter-spacing: -0.02em;
+      font-variant-numeric: tabular-nums;
+    }
+    .stat-label {
+      font-size: 0.78rem;
+      color: var(--muted);
+      margin-top: 0.15rem;
+    }
+    .dl-breakdown {
+      max-width: 860px;
+      margin: 0.75rem auto 0;
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      font-size: 0.76rem;
+      color: var(--muted);
+    }
+    .dl-chip {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 0.2rem 0.65rem;
+      font-variant-numeric: tabular-nums;
+    }
+    .dl-chip strong { color: var(--text); font-weight: 600; }
+
+    /* ── Screenshot Showcase Tabs ── */
+    .screenshot-section {
+      padding: 2rem 1.5rem 4.5rem;
+    }
+    .showcase-wrap {
+      max-width: 980px;
+      margin: 0 auto;
+    }
+    .tablist {
+      display: flex;
+      justify-content: center;
+      gap: 0.35rem;
+      overflow-x: auto;
+      scroll-snap-type: inline proximity;
+      margin-bottom: 1.25rem;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 0;
+    }
+    .tablist [role="tab"] {
+      position: relative;
+      flex: none;
+      scroll-snap-align: start;
+      background: transparent;
+      border: 0;
+      color: var(--muted);
+      font: inherit;
+      font-size: 0.92rem;
+      font-weight: 600;
+      padding: 0.7rem 1.15rem;
+      cursor: pointer;
+      transition: color 0.15s;
+    }
+    .tablist [role="tab"]:hover { color: var(--text); }
+    .tablist [role="tab"][aria-selected="true"] {
+      color: var(--text);
+    }
+    .tablist [role="tab"][aria-selected="true"]::after {
+      content: "";
+      position: absolute;
+      inset: auto 0 0;
+      border-block-end: 3px solid var(--accent);
+    }
+    .panels-grid {
+      display: grid;
+    }
+    .panels-grid > [role="tabpanel"] {
+      grid-area: 1 / 1;
+    }
+    .showcase-stage {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 0.85rem;
+      box-shadow: 0 28px 90px rgba(0, 0, 0, 0.65);
+    }
+    .showcase-stage img {
+      width: 100%;
+      height: auto;
+      border-radius: 10px;
+      display: block;
+    }
+    .showcase-caption {
+      text-align: center;
+      font-size: 0.84rem;
+      color: var(--muted);
+      padding: 0.7rem 0.5rem 0.2rem;
+    }
+
+    /* ── Shared Section ── */
+    section { padding: 4.25rem 1.5rem; }
+    .container { max-width: 1000px; margin: 0 auto; }
     .section-label {
-      font-size: 0.75rem;
+      font-size: 0.74rem;
       font-weight: 700;
-      letter-spacing: 1.5px;
+      letter-spacing: 1.6px;
       text-transform: uppercase;
-      color: var(--accent);
-      margin-bottom: 0.6rem;
+      color: var(--accent2);
+      margin-bottom: 0.55rem;
     }
     .section-title {
-      font-size: clamp(1.6rem, 3vw, 2.2rem);
-      font-weight: 700;
+      font-size: clamp(1.65rem, 3.2vw, 2.3rem);
+      font-weight: 800;
+      letter-spacing: -0.02em;
       margin-bottom: 0.75rem;
     }
-    .section-sub { color: var(--muted); max-width: 540px; margin-bottom: 3rem; }
+    .section-sub {
+      color: var(--muted);
+      max-width: 620px;
+      margin-bottom: 2.5rem;
+      font-size: 0.98rem;
+    }
 
     /* ── Features ── */
-    #features { background: var(--surface); }
+    #features { background: var(--surface); border-block: 1px solid var(--border); }
     .features-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-      gap: 1.25rem;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 1.15rem;
     }
     .feature-card {
       background: var(--surface2);
-      border: 1px solid #2e2e3a;
+      border: 1px solid var(--border);
       border-radius: var(--radius);
-      padding: 1.5rem;
-      transition: border-color 0.2s;
+      padding: 1.45rem;
+      transition: border-color 0.2s, transform 0.15s;
     }
-    .feature-card:hover { border-color: var(--accent); }
-    .feature-icon { font-size: 1.6rem; margin-bottom: 0.75rem; }
-    .feature-card h3 { font-size: 1rem; font-weight: 600; margin-bottom: 0.4rem; }
+    .feature-card:hover { border-color: rgba(244, 63, 94, 0.55); transform: translateY(-2px); }
+    .feature-badge {
+      display: inline-block;
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: var(--accent2);
+      background: rgba(244, 63, 94, 0.12);
+      border: 1px solid rgba(244, 63, 94, 0.28);
+      border-radius: 999px;
+      padding: 0.14rem 0.55rem;
+      margin-bottom: 0.65rem;
+    }
+    .feature-icon { font-size: 1.45rem; margin-bottom: 0.55rem; }
+    .feature-card h3 { font-size: 1.02rem; font-weight: 700; margin-bottom: 0.4rem; }
     .feature-card p { font-size: 0.88rem; color: var(--muted); }
 
-    /* ── How it works ── */
-    .steps { display: flex; gap: 0; flex-wrap: wrap; }
-    .step {
-      flex: 1;
-      min-width: 200px;
+    /* ── Android Section ── */
+    #android {
+      background: radial-gradient(ellipse 60% 50% at 85% 20%, rgba(139, 92, 246, 0.12) 0%, transparent 70%), var(--bg);
+    }
+    .android-layout {
+      display: grid;
+      grid-template-columns: 1fr 1.15fr;
+      gap: 2.5rem;
+      align-items: center;
+    }
+    .android-points {
+      list-style: none;
       display: flex;
-      gap: 1.25rem;
-      align-items: flex-start;
-      padding: 1.5rem;
+      flex-direction: column;
+      gap: 0.75rem;
+      margin-bottom: 1.75rem;
+    }
+    .android-points li {
+      font-size: 0.92rem;
+      color: #d6d1e3;
+      padding-left: 1.35rem;
       position: relative;
     }
-    .step:not(:last-child)::after {
-      content: '→';
+    .android-points li::before {
+      content: "✓";
       position: absolute;
-      right: -0.6rem;
-      top: 1.8rem;
+      left: 0;
+      color: var(--accent2);
+      font-weight: 700;
+    }
+    .android-gallery {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 0.85rem;
+    }
+    .phone-frame {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 0.45rem;
+      box-shadow: 0 18px 45px rgba(0, 0, 0, 0.5);
+    }
+    .phone-frame img {
+      width: 100%;
+      height: auto;
+      border-radius: 13px;
+      display: block;
+    }
+    .phone-frame figcaption {
+      text-align: center;
+      font-size: 0.75rem;
       color: var(--muted);
-      font-size: 1.2rem;
+      padding-top: 0.45rem;
+    }
+
+    /* ── How it works ── */
+    #how-it-works { background: var(--surface); border-block: 1px solid var(--border); }
+    .steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.25rem; }
+    .step {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.45rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
     }
     .step-num {
-      flex-shrink: 0;
-      width: 2.4rem;
-      height: 2.4rem;
+      width: 2.2rem;
+      height: 2.2rem;
       border-radius: 50%;
       background: var(--accent);
       color: #fff;
       font-weight: 800;
-      font-size: 1rem;
+      font-size: 0.95rem;
       display: flex;
       align-items: center;
       justify-content: center;
     }
-    .step-body h3 { font-size: 1rem; font-weight: 600; margin-bottom: 0.3rem; }
-    .step-body p { font-size: 0.88rem; color: var(--muted); }
+    .step h3 { font-size: 1rem; font-weight: 700; }
+    .step p { font-size: 0.88rem; color: var(--muted); }
 
     /* ── Download ── */
-    #download { background: radial-gradient(ellipse at 50% 100%, #2a1500 0%, var(--bg) 70%); text-align: center; }
+    #download {
+      background: radial-gradient(ellipse 70% 55% at 50% 100%, rgba(244, 63, 94, 0.2) 0%, var(--bg) 72%);
+      text-align: center;
+    }
     #download .section-sub { margin-left: auto; margin-right: auto; }
     .version-pill {
       display: inline-block;
       background: var(--surface2);
-      border: 1px solid #3a3a48;
+      border: 1px solid var(--border);
       border-radius: 999px;
-      padding: 0.3rem 1rem;
-      font-size: 0.82rem;
-      color: var(--muted);
+      padding: 0.35rem 1.05rem;
+      font-size: 0.84rem;
+      color: var(--text);
+      margin-bottom: 1.75rem;
+    }
+    .download-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1.25rem;
+      text-align: left;
       margin-bottom: 1.5rem;
     }
+    .download-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.6rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.9rem;
+    }
+    .download-box h3 { font-size: 1.12rem; font-weight: 700; }
+    .download-box p { font-size: 0.88rem; color: var(--muted); }
+    .download-box .btn-group { justify-content: flex-start; margin-top: auto; }
+    .pkg-managers {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.25rem 1.5rem;
+      text-align: left;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 1rem;
+    }
+    .pkg-item h4 { font-size: 0.82rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 0.4rem; }
+    .pkg-item code { display: block; padding: 0.45rem 0.65rem; font-size: 0.79rem; overflow-x: auto; white-space: nowrap; }
     .download-note {
       margin-top: 1.25rem;
       font-size: 0.82rem;
       color: var(--muted);
     }
 
+    /* ── Why / Story ── */
+    #why-auricle { background: var(--surface); border-top: 1px solid var(--border); }
+    .story-copy { display: flex; flex-direction: column; gap: 0.95rem; max-width: 720px; color: var(--muted); font-size: 0.96rem; }
+
     /* ── Tech Stack ── */
-    #tech { background: var(--surface); }
-    .tech-grid {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.75rem;
-    }
+    #tech { background: var(--bg); }
+    .tech-grid { display: flex; flex-wrap: wrap; gap: 0.65rem; }
     .tech-badge {
       background: var(--surface2);
-      border: 1px solid #2e2e3a;
+      border: 1px solid var(--border);
       border-radius: 999px;
-      padding: 0.4rem 1rem;
-      font-size: 0.85rem;
-      display: flex;
+      padding: 0.42rem 0.95rem;
+      font-size: 0.84rem;
+      display: inline-flex;
       align-items: center;
-      gap: 0.4rem;
+      gap: 0.45rem;
     }
     .tech-badge .dot {
-      width: 8px; height: 8px;
+      width: 7px;
+      height: 7px;
       border-radius: 50%;
       background: var(--accent);
     }
 
     /* ── FAQ ── */
-    .faq-list { display: flex; flex-direction: column; gap: 1rem; }
+    #faq { background: var(--surface); border-top: 1px solid var(--border); }
+    .faq-list { display: flex; flex-direction: column; gap: 0.9rem; }
     .faq-item {
-      background: var(--surface);
-      border: 1px solid #2e2e3a;
+      background: var(--surface2);
+      border: 1px solid var(--border);
       border-radius: var(--radius);
       padding: 1.25rem 1.5rem;
     }
-    .faq-item h3 { font-size: 0.95rem; font-weight: 600; margin-bottom: 0.4rem; }
+    .faq-item h3 { font-size: 0.97rem; font-weight: 700; margin-bottom: 0.4rem; }
     .faq-item p { font-size: 0.88rem; color: var(--muted); }
-
-    /* ── Contribute ── */
-    #contribute { background: var(--surface); text-align: center; }
-    #contribute .section-sub { margin-left: auto; margin-right: auto; }
 
     /* ── Footer ── */
     footer {
       background: var(--bg);
-      border-top: 1px solid #1e1e28;
+      border-top: 1px solid var(--border);
       padding: 2.5rem 1.5rem;
       text-align: center;
       color: var(--muted);
-      font-size: 0.85rem;
+      font-size: 0.84rem;
     }
-    footer .footer-links { display: flex; gap: 1.5rem; justify-content: center; margin-bottom: 1rem; flex-wrap: wrap; }
+    footer .footer-links { display: flex; gap: 1.4rem; justify-content: center; margin-bottom: 0.9rem; flex-wrap: wrap; }
     footer .footer-links a { color: var(--muted); }
     footer .footer-links a:hover { color: var(--text); }
 
-    @media (max-width: 600px) {
+    @media (max-width: 860px) {
+      .android-layout { grid-template-columns: 1fr; }
+      .download-grid, .pkg-managers, .steps { grid-template-columns: 1fr; }
+      .stats-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 620px) {
       nav ul { display: none; }
-      .step:not(:last-child)::after { display: none; }
+      .hero { padding-top: 3.5rem; }
+      .android-gallery { gap: 0.5rem; }
     }
   </style>
 </head>
 <body>
 
-<!-- ── Navigation ── -->
 <nav>
-  <div class="logo">🎵 <span>Auricle</span></div>
+  <a class="logo" href="#">
+    <span class="logo-mark" aria-hidden="true">♫</span>
+    <span>Auricle</span>
+  </a>
   <ul>
     <li><a href="#features">Features</a></li>
-    <li><a href="#how-it-works">How it works</a></li>
+    <li><a href="#android">Android</a></li>
     <li><a href="#download">Download</a></li>
     <li><a href="#faq">FAQ</a></li>
-    <li><a href="https://github.com/californiaAlmonds/auricle" target="_blank">GitHub ↗</a></li>
+    <li><a href="https://github.com/californiaAlmonds/auricle" target="_blank" rel="noopener">Windows GitHub ↗</a></li>
+    <li><a href="https://github.com/californiaAlmonds/auricle-android" target="_blank" rel="noopener">Android GitHub ↗</a></li>
   </ul>
 </nav>
 
-<!-- ── Hero ── -->
-<section class="hero">
-  <div class="badge">🪟 Windows · Free &amp; Open Source · GPLv3</div>
-  <h1>Auricle</h1>
-  <p>
-    A native Windows music player for the YouTube Music catalogue.
-    Search songs, albums, artists and playlists, build your local library,
-    and keep listening with a queue, autoplay and audio caching.
-    Built with Rust and Slint, without Electron or an embedded web view.
-  </p>
-  <div class="btn-group">
-    <a class="btn btn-primary" href="https://github.com/californiaAlmonds/auricle/releases/latest">
-      ⬇ Download for Windows
-    </a>
-    <a class="btn btn-secondary" href="https://github.com/californiaAlmonds/auricle">
-      ★ View on GitHub
-    </a>
-  </div>
-</section>
-
-<!-- ── Screenshot ── -->
-<div class="screenshot-section">
-  <div class="screenshot-frame">
-    <img src="screenshot.png" alt="Auricle running on Windows" style="width:100%;border-radius:8px;display:block;" />
-  </div>
-</div>
-
-<section id="why-auricle">
-  <div class="container">
-    <div class="section-label">Behind the project</div>
-    <h2 class="section-title">Why I built Auricle</h2>
-    <p class="section-sub">Spotify and Apple Music's Windows apps often used more resources than I wanted while gaming or streaming. The open-source alternatives I tried never quite had the interface and features I wanted, so I started building Auricle with Rust and Slint.</p>
-    <p class="section-sub">My goals are low resource usage, a good interface, and useful features. It's early and Windows-only, with Linux something I'd like to explore once a few people have tested it. Efficiency is a goal, not a benchmark claim.</p>
-    <p class="section-sub">Feedback on usability, search, queue behavior, and CPU or memory usage is welcome through <a href="https://github.com/californiaAlmonds/auricle/issues">GitHub issues</a>.</p>
-    <p class="section-sub">Before downloading: the unsigned 0.1.4 installer had three antivirus detections in our September 15, 2026 scan, with vendor reviews pending. The installed and portable executables had no detections in separate scans, but that is not a safety guarantee. Do not disable antivirus protection to test Auricle.</p>
-  </div>
-</section>
-
-<!-- ── Features ── -->
-<section id="features">
-  <div class="container">
-    <div class="section-label">Features</div>
-    <h2 class="section-title">Search, collect, and keep listening</h2>
-    <p class="section-sub">A native desktop player with a library that stays on your device.</p>
-    <div class="features-grid">
-      <div class="feature-card">
-        <div class="feature-icon">🔍</div>
-        <h3>Catalogue Search</h3>
-        <p>Find songs, albums, artists and playlists with suggestions, mixed previews and dedicated result tabs.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">📋</div>
-        <h3>Queue &amp; Autoplay</h3>
-        <p>Choose what plays next, manage queued tracks, and continue listening with related music.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">❤️</div>
-        <h3>Your Local Library</h3>
-        <p>Follow artists, save albums and playlists, and revisit liked songs and listening history on your device.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">⌨️</div>
-        <h3>Right-Click Actions</h3>
-        <p>Open artist and album pages, explore track credits, and manage playback and queue actions from context menus.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">💾</div>
-        <h3>Local Audio Cache</h3>
-        <p>A size-limited on-disk cache reuses recently played audio. The default cache limit is 500 MB.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">🪶</div>
-        <h3>Native &amp; Lightweight</h3>
-        <p>Built in Rust with the Slint UI toolkit, without Electron or an embedded browser.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">🔔</div>
-        <h3>System Tray</h3>
-        <p>Minimize to tray and keep music running in the background without cluttering your taskbar.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">🔓</div>
-        <h3>Open Source</h3>
-        <p>Licensed under GPLv3. Inspect the code, contribute, or fork it freely.</p>
-      </div>
+<main>
+  <!-- ── Hero ── -->
+  <section class="hero">
+    <div class="badge">
+      <strong>v0.3.0</strong> · Windows &amp; Android · Free &amp; Open Source (GPLv3)
     </div>
-  </div>
-</section>
-
-<!-- ── How it works ── -->
-<section id="how-it-works">
-  <div class="container">
-    <div class="section-label">How it works</div>
-    <h2 class="section-title">Up and running in minutes</h2>
-    <p class="section-sub">Three steps from download to your first song.</p>
-    <div class="steps">
-      <div class="step">
-        <div class="step-num">1</div>
-        <div class="step-body">
-          <h3>Download Auricle</h3>
-          <p>Grab the latest <code>.exe</code> installer from the GitHub Releases page — no account needed.</p>
-        </div>
-      </div>
-      <div class="step">
-        <div class="step-num">2</div>
-        <div class="step-body">
-          <h3>Install add-ons</h3>
-          <p>On first launch, optionally install <strong>yt-dlp</strong>, <strong>ffmpeg</strong> and <strong>Deno</strong> with one click from the onboarding screen — or point to your own installation. Auricle keeps yt-dlp updated automatically.</p>
-        </div>
-      </div>
-      <div class="step">
-        <div class="step-num">3</div>
-        <div class="step-body">
-          <h3>Search &amp; play</h3>
-          <p>Find a song, artist, album or playlist. Start playback, build your queue, or save music to your local library.</p>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ── Download ── -->
-<section id="download">
-  <div class="container">
-    <div class="section-label">Download</div>
-    <h2 class="section-title">Get Auricle</h2>
-    <p class="section-sub">Free, open source, and available now for Windows.</p>
-    <div class="version-pill">Version 0.1.7</div>
-    <div class="btn-group" style="justify-content:center">
-      <a class="btn btn-primary" href="https://github.com/californiaAlmonds/auricle/releases/latest">
-        ⬇ Download Latest Release
-      </a>
-      <a class="btn btn-secondary" href="https://sourceforge.net/projects/auricle/" target="_blank">
-        <img alt="Download auricle" src="https://sourceforge.net/sflogo.php?type=18&amp;group_id=4109074" width=200>
-      </a>
-      <a class="btn btn-secondary" href="https://github.com/californiaAlmonds/auricle/releases">
-        📦 All Releases
-      </a>
-    </div>
-    <p class="download-note">Windows 10/11, 64-bit. Installer and portable ZIP available. No Visual C++ Redistributable needed. Streaming requires optional third-party add-ons.</p>
-  </div>
-</section>
-
-<!-- ── Tech Stack ── -->
-<section id="tech">
-  <div class="container">
-    <div class="section-label">Tech Stack</div>
-    <h2 class="section-title">Built on solid foundations</h2>
-    <p class="section-sub" style="margin-bottom:2rem">A Rust application with a native Slint interface and local data storage.</p>
-    <div class="tech-grid">
-      <div class="tech-badge"><span class="dot"></span> Rust</div>
-      <div class="tech-badge"><span class="dot"></span> Slint UI</div>
-      <div class="tech-badge"><span class="dot"></span> Tokio (async runtime)</div>
-      <div class="tech-badge"><span class="dot"></span> rodio + symphonia (audio)</div>
-      <div class="tech-badge"><span class="dot"></span> ytmapi-rs (YouTube Music API)</div>
-      <div class="tech-badge"><span class="dot"></span> JSON (local metadata)</div>
-      <div class="tech-badge"><span class="dot"></span> LRU audio cache</div>
-      <div class="tech-badge"><span class="dot"></span> yt-dlp (stream extraction)</div>
-    </div>
-  </div>
-</section>
-
-<!-- ── FAQ ── -->
-<section id="faq">
-  <div class="container">
-    <div class="section-label">FAQ</div>
-    <h2 class="section-title">Common questions</h2>
-    <p class="section-sub" style="margin-bottom:2rem">Can't find an answer? Open an issue on GitHub.</p>
-    <div class="faq-list">
-      <div class="faq-item">
-        <h3>Does Auricle bundle or distribute yt-dlp / ffmpeg / Deno?</h3>
-        <p>No. Auricle never bundles third-party tools. The in-app add-on installer downloads yt-dlp, ffmpeg and Deno directly from their official GitHub releases on your behalf, with your consent. You can also point Auricle to your own existing installation via PATH. Once yt-dlp is installed, Auricle updates it automatically in the background at most once a week.</p>
-      </div>
-      <div class="faq-item">
-        <h3>What data does Auricle collect?</h3>
-        <p>None is sent to the developer: there are no accounts, telemetry or analytics. Your library, history and settings stay on your PC, and searches and playback go directly to YouTube and Google. Read the <a href="privacy.html">privacy policy</a> for details. Browser cookies are never used unless you turn them on in Settings, and logs are only shared if you choose Report a problem.</p>
-      </div>
-      <div class="faq-item">
-        <h3>Is it safe to use?</h3>
-        <p>Auricle is an early, open-source release under GPLv3. Review the source and release notes before installing. Network access is used for music metadata, artwork and playback, optional add-on downloads, and update checks in the portable build. Auricle is not affiliated with YouTube or Google.</p>
-      </div>
-      <div class="faq-item">
-        <h3>What Windows versions are supported?</h3>
-        <p>The installer and portable build target 64-bit Windows 10 and 11. Building from source also requires Rust and the MSVC C++ Build Tools.</p>
-      </div>
-      <div class="faq-item">
-        <h3>Does it work without a YouTube Premium account?</h3>
-        <p>Auricle searches the public YouTube Music catalogue without an in-app account. Playback depends on optional add-ons and the source service; availability and regional restrictions can vary.</p>
-      </div>
-      <div class="faq-item">
-        <h3>How do I build from source?</h3>
-        <p>You need a current stable Rust toolchain and the MSVC C++ Build Tools. Clone the repo and run <code>cargo run --bin auricle</code> or use <code>npm run run</code> for convenience.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ── Contribute ── -->
-<section id="contribute">
-  <div class="container">
-    <div class="section-label">Contribute</div>
-    <h2 class="section-title">Help make Auricle better</h2>
-    <p class="section-sub">
-      Auricle follows a <code>feature → release/x.y.z → main</code> branch model.
-      Check out the contributing guide before opening a pull request.
+    <h1><span>Auricle</span></h1>
+    <p class="lead">
+      A fast, native music player for the YouTube Music catalogue on Windows (Rust + Slint)
+      and Android (Kotlin + Compose + Rust). Enjoy dynamic Material You themes, split Now Playing
+      with sing-along lyrics, local audio caching, and real-time P2P Listen Together sync across devices.
     </p>
-    <div class="btn-group" style="justify-content:center">
-      <a class="btn btn-primary" href="https://github.com/californiaAlmonds/auricle/blob/main/CONTRIBUTING.md">
-        📖 Read Contributing Guide
+    <div class="btn-group">
+      <a class="btn btn-primary" href="https://github.com/californiaAlmonds/auricle/releases/latest">
+        ⬇ Download for Windows
       </a>
-      <a class="btn btn-secondary" href="https://github.com/californiaAlmonds/auricle/issues">
-        🐛 Report an Issue
+      <a class="btn btn-secondary" href="https://github.com/californiaAlmonds/auricle-android/releases/latest">
+        📱 Download for Android
+      </a>
+      <a class="btn btn-secondary" href="https://github.com/californiaAlmonds/auricle">
+        ★ View on GitHub
       </a>
     </div>
-  </div>
-</section>
 
-<!-- ── Footer ── -->
+    <!-- ── Live Stats Bar ── -->
+    <div class="stats-bar" aria-label="Project statistics">
+      <div class="stat-card">
+        <div class="stat-value" id="total-downloads">620+</div>
+        <div class="stat-label">Total Downloads</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value">v0.3.0</div>
+        <div class="stat-label">Latest Release</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value">Win + Android</div>
+        <div class="stat-label">P2P Party Sync</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value">0 Trackers</div>
+        <div class="stat-label">GPLv3 Open Source</div>
+      </div>
+    </div>
+    <div class="dl-breakdown" id="dl-breakdown" aria-label="Downloads by platform">
+      <span class="dl-chip">Windows GitHub: <strong id="dl-gh-win">387</strong></span>
+      <span class="dl-chip">Android GitHub: <strong id="dl-gh-android">8</strong></span>
+      <span class="dl-chip">SourceForge: <strong id="dl-sf">74</strong></span>
+      <span class="dl-chip">Chocolatey: <strong id="dl-choco">151</strong></span>
+    </div>
+  </section>
+
+  <!-- ── Screenshot Showcase ── -->
+  <div class="screenshot-section">
+    <div class="showcase-wrap">
+      <div class="tablist" role="tablist" focusgroup="tablist nomemory" aria-label="Windows screenshots">
+        <button type="button" role="tab" id="tab-home" aria-selected="true" focusgroupstart>Home &amp; Discovery</button>
+        <button type="button" role="tab" id="tab-np" aria-selected="false">Split Now Playing</button>
+        <button type="button" role="tab" id="tab-party" aria-selected="false">Listen Together Party</button>
+      </div>
+      <div class="panels-grid">
+        <div role="tabpanel" aria-labelledby="tab-home" tabindex="0">
+          <div class="showcase-stage">
+            <img src="screenshot.png" alt="Auricle 0.3.0 Home view on Windows with Curated From Your Taste hero, Trending Now, sidebar library, and Party button" width="1200" height="790" fetchpriority="high" />
+            <p class="showcase-caption">Modernized Rust + Slint desktop shell with Material You dynamic accents, personalized taste hero, and collapsible sidebar.</p>
+          </div>
+        </div>
+        <div role="tabpanel" aria-labelledby="tab-np" hidden="until-found">
+          <div class="showcase-stage">
+            <img src="screenshot-now-playing.jpg" alt="Auricle 0.3.0 Split Now Playing view on Windows with high-res album art, dynamic color theme, and Up Next, Lyrics, and Related tabs" width="1440" height="810" fetchpriority="low" loading="lazy" />
+            <p class="showcase-caption">Split Now Playing stage with album-driven Oklab color themes, Up Next queue, live Lyrics (with English sing-along toggle), and Related tracks.</p>
+          </div>
+        </div>
+        <div role="tabpanel" aria-labelledby="tab-party" hidden="until-found">
+          <div class="showcase-stage">
+            <img src="screenshot-party.jpg" alt="Auricle 0.3.0 Listen Together Party modal on Windows for hosting or joining a synced session with an auricle://party link" width="1200" height="790" fetchpriority="low" loading="lazy" />
+            <p class="showcase-caption">Host or join a live cross-platform Party between Windows and Android via shareable <code>auricle://party/...</code> links — peer-to-peer with zero servers.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Features ── -->
+  <section id="features">
+    <div class="container">
+      <div class="section-label">What's in 0.3.0</div>
+      <h2 class="section-title">Everything you need to listen — without the bloat</h2>
+      <p class="section-sub">A native desktop player designed for low resource usage, responsive playback, and local-first privacy.</p>
+      <div class="features-grid">
+        <div class="feature-card">
+          <span class="feature-badge">New in 0.3.0</span>
+          <div class="feature-icon">🎧</div>
+          <h3>Listen Together (P2P Party)</h3>
+          <p>Sync playback, seek position, and queues live between Windows and Android over encrypted Iroh QUIC connections with relay fallback — no central servers or accounts.</p>
+        </div>
+        <div class="feature-card">
+          <span class="feature-badge">New in 0.3.0</span>
+          <div class="feature-icon">🎨</div>
+          <h3>Dynamic Material You Themes</h3>
+          <p>Smooth Oklab accent animations derived from the current album cover, glassmorphic surfaces, and low-CPU idle redraws.</p>
+        </div>
+        <div class="feature-card">
+          <span class="feature-badge">New in 0.3.0</span>
+          <div class="feature-icon">🎤</div>
+          <h3>Split Now Playing &amp; Lyrics</h3>
+          <p>Dedicated Now Playing stage pairing full-size artwork with Up Next, Lyrics (plus an English sing-along toggle), track credits, and Related music.</p>
+        </div>
+        <div class="feature-card">
+          <span class="feature-badge">New in 0.3.0</span>
+          <div class="feature-icon">🎛️</div>
+          <h3>Windows Media Keys &amp; Device Follow</h3>
+          <p>Native Windows media flyout (SMTC), hardware play/pause/skip keys, and seamless switchover when plugging or unplugging headphones or Bluetooth audio.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🔍</div>
+          <h3>Catalogue Search &amp; Discographies</h3>
+          <p>Search songs, albums, artists, and playlists with history, mixed previews, and popularity-ranked artist discography shelves with type filters.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">📋</div>
+          <h3>Smart Queue, Shuffle &amp; Autoplay</h3>
+          <p>Manage upcoming tracks with user-queue shuffle, repeat modes (off / all / one), preserved queues, and continuously topped-up related autoplay.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">❤️</div>
+          <h3>Local Library &amp; LRU Audio Cache</h3>
+          <p>Keep liked songs, playlists, followed artists, saved albums, and history on your PC alongside a size-limited audio cache (500 MB default).</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🪶</div>
+          <h3>Native Rust, Tray &amp; Privacy-First</h3>
+          <p>Built with Rust and Slint (no Electron), minimize-to-tray background playback, strict TLS, opt-in browser cookies, and zero telemetry.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Android Companion ── -->
+  <section id="android">
+    <div class="container">
+      <div class="android-layout">
+        <div>
+          <div class="section-label">Companion App</div>
+          <h2 class="section-title">Auricle for Android</h2>
+          <p class="section-sub" style="margin-bottom:1.5rem">
+            Take Auricle on mobile with our open-source Android companion built with Kotlin,
+            Jetpack Compose, Media3, and the same Rust Iroh P2P engine as Windows.
+          </p>
+          <ul class="android-points">
+            <li><strong>Cross-platform Party Sync:</strong> Join a Windows host from your phone (or host from Android) with ~20 ms P2P clock sync.</li>
+            <li><strong>Adaptive Material You UI:</strong> Full-bleed Now Playing, synced lyrics, dark &amp; light themes, and background Media3 playback.</li>
+            <li><strong>Zero Play Services &amp; Zero Trackers:</strong> Signed GPLv3 APKs (<code>arm64-v8a</code>, <code>universal</code>, and <code>x86_64</code>) verified with <code>SHA256SUMS.txt</code>.</li>
+          </ul>
+          <div class="btn-group" style="justify-content:flex-start">
+            <a class="btn btn-primary" href="https://github.com/californiaAlmonds/auricle-android/releases/latest">
+              ⬇ Download Android APK
+            </a>
+            <a class="btn btn-secondary" href="https://github.com/californiaAlmonds/auricle-android">
+              ★ Android Repository ↗
+            </a>
+          </div>
+        </div>
+        <div class="android-gallery">
+          <figure class="phone-frame">
+            <img src="android-home.jpg" alt="Auricle for Android Home screen in dark mode" width="480" height="1067" loading="lazy" />
+            <figcaption>Home</figcaption>
+          </figure>
+          <figure class="phone-frame">
+            <img src="android-now-playing.jpg" alt="Auricle for Android Now Playing screen with dynamic artwork gradient" width="480" height="1067" loading="lazy" />
+            <figcaption>Now Playing</figcaption>
+          </figure>
+          <figure class="phone-frame">
+            <img src="android-party.jpg" alt="Auricle for Android Listening Party synced with a Windows desktop host" width="480" height="1067" loading="lazy" />
+            <figcaption>Party Sync</figcaption>
+          </figure>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── How it works ── -->
+  <section id="how-it-works">
+    <div class="container">
+      <div class="section-label">Getting Started</div>
+      <h2 class="section-title">Up and running in minutes</h2>
+      <p class="section-sub">Three quick steps on Windows — or install the APK directly on Android.</p>
+      <div class="steps">
+        <div class="step">
+          <div class="step-num">1</div>
+          <h3>Download Auricle</h3>
+          <p>Install via GitHub Releases, SourceForge, WinGet, Scoop, or Chocolatey — no account or Visual C++ Redistributable required.</p>
+        </div>
+        <div class="step">
+          <div class="step-num">2</div>
+          <h3>Install optional add-ons</h3>
+          <p>On Windows first launch, optionally install <strong>yt-dlp</strong>, <strong>ffmpeg</strong>, and <strong>Deno</strong> with one click from their official GitHub releases, or use your own on <code>PATH</code>.</p>
+        </div>
+        <div class="step">
+          <div class="step-num">3</div>
+          <h3>Listen solo or together</h3>
+          <p>Search the catalogue, build your local library, or click <strong>Party</strong> to share an invite link and listen in sync with friends across Windows and Android.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Download ── -->
+  <section id="download">
+    <div class="container">
+      <div class="section-label">Download</div>
+      <h2 class="section-title">Get Auricle</h2>
+      <p class="section-sub">Free, open source, and synced across Windows and Android.</p>
+      <div class="version-pill">Version 0.3.0 · Windows 10/11 (64-bit) &amp; Android 8.0+</div>
+
+      <div class="download-grid">
+        <div class="download-box">
+          <h3>🪟 Windows Desktop</h3>
+          <p>Choose the standard <code>setup.exe</code> installer or the self-updating portable ZIP. Also mirrored on SourceForge alongside matching Android APKs.</p>
+          <div class="btn-group">
+            <a class="btn btn-primary" href="https://github.com/californiaAlmonds/auricle/releases/latest">GitHub Releases</a>
+            <a class="btn btn-secondary" href="https://sourceforge.net/projects/auricle/files/" target="_blank" rel="noopener">SourceForge</a>
+          </div>
+        </div>
+        <div class="download-box">
+          <h3>🤖 Android Companion</h3>
+          <p>Signed APKs for <code>arm64-v8a</code> (recommended for modern phones), <code>universal</code>, and <code>x86_64</code> — also mirrored inside each SourceForge version folder.</p>
+          <div class="btn-group">
+            <a class="btn btn-primary" href="https://github.com/californiaAlmonds/auricle-android/releases/latest">Android Releases</a>
+            <a class="btn btn-secondary" href="https://github.com/californiaAlmonds/auricle-android">Android Source ↗</a>
+          </div>
+        </div>
+      </div>
+
+      <div class="pkg-managers" aria-label="Windows package managers">
+        <div class="pkg-item">
+          <h4>WinGet</h4>
+          <code>winget install californiaAlmonds.Auricle</code>
+        </div>
+        <div class="pkg-item">
+          <h4>Chocolatey</h4>
+          <code>choco install auricle</code>
+        </div>
+        <div class="pkg-item">
+          <h4>Scoop</h4>
+          <code>scoop bucket add auricle https://github.com/californiaAlmonds/scoop-auricle &amp;&amp; scoop install auricle</code>
+        </div>
+      </div>
+
+      <p class="download-note">Windows 10/11 64-bit requires no Visual C++ Redistributable. Streaming on Windows uses optional third-party add-ons. Android requires Android 8.0 (API 26)+.</p>
+    </div>
+  </section>
+
+  <!-- ── Behind the project ── -->
+  <section id="why-auricle">
+    <div class="container">
+      <div class="section-label">Behind the project</div>
+      <h2 class="section-title">Why I built Auricle</h2>
+      <div class="story-copy">
+        <p>Mainstream desktop music apps often used far more RAM and GPU than I wanted while gaming or working. The open-source options I tried either relied on heavy embedded browsers or missed features I cared about, so I built Auricle in Rust and Slint — and later paired it with a native Android companion that syncs peer-to-peer.</p>
+        <p>The goal is a clean, responsive player with low background overhead, zero accounts, and zero hosted servers. Feedback on usability, playback, Party sync, or resource usage is always welcome via <a href="https://github.com/californiaAlmonds/auricle/issues">Windows issues</a> or <a href="https://github.com/californiaAlmonds/auricle-android/issues">Android issues</a>.</p>
+        <p><strong>Unsigned Windows builds note:</strong> Because Auricle is an indie open-source release without a commercial Authenticode certificate yet, Windows SmartScreen or heuristic antivirus scanners may warn on the installer. You can verify checksums, inspect the source code, or build from source — never disable antivirus protection to test software.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Tech Stack ── -->
+  <section id="tech">
+    <div class="container">
+      <div class="section-label">Tech Stack</div>
+      <h2 class="section-title">Built on native foundations</h2>
+      <p class="section-sub" style="margin-bottom:2rem">Shared Rust networking and P2P sync powering native Windows and Android shells.</p>
+      <div class="tech-grid">
+        <div class="tech-badge"><span class="dot"></span> Rust</div>
+        <div class="tech-badge"><span class="dot"></span> Slint UI (Windows)</div>
+        <div class="tech-badge"><span class="dot"></span> Kotlin + Jetpack Compose (Android)</div>
+        <div class="tech-badge"><span class="dot"></span> Iroh QUIC P2P (Listen Together)</div>
+        <div class="tech-badge"><span class="dot"></span> rodio + symphonia (Windows audio)</div>
+        <div class="tech-badge"><span class="dot"></span> AndroidX Media3 (Android audio)</div>
+        <div class="tech-badge"><span class="dot"></span> souvlaki (Windows SMTC)</div>
+        <div class="tech-badge"><span class="dot"></span> ytmapi-rs + NewPipeExtractor</div>
+        <div class="tech-badge"><span class="dot"></span> Tokio async runtime</div>
+        <div class="tech-badge"><span class="dot"></span> Local JSON + LRU audio cache</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── FAQ ── -->
+  <section id="faq">
+    <div class="container">
+      <div class="section-label">FAQ</div>
+      <h2 class="section-title">Common questions</h2>
+      <p class="section-sub" style="margin-bottom:2rem">Can't find an answer? Open an issue on GitHub.</p>
+      <div class="faq-list">
+        <div class="faq-item">
+          <h3>How does Listen Together (Party Sync) work without a server?</h3>
+          <p>Party Sync uses <a href="https://www.iroh.computer/" target="_blank" rel="noopener">Iroh</a> encrypted peer-to-peer QUIC connections with automatic relay fallback across Wi-Fi and mobile data. Starting a Party generates a private <code>auricle://party/...</code> invite link containing a random room secret; only playback commands, timestamps, and track IDs are synced between peers.</p>
+        </div>
+        <div class="faq-item">
+          <h3>Does Auricle bundle or distribute yt-dlp / ffmpeg / Deno?</h3>
+          <p>No. On Windows, Auricle never bundles third-party tools. The optional in-app installer downloads yt-dlp, ffmpeg, and Deno directly from their official GitHub releases with your consent, or you can use your own copies on <code>PATH</code>. Once yt-dlp is installed, Auricle keeps it updated at most once a week in the background.</p>
+        </div>
+        <div class="faq-item">
+          <h3>What data does Auricle collect?</h3>
+          <p>None is sent to the developer: there are no accounts, telemetry, or analytics. Your library, history, and settings stay on your device. Read the <a href="privacy.html">privacy policy</a> for full details. Browser cookies are off by default unless you enable them in Settings.</p>
+        </div>
+        <div class="faq-item">
+          <h3>How do I build from source?</h3>
+          <p>Windows requires Rust &ge; 1.91 and the MSVC C++ Build Tools; clone <a href="https://github.com/californiaAlmonds/auricle">californiaAlmonds/auricle</a> and run <code>cargo run --bin auricle</code>. Android build steps (Gradle + <code>cargo-ndk</code>) are documented in <a href="https://github.com/californiaAlmonds/auricle-android">californiaAlmonds/auricle-android</a>.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
 <footer>
   <div class="footer-links">
-    <a href="https://github.com/californiaAlmonds/auricle">GitHub</a>
+    <a href="https://github.com/californiaAlmonds/auricle">Windows GitHub</a>
+    <a href="https://github.com/californiaAlmonds/auricle-android">Android GitHub</a>
     <a href="https://github.com/californiaAlmonds/auricle/releases">Releases</a>
+    <a href="https://sourceforge.net/projects/auricle/files/">SourceForge</a>
     <a href="https://github.com/californiaAlmonds/auricle/blob/main/CONTRIBUTING.md">Contributing</a>
     <a href="https://github.com/californiaAlmonds/auricle/blob/main/LICENSE">License (GPLv3)</a>
-    <a href="https://github.com/californiaAlmonds/auricle/issues">Issues</a>
     <a href="privacy.html">Privacy</a>
   </div>
   <p>© 2026 Auricle contributors · Licensed under GPLv3 · Not affiliated with YouTube or Google</p>
 </footer>
 
+<script>
+  // Accessible screenshot showcase tabs (selection follows focus + find-in-page beforematch sync)
+  (() => {
+    const tablist = document.querySelector('[role="tablist"]');
+    if (!tablist) return;
+    const tabs = [...tablist.querySelectorAll('[role="tab"]')];
+    const panels = tabs.map((tab) => document.querySelector(`[role="tabpanel"][aria-labelledby="${tab.id}"]`));
+
+    function selectTab(index, moveFocus = false) {
+      tabs.forEach((tab, i) => {
+        const active = i === index;
+        tab.setAttribute('aria-selected', String(active));
+        tab.toggleAttribute('focusgroupstart', active);
+        tab.tabIndex = active ? 0 : -1;
+        const panel = panels[i];
+        if (panel) {
+          if (active) {
+            panel.hidden = false;
+            panel.tabIndex = 0;
+          } else {
+            panel.hidden = 'until-found';
+            panel.removeAttribute('tabindex');
+          }
+        }
+      });
+      if (moveFocus) tabs[index].focus();
+      tabs[index].scrollIntoView({ block: 'nearest', inline: 'nearest', container: 'nearest' });
+    }
+
+    tabs.forEach((tab, i) => {
+      tab.tabIndex = i === 0 ? 0 : -1;
+      tab.addEventListener('click', () => selectTab(i));
+      tab.addEventListener('keydown', (e) => {
+        let next = null;
+        if (e.key === 'ArrowRight') next = (i + 1) % tabs.length;
+        else if (e.key === 'ArrowLeft') next = (i - 1 + tabs.length) % tabs.length;
+        else if (e.key === 'Home') next = 0;
+        else if (e.key === 'End') next = tabs.length - 1;
+        if (next !== null) {
+          e.preventDefault();
+          selectTab(next, true);
+        }
+      });
+      const panel = panels[i];
+      if (panel) {
+        panel.addEventListener('beforematch', () => selectTab(i));
+      }
+    });
+  })();
+
+  // Background fetch of live download totals (deprioritized so hero/LCP never contend)
+  (() => {
+    const sources = [
+      { id: 'dl-gh-win', url: 'https://img.shields.io/github/downloads/californiaAlmonds/auricle/total.json' },
+      { id: 'dl-gh-android', url: 'https://img.shields.io/github/downloads/californiaAlmonds/auricle-android/total.json' },
+      { id: 'dl-sf', url: 'https://img.shields.io/sourceforge/dt/auricle.json' },
+      { id: 'dl-choco', url: 'https://img.shields.io/chocolatey/dt/auricle.json' },
+    ];
+
+    function parseShieldCount(raw) {
+      if (typeof raw !== 'string') return null;
+      const cleaned = raw.trim().replace(/,/g, '').toLowerCase();
+      const match = /^(\d+(?:\.\d+)?)([km])?$/.exec(cleaned);
+      if (!match) return null;
+      const num = parseFloat(match[1]);
+      if (match[2] === 'm') return Math.round(num * 1_000_000);
+      if (match[2] === 'k') return Math.round(num * 1_000);
+      return Math.round(num);
+    }
+
+    const fmt = new Intl.NumberFormat();
+
+    Promise.allSettled(
+      sources.map(async (src) => {
+        const res = await fetch(src.url, { priority: 'low' });
+        if (!res.ok) return null;
+        const data = await res.json();
+        const count = parseShieldCount(data.value || data.message);
+        if (count === null) return null;
+        const el = document.getElementById(src.id);
+        if (el) el.textContent = fmt.format(count);
+        return count;
+      })
+    ).then((results) => {
+      const counts = results
+        .filter((r) => r.status === 'fulfilled' && typeof r.value === 'number')
+        .map((r) => r.value);
+      if (counts.length > 0) {
+        const sum = counts.reduce((a, b) => a + b, 0);
+        const totalEl = document.getElementById('total-downloads');
+        if (totalEl) totalEl.textContent = fmt.format(sum);
+      }
+    });
+  })();
+</script>
 </body>
 </html>

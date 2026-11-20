@@ -60,7 +60,7 @@
 <main>
   <div class="label">Privacy</div>
   <h1>Auricle Privacy Policy</h1>
-  <p class="meta">Effective November 3, 2026 · Applies to Auricle 0.1.6 and later for Windows</p>
+  <p class="meta">Effective November 20, 2026 · Applies to Auricle 0.3.0 and later for Windows</p>
 
   <div class="summary">
     <p><strong>In short:</strong> Auricle has no accounts, servers, analytics, telemetry, advertising or automatic crash reporting. The developer receives nothing unless you choose to submit a problem report. Your library, history, settings and logs stay on your PC. To search and play music, Auricle and its optional add-ons talk directly to YouTube and Google services, and they download add-ons and update checks from GitHub. Auricle never uses your browser cookies unless you turn that on yourself.</p>
@@ -93,6 +93,7 @@
     <li><strong>GitHub (add-on downloads).</strong> When you choose to install an add-on, Auricle downloads it from its official GitHub releases: <a href="https://github.com/yt-dlp/yt-dlp">yt-dlp/yt-dlp</a>, <a href="https://github.com/BtbN/FFmpeg-Builds">BtbN/FFmpeg-Builds</a> (ffmpeg) and <a href="https://github.com/denoland/deno">denoland/deno</a>.</li>
     <li><strong>Automatic yt-dlp updates.</strong> If yt-dlp is installed, Auricle updates it in the background at most once a week (<code>yt-dlp -U</code>, falling back to downloading the latest release from GitHub). It also triggers one immediate update per session if playback starts failing in a way that indicates an outdated yt-dlp. You can also update manually in Settings.</li>
     <li><strong>App update checks (portable build only).</strong> The portable ZIP checks the latest Auricle release on GitHub when it starts and when you click “Check for updates”, and it can download an update you choose to install. The installer, WinGet, Scoop and Chocolatey builds do not check for or install app updates; your package manager handles updates.</li>
+    <li><strong>Listen Together / Party sync (optional, only when active).</strong> Only if you start or join a Party, Auricle opens encrypted peer-to-peer QUIC connections using <a href="https://www.iroh.computer/">Iroh</a> (falling back to public n0.computer relay servers when direct NAT traversal isn't available). Only peers who have your invite link receive your chosen display name, playback state, timestamp, and queue video IDs; no listening data is stored on any developer server.</li>
     <li><strong>Problem reports (only when you choose).</strong> Settings &gt; Privacy &amp; diagnostics &gt; <strong>Report a problem</strong>, or the error dialog shown if Auricle fails to start, opens a new GitHub issue form in your browser prefilled with the app version, Windows version and, for errors, the error message (your Windows user folder and account name are masked). Opening the form sends that prefilled text to GitHub as part of the page address; the issue itself is created only if you submit it, and GitHub issues are public. The log folder also opens so you can decide whether to attach <code>auricle.log</code>; the log is never uploaded unless you attach it.</li>
   </ul>
   <p>Auricle does not send your library, history, likes, playlists, settings or logs to anyone on its own, and the developer operates no server that receives data from the app.</p>
