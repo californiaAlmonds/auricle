@@ -4306,19 +4306,23 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                             }
                                             np-art-link-ta := TouchArea { clicked => { open-artist-for(now-playing-video-id, track-artist); } }
                                         }
-                                        if np-album-title != "": Rectangle {
+                                        Rectangle {
                                             height: 20px;
                                             Text {
-                                                text: np-album-title + (np-album-year != "" ? "  •  " + np-album-year : "");
+                                                text: np-album-title != "" ? (np-album-title + (np-album-year != "" ? "  •  " + np-album-year : "")) : "";
                                                 width: parent.width; height: parent.height;
                                                 font-size: 12px;
-                                                color: np-alb-link-ta.has-hover ? Theme.text : Theme.text-dim;
+                                                color: (np-album-title != "" && np-alb-link-ta.has-hover) ? Theme.text : Theme.text-dim;
+                                                opacity: np-album-title != "" ? 1.0 : 0.0;
+                                                animate opacity { duration: 180ms; easing: ease-out; }
                                                 horizontal-alignment: center; vertical-alignment: center; overflow: elide;
                                             }
                                             np-alb-link-ta := TouchArea {
+                                                enabled: np-album-title != "";
+                                                mouse-cursor: np-album-title != "" ? pointer : default;
                                                 clicked => {
                                                     if (np-album-id != "") { navigate-to-album(np-album-id); }
-                                                    else { open-album-for(now-playing-video-id, np-album-title); }
+                                                    else if (np-album-title != "") { open-album-for(now-playing-video-id, np-album-title); }
                                                 }
                                             }
                                         }
@@ -6035,6 +6039,7 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
             TouchArea { }
 
             party-layout := VerticalLayout {
+                width: parent.width;
                 padding: 24px; spacing: 16px;
 
                 // Header row
@@ -6065,23 +6070,46 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                         background: Theme.surface;
                         border-color: party-name-inp.has-focus ? Theme.effective-accent : Theme.border;
                         border-width: 1px;
-                        horizontal-stretch: 1;
-                        HorizontalLayout {
-                            padding-left: 12px; padding-right: 12px;
+                        horizontal-stretch: 1; min-width: 0px;
+
+                        party-name-clip := Rectangle {
+                            x: 12px; y: 0px;
+                            width: max(0px, parent.width - 24px);
+                            height: parent.height;
+                            clip: true;
+                            property <length> scroll-x: 0px;
+
                             if party-name-inp.text == "": Text {
                                 text: "Your name (e.g. Deepak)";
+                                width: parent.width; height: parent.height;
                                 font-size: 13px; color: Theme.text-dim;
-                                vertical-alignment: center;
+                                vertical-alignment: center; overflow: elide;
                             }
                             party-name-inp := TextInput {
-                                text: party-display-name;
+                                text <=> party-display-name;
+                                x: -min(party-name-clip.scroll-x, max(0px, self.preferred-width - party-name-clip.width));
+                                width: max(party-name-clip.width, self.preferred-width + 4px);
+                                height: parent.height;
                                 font-size: 13px; color: Theme.text;
                                 selection-background-color: Theme.effective-accent;
                                 selection-foreground-color: Theme.on-accent;
                                 vertical-alignment: center; single-line: true;
                                 edited => {
-                                    party-display-name = self.text;
                                     save-party-display-name(self.text);
+                                }
+                                cursor-position-changed(pos) => {
+                                    if pos.x - party-name-clip.scroll-x > party-name-clip.width - 4px {
+                                        party-name-clip.scroll-x = pos.x - party-name-clip.width + 4px;
+                                    } else if pos.x < party-name-clip.scroll-x {
+                                        party-name-clip.scroll-x = pos.x;
+                                    }
+                                }
+                                key-pressed(event) => {
+                                    if event.text == "\u{1}" || (event.modifiers.control && (event.text == "a" || event.text == "A")) {
+                                        self.select-all();
+                                        return accept;
+                                    }
+                                    return reject;
                                 }
                             }
                         }
@@ -6142,22 +6170,45 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                             background: Theme.surface;
                             border-color: party-join-inp.has-focus ? Theme.effective-accent : Theme.border;
                             border-width: 1px;
-                            horizontal-stretch: 1;
-                            HorizontalLayout {
-                                padding-left: 12px; padding-right: 12px;
+                            horizontal-stretch: 1; min-width: 0px;
+
+                            party-join-clip := Rectangle {
+                                x: 12px; y: 0px;
+                                width: max(0px, parent.width - 24px);
+                                height: parent.height;
+                                clip: true;
+                                property <length> scroll-x: 0px;
+
                                 if party-join-inp.text == "": Text {
                                     text: "Paste auricle://party/... link";
+                                    width: parent.width; height: parent.height;
                                     font-size: 13px; color: Theme.text-dim;
-                                    vertical-alignment: center;
+                                    vertical-alignment: center; overflow: elide;
                                 }
                                 party-join-inp := TextInput {
-                                    text: party-join-input;
+                                    text <=> party-join-input;
+                                    x: -min(party-join-clip.scroll-x, max(0px, self.preferred-width - party-join-clip.width));
+                                    width: max(party-join-clip.width, self.preferred-width + 4px);
+                                    height: parent.height;
                                     font-size: 13px; color: Theme.text;
                                     selection-background-color: Theme.effective-accent;
                                     selection-foreground-color: Theme.on-accent;
                                     vertical-alignment: center; single-line: true;
-                                    edited => { party-join-input = self.text; }
                                     accepted => { if self.text != "" { join-party(self.text, party-display-name); } }
+                                    cursor-position-changed(pos) => {
+                                        if pos.x - party-join-clip.scroll-x > party-join-clip.width - 4px {
+                                            party-join-clip.scroll-x = pos.x - party-join-clip.width + 4px;
+                                        } else if pos.x < party-join-clip.scroll-x {
+                                            party-join-clip.scroll-x = pos.x;
+                                        }
+                                    }
+                                    key-pressed(event) => {
+                                        if event.text == "\u{1}" || (event.modifiers.control && (event.text == "a" || event.text == "A")) {
+                                            self.select-all();
+                                            return accept;
+                                        }
+                                        return reject;
+                                    }
                                 }
                             }
                         }
@@ -6259,11 +6310,13 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                         border-color: Theme.border; border-width: 1px;
                         HorizontalLayout {
                             padding-left: 12px; padding-right: 12px; padding-top: 8px; padding-bottom: 8px; spacing: 8px;
-                            VerticalLayout {
-                                alignment: center; horizontal-stretch: 1;
+                            Rectangle {
+                                horizontal-stretch: 1; min-width: 0px; clip: true;
                                 Text {
                                     text: party-invite-link;
-                                    font-size: 12px; color: Theme.text-muted; overflow: elide;
+                                    width: parent.width; height: parent.height;
+                                    font-size: 12px; color: Theme.text-muted;
+                                    vertical-alignment: center; overflow: elide;
                                 }
                             }
                             Rectangle {
