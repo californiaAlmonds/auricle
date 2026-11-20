@@ -71,6 +71,13 @@ struct MoodItem {
     params: string,
 }
 
+export struct PartyMemberItem {
+    name: string,
+    platform: string,
+    is-host: bool,
+    initial: string,
+}
+
 // ─── Theme (single source of truth for colors + radii) ───────────────────────
 // The whole palette is DERIVED from one `accent` color + a light/dark `is-light`
 // flag, so a single user choice re-skins the app while the relationships between
@@ -1162,6 +1169,29 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
     in-out property <bool> show-onboarding: false;
     callback dismiss-onboarding();
 
+    // ── Auricle Party (Listen Together) ──────────────────────────────────────
+    in-out property <bool> show-party-modal: false;
+    in-out property <string> party-status: "off"; // "off" | "starting" | "hosting" | "joining" | "joined" | "error"
+    in-out property <bool> party-active: false;
+    in-out property <bool> party-is-host: false;
+    in-out property <string> party-code: "";
+    in-out property <string> party-invite-link: "";
+    in-out property <string> party-host-name: "";
+    in-out property <string> party-display-name: "";
+    in-out property <string> party-join-input: "";
+    in-out property <int> party-member-count: 0;
+    in-out property <[PartyMemberItem]> party-members: [];
+    in-out property <int> party-rtt-ms: 0;
+    in-out property <string> party-activity-text: "";
+    in-out property <string> party-error-text: "";
+    in-out property <bool> party-link-copied: false;
+    callback start-party(string /* display_name */);
+    callback join-party(string /* invite_input */, string /* display_name */);
+    callback leave-party();
+    callback copy-party-link();
+    callback paste-party-link();
+    callback save-party-display-name(string);
+
     in-out property <string> window-title: "Auricle";
     title: window-title;
     icon: @image-url("../icons/icon.png");
@@ -1432,7 +1462,7 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                             // sits on the bar's optical centre line instead of being
                             // stretched/top-aligned by the row.
                             HorizontalLayout {
-                                width: 44px; spacing: 4px;
+                                width: !compact ? 112px : 44px; spacing: 4px;
                                 // Back / Forward
                                 VerticalLayout {
                                     alignment: center;
@@ -1526,7 +1556,69 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                             }
 
                             Rectangle { horizontal-stretch: 1; }
-                            Rectangle { width: 44px; }
+
+                            HorizontalLayout {
+                                width: !compact ? 112px : 44px;
+                                alignment: end;
+                                VerticalLayout {
+                                    alignment: center;
+                                    Rectangle {
+                                        width: compact ? 36px : 108px;
+                                        height: 36px;
+                                        border-radius: 18px;
+                                        background: party-active ? Theme.pill-active : (party-btn-ta.has-hover ? Theme.hover-veil : Theme.surface-2);
+                                        border-color: party-active ? Theme.effective-accent : Theme.border;
+                                        border-width: 1px;
+                                        animate background, border-color { duration: 160ms; }
+
+                                        party-btn-ta := TouchArea {
+                                            clicked => { show-party-modal = !show-party-modal; }
+                                        }
+
+                                        if compact: HorizontalLayout {
+                                            alignment: center;
+                                            VerticalLayout {
+                                                alignment: center;
+                                                if party-active: Rectangle {
+                                                    width: 10px; height: 10px; border-radius: 5px;
+                                                    background: Theme.success;
+                                                }
+                                                if !party-active: Image {
+                                                    source: @image-url("icons/artist.svg");
+                                                    width: 16px; height: 16px;
+                                                    colorize: party-btn-ta.has-hover ? Theme.text : Theme.text-muted;
+                                                }
+                                            }
+                                        }
+
+                                        if !compact: HorizontalLayout {
+                                            padding-left: 10px; padding-right: 10px; spacing: 6px; alignment: center;
+                                            VerticalLayout {
+                                                alignment: center;
+                                                if party-active: Rectangle {
+                                                    width: 8px; height: 8px; border-radius: 4px;
+                                                    background: Theme.success;
+                                                }
+                                                if !party-active: Image {
+                                                    source: @image-url("icons/artist.svg");
+                                                    width: 14px; height: 14px;
+                                                    colorize: party-btn-ta.has-hover ? Theme.text : Theme.text-muted;
+                                                }
+                                            }
+                                            VerticalLayout {
+                                                alignment: center;
+                                                Text {
+                                                    text: party-active ? "Party · " + party-member-count : "Party";
+                                                    font-size: 13px;
+                                                    font-weight: party-active ? 600 : 500;
+                                                    color: party-active ? Theme.text : (party-btn-ta.has-hover ? Theme.text : Theme.text-muted);
+                                                    overflow: elide;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
 
                     }
@@ -4214,19 +4306,23 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                             }
                                             np-art-link-ta := TouchArea { clicked => { open-artist-for(now-playing-video-id, track-artist); } }
                                         }
-                                        if np-album-title != "": Rectangle {
+                                        Rectangle {
                                             height: 20px;
                                             Text {
-                                                text: np-album-title + (np-album-year != "" ? "  •  " + np-album-year : "");
+                                                text: np-album-title != "" ? (np-album-title + (np-album-year != "" ? "  •  " + np-album-year : "")) : "";
                                                 width: parent.width; height: parent.height;
                                                 font-size: 12px;
-                                                color: np-alb-link-ta.has-hover ? Theme.text : Theme.text-dim;
+                                                color: (np-album-title != "" && np-alb-link-ta.has-hover) ? Theme.text : Theme.text-dim;
+                                                opacity: np-album-title != "" ? 1.0 : 0.0;
+                                                animate opacity { duration: 180ms; easing: ease-out; }
                                                 horizontal-alignment: center; vertical-alignment: center; overflow: elide;
                                             }
                                             np-alb-link-ta := TouchArea {
+                                                enabled: np-album-title != "";
+                                                mouse-cursor: np-album-title != "" ? pointer : default;
                                                 clicked => {
                                                     if (np-album-id != "") { navigate-to-album(np-album-id); }
-                                                    else { open-album-for(now-playing-video-id, np-album-title); }
+                                                    else if (np-album-title != "") { open-album-for(now-playing-video-id, np-album-title); }
                                                 }
                                             }
                                         }
@@ -5917,6 +6013,409 @@ public function open-entity-ctx(kind: string, id: string, title: string, artist:
                                 use-browser-cookies = true;
                                 show-cookie-consent = false;
                                 set-browser-cookies(true);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Auricle Party modal (Listen Together) ─────────────────────────────────
+    if show-party-modal: Rectangle {
+        x: 0; y: 0; width: root.width; height: root.height;
+        background: #000000a0;
+        TouchArea { clicked => { show-party-modal = false; } }
+
+        party-card := Rectangle {
+            width: min(480px, root.width - 48px);
+            height: party-layout.preferred-height;
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            border-radius: 20px;
+            background: Theme.glass-strong;
+            border-color: Theme.border; border-width: 1px;
+            drop-shadow-blur: 40px; drop-shadow-color: #000000c0; drop-shadow-offset-y: 16px;
+            TouchArea { }
+
+            party-layout := VerticalLayout {
+                width: parent.width;
+                padding: 24px; spacing: 16px;
+
+                // Header row
+                HorizontalLayout {
+                    spacing: 12px;
+                    VerticalLayout {
+                        spacing: 2px; horizontal-stretch: 1; alignment: center;
+                        Text { text: "Listen Together"; font-size: 20px; font-weight: 700; color: Theme.text; }
+                        Text { text: "Host or join a live cross-platform Party"; font-size: 13px; color: Theme.text-muted; }
+                    }
+                    IconBtn {
+                        svg-icon: @image-url("icons/close.svg");
+                        use-svg: true;
+                        icon-color: Theme.text-muted;
+                        clicked => { show-party-modal = false; }
+                    }
+                }
+
+                // Your Name compact input box
+                HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        alignment: center;
+                        Text { text: "Your Name"; font-size: 12px; font-weight: 600; color: Theme.text-muted; }
+                    }
+                    Rectangle {
+                        height: 36px; border-radius: Theme.radius-sm;
+                        background: Theme.surface;
+                        border-color: party-name-inp.has-focus ? Theme.effective-accent : Theme.border;
+                        border-width: 1px;
+                        horizontal-stretch: 1; min-width: 0px;
+
+                        party-name-clip := Rectangle {
+                            x: 12px; y: 0px;
+                            width: max(0px, parent.width - 24px);
+                            height: parent.height;
+                            clip: true;
+                            property <length> scroll-x: 0px;
+
+                            if party-name-inp.text == "": Text {
+                                text: "Your name (e.g. Deepak)";
+                                width: parent.width; height: parent.height;
+                                font-size: 13px; color: Theme.text-dim;
+                                vertical-alignment: center; overflow: elide;
+                            }
+                            party-name-inp := TextInput {
+                                text <=> party-display-name;
+                                x: -min(party-name-clip.scroll-x, max(0px, self.preferred-width - party-name-clip.width));
+                                width: max(party-name-clip.width, self.preferred-width + 4px);
+                                height: parent.height;
+                                font-size: 13px; color: Theme.text;
+                                selection-background-color: Theme.effective-accent;
+                                selection-foreground-color: Theme.on-accent;
+                                vertical-alignment: center; single-line: true;
+                                edited => {
+                                    save-party-display-name(self.text);
+                                }
+                                cursor-position-changed(pos) => {
+                                    if pos.x - party-name-clip.scroll-x > party-name-clip.width - 4px {
+                                        party-name-clip.scroll-x = pos.x - party-name-clip.width + 4px;
+                                    } else if pos.x < party-name-clip.scroll-x {
+                                        party-name-clip.scroll-x = pos.x;
+                                    }
+                                }
+                                key-pressed(event) => {
+                                    if event.text == "\u{1}" || (event.modifiers.control && (event.text == "a" || event.text == "A")) {
+                                        self.select-all();
+                                        return accept;
+                                    }
+                                    return reject;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Error banner
+                if party-error-text != "": Rectangle {
+                    border-radius: Theme.radius-sm;
+                    background: Theme.danger.with-alpha(0.12);
+                    border-color: Theme.danger.with-alpha(0.35);
+                    border-width: 1px;
+                    HorizontalLayout {
+                        padding-left: 12px; padding-right: 12px; padding-top: 8px; padding-bottom: 8px;
+                        Text { text: party-error-text; font-size: 12px; color: Theme.danger; wrap: word-wrap; }
+                    }
+                }
+
+                // When !party-active && party-status != "starting" && party-status != "joining"
+                if !party-active && party-status != "starting" && party-status != "joining": VerticalLayout {
+                    spacing: 14px;
+                    // Primary Accent Card/Button: "Start a Party"
+                    Rectangle {
+                        height: 52px; border-radius: Theme.radius-sm;
+                        background: start-party-ta.has-hover ? Theme.accent-strong : Theme.effective-accent;
+                        animate background { duration: 120ms; }
+                        VerticalLayout {
+                            alignment: center; spacing: 2px;
+                            Text {
+                                text: "Start a Party";
+                                font-size: 14px; font-weight: 700; color: Theme.on-accent;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "Share a link so Android & Windows listen in sync";
+                                font-size: 11px; color: Theme.on-accent.with-alpha(0.85);
+                                horizontal-alignment: center;
+                            }
+                        }
+                        start-party-ta := TouchArea {
+                            clicked => { start-party(party-display-name); }
+                        }
+                    }
+
+                    // Divider "OR JOIN WITH INVITE LINK"
+                    HorizontalLayout {
+                        spacing: 10px; alignment: center;
+                        Rectangle { height: 1px; background: Theme.border; horizontal-stretch: 1; y: (parent.height - self.height) / 2; }
+                        Text { text: "OR JOIN WITH INVITE LINK"; font-size: 11px; font-weight: 700; color: Theme.text-dim; letter-spacing: 0.5px; }
+                        Rectangle { height: 1px; background: Theme.border; horizontal-stretch: 1; y: (parent.height - self.height) / 2; }
+                    }
+
+                    // Join row
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Rectangle {
+                            height: 38px; border-radius: Theme.radius-sm;
+                            background: Theme.surface;
+                            border-color: party-join-inp.has-focus ? Theme.effective-accent : Theme.border;
+                            border-width: 1px;
+                            horizontal-stretch: 1; min-width: 0px;
+
+                            party-join-clip := Rectangle {
+                                x: 12px; y: 0px;
+                                width: max(0px, parent.width - 24px);
+                                height: parent.height;
+                                clip: true;
+                                property <length> scroll-x: 0px;
+
+                                if party-join-inp.text == "": Text {
+                                    text: "Paste auricle://party/... link";
+                                    width: parent.width; height: parent.height;
+                                    font-size: 13px; color: Theme.text-dim;
+                                    vertical-alignment: center; overflow: elide;
+                                }
+                                party-join-inp := TextInput {
+                                    text <=> party-join-input;
+                                    x: -min(party-join-clip.scroll-x, max(0px, self.preferred-width - party-join-clip.width));
+                                    width: max(party-join-clip.width, self.preferred-width + 4px);
+                                    height: parent.height;
+                                    font-size: 13px; color: Theme.text;
+                                    selection-background-color: Theme.effective-accent;
+                                    selection-foreground-color: Theme.on-accent;
+                                    vertical-alignment: center; single-line: true;
+                                    accepted => { if self.text != "" { join-party(self.text, party-display-name); } }
+                                    cursor-position-changed(pos) => {
+                                        if pos.x - party-join-clip.scroll-x > party-join-clip.width - 4px {
+                                            party-join-clip.scroll-x = pos.x - party-join-clip.width + 4px;
+                                        } else if pos.x < party-join-clip.scroll-x {
+                                            party-join-clip.scroll-x = pos.x;
+                                        }
+                                    }
+                                    key-pressed(event) => {
+                                        if event.text == "\u{1}" || (event.modifiers.control && (event.text == "a" || event.text == "A")) {
+                                            self.select-all();
+                                            return accept;
+                                        }
+                                        return reject;
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            width: 68px; height: 38px; border-radius: Theme.radius-sm;
+                            background: paste-btn-ta.has-hover ? Theme.hover-veil : Theme.surface;
+                            border-color: Theme.border; border-width: 1px;
+                            animate background { duration: 100ms; }
+                            Text {
+                                text: "Paste"; font-size: 13px; font-weight: 600; color: Theme.text;
+                                width: parent.width; height: parent.height;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                            paste-btn-ta := TouchArea {
+                                clicked => { paste-party-link(); }
+                            }
+                        }
+
+                        Rectangle {
+                            width: 68px; height: 38px; border-radius: Theme.radius-sm;
+                            background: join-btn-ta.has-hover ? Theme.accent-strong : Theme.effective-accent;
+                            animate background { duration: 100ms; }
+                            Text {
+                                text: "Join"; font-size: 13px; font-weight: 600; color: Theme.on-accent;
+                                width: parent.width; height: parent.height;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                            join-btn-ta := TouchArea {
+                                clicked => { if party-join-input != "" { join-party(party-join-input, party-display-name); } }
+                            }
+                        }
+                    }
+                }
+
+                // When party-status == "starting" || party-status == "joining"
+                if party-status == "starting" || party-status == "joining": VerticalLayout {
+                    spacing: 14px;
+                    Rectangle {
+                        border-radius: Theme.radius-sm;
+                        background: Theme.surface;
+                        border-color: Theme.border; border-width: 1px;
+                        VerticalLayout {
+                            padding: 16px; spacing: 12px; alignment: center;
+                            Text {
+                                text: party-status == "starting" ? "Starting Party P2P host..." : "Connecting to Party P2P host...";
+                                font-size: 14px; font-weight: 600; color: Theme.text;
+                                horizontal-alignment: center;
+                            }
+                            HorizontalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 84px; height: 32px; border-radius: Theme.radius-sm;
+                                    background: cancel-btn-ta.has-hover ? Theme.hover-veil : transparent;
+                                    border-color: Theme.border; border-width: 1px;
+                                    Text {
+                                        text: "Cancel"; font-size: 12px; font-weight: 600; color: Theme.text;
+                                        width: parent.width; height: parent.height;
+                                        horizontal-alignment: center; vertical-alignment: center;
+                                    }
+                                    cancel-btn-ta := TouchArea { clicked => { leave-party(); } }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // When party-active (hosting or joined)
+                if party-active: VerticalLayout {
+                    spacing: 14px;
+
+                    // Status banner with #62c97e live dot
+                    Rectangle {
+                        border-radius: Theme.radius-sm;
+                        background: Theme.surface;
+                        border-color: Theme.border; border-width: 1px;
+                        HorizontalLayout {
+                            padding: 12px; spacing: 10px; alignment: start;
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle { width: 10px; height: 10px; border-radius: 5px; background: Theme.success; }
+                            }
+                            VerticalLayout {
+                                alignment: center; horizontal-stretch: 1;
+                                Text {
+                                    text: party-is-host
+                                        ? "Hosting Party · Room " + party-code
+                                        : "Listening with " + party-host-name + (party-rtt-ms > 0 ? " · " + party-rtt-ms + " ms sync" : "");
+                                    font-size: 13px; font-weight: 600; color: Theme.text; overflow: elide;
+                                }
+                            }
+                        }
+                    }
+
+                    // Invite Link box (read-only elided preview of party-invite-link + Copy button)
+                    if party-invite-link != "": Rectangle {
+                        border-radius: Theme.radius-sm;
+                        background: Theme.surface-2;
+                        border-color: Theme.border; border-width: 1px;
+                        HorizontalLayout {
+                            padding-left: 12px; padding-right: 12px; padding-top: 8px; padding-bottom: 8px; spacing: 8px;
+                            Rectangle {
+                                horizontal-stretch: 1; min-width: 0px; clip: true;
+                                Text {
+                                    text: party-invite-link;
+                                    width: parent.width; height: parent.height;
+                                    font-size: 12px; color: Theme.text-muted;
+                                    vertical-alignment: center; overflow: elide;
+                                }
+                            }
+                            Rectangle {
+                                width: party-link-copied ? 90px : 84px; height: 32px; border-radius: Theme.radius-sm;
+                                background: party-link-copied ? Theme.success : (copy-btn-ta.has-hover ? Theme.accent-strong : Theme.effective-accent);
+                                animate background { duration: 120ms; }
+                                Text {
+                                    text: party-link-copied ? "Copied ✓" : "Copy Link";
+                                    font-size: 12px; font-weight: 600; color: Theme.on-accent;
+                                    width: parent.width; height: parent.height;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                }
+                                copy-btn-ta := TouchArea { clicked => { copy-party-link(); } }
+                            }
+                        }
+                    }
+
+                    // Listeners list
+                    VerticalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: "Listeners (" + party-member-count + ")";
+                            font-size: 12px; font-weight: 700; color: Theme.text-dim; letter-spacing: 0.5px;
+                        }
+                        for m in party-members: Rectangle {
+                            height: 40px; border-radius: Theme.radius-sm;
+                            background: Theme.surface;
+                            HorizontalLayout {
+                                padding-left: 10px; padding-right: 10px; spacing: 10px; alignment: start;
+                                // Avatar circle with initial
+                                VerticalLayout {
+                                    alignment: center;
+                                    Rectangle {
+                                        width: 28px; height: 28px; border-radius: 14px;
+                                        background: Theme.pill-active;
+                                        Text {
+                                            text: m.initial;
+                                            font-size: 13px; font-weight: 700; color: Theme.effective-accent;
+                                            width: parent.width; height: parent.height;
+                                            horizontal-alignment: center; vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center; horizontal-stretch: 1;
+                                    Text {
+                                        text: m.name;
+                                        font-size: 13px; font-weight: 500; color: Theme.text; overflow: elide;
+                                    }
+                                }
+                                if m.is-host: VerticalLayout {
+                                    alignment: center;
+                                    Rectangle {
+                                        border-radius: 4px; background: Theme.pill-active;
+                                        HorizontalLayout {
+                                            padding-left: 6px; padding-right: 6px; padding-top: 2px; padding-bottom: 2px;
+                                            Text { text: "Host"; font-size: 10px; font-weight: 700; color: Theme.effective-accent; }
+                                        }
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    Rectangle {
+                                        border-radius: 4px; background: Theme.hover-veil;
+                                        HorizontalLayout {
+                                            padding-left: 6px; padding-right: 6px; padding-top: 2px; padding-bottom: 2px;
+                                            Text {
+                                              text: m.platform == "android" ? "Android" : "Windows";
+                                              font-size: 10px; font-weight: 600; color: Theme.text-muted;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Activity caption
+                    if party-activity-text != "": Text {
+                        text: party-activity-text;
+                        font-size: 12px; color: Theme.text-dim; font-italic: true;
+                        horizontal-alignment: center; wrap: word-wrap;
+                    }
+
+                    // End / Leave Party button
+                    HorizontalLayout {
+                        alignment: end;
+                        Rectangle {
+                            width: party-is-host ? 96px : 100px; height: 34px; border-radius: Theme.radius-sm;
+                            background: leave-party-ta.has-hover ? Theme.danger : Theme.danger-bg;
+                            animate background { duration: 100ms; }
+                            Text {
+                                text: party-is-host ? "End Party" : "Leave Party";
+                                font-size: 12px; font-weight: 600; color: Theme.on-danger;
+                                width: parent.width; height: parent.height;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                            leave-party-ta := TouchArea {
+                                clicked => { leave-party(); }
                             }
                         }
                     }

@@ -92,8 +92,19 @@ impl AudioCache {
         Self { dir, index_path, index, limit_bytes, dirty: false, last_flush: std::time::Instant::now(), protected: HashSet::new() }
     }
 
+    fn is_safe_video_id(video_id: &str) -> bool {
+        !video_id.is_empty()
+            && video_id.len() <= 32
+            && video_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    }
+
     /// Returns the cached file path if it exists on disk.
     pub fn get(&mut self, video_id: &str) -> Option<PathBuf> {
+        if !Self::is_safe_video_id(video_id) {
+            return None;
+        }
         let entry = self.index.get_mut(video_id)?;
         let path = self.dir.join(format!("{}.m4a", video_id));
         if path.exists() {
@@ -114,11 +125,20 @@ impl AudioCache {
     /// Returns the path where a new download should be written.
     /// Call `commit()` after a successful download.
     pub fn staging_path(&self, video_id: &str) -> PathBuf {
-        self.dir.join(format!("{}.part", video_id))
+        let safe: String = video_id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .take(32)
+            .collect();
+        let stem = if safe.is_empty() { "invalid" } else { safe.as_str() };
+        self.dir.join(format!("{}.part", stem))
     }
 
     /// Finalise a download: move `.part` → `.m4a`, add to index, evict if needed.
     pub fn commit(&mut self, video_id: &str, title: &str, artist: &str) -> Option<PathBuf> {
+        if !Self::is_safe_video_id(video_id) {
+            return None;
+        }
         let staging = self.dir.join(format!("{}.part", video_id));
         let final_path = self.dir.join(format!("{}.m4a", video_id));
         if !staging.exists() { return None; }
