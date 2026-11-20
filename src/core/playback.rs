@@ -1350,6 +1350,14 @@ impl PlaybackCore {
         self.state.lock().unwrap().queue.clone()
     }
 
+    pub fn queue_index(&self) -> usize {
+        self.state.lock().unwrap().queue_index
+    }
+
+    pub fn is_audio_loading(&self) -> bool {
+        self.audio_loading.load(Ordering::Relaxed)
+    }
+
     /// Returns only songs AFTER the current queue_index (i.e. upcoming, not including now-playing).
     pub fn queue_upcoming(&self) -> Vec<NowPlaying> {
         let state = self.state.lock().unwrap();

@@ -1,3 +1,4 @@
+pub mod party;
 pub mod playback;
 pub mod stream_player;
 pub mod audio_priority;
