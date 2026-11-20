@@ -1,0 +1,61 @@
+name: SourceForge default download
+
+# SourceForge imports GitHub releases on its own schedule, so this checks
+# periodically and points the Windows default download at the newest installer.
+
+on:
+  workflow_run:
+    workflows: ["Stable release"]
+    types: [completed]
+  schedule:
+    - cron: "17 */3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  set-default:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Point Windows default at latest installer
+        shell: bash
+        env:
+          SF_API_KEY: ${{ secrets.SOURCEFORGE_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SF_API_KEY}" ]; then
+            echo "::warning::SOURCEFORGE_API_KEY secret is not set; skipping."
+            exit 0
+          fi
+
+          tag=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)
+          version="${tag#v}"
+          file="/v${version}/auricle-${version}-setup.exe"
+
+          current=$(curl -fsSL "https://sourceforge.net/projects/auricle/best_release.json" \
+            | jq -r '.platform_releases.windows.filename // empty')
+          if [ "$current" = "$file" ]; then
+            echo "Windows default is already ${file}."
+            exit 0
+          fi
+
+          # The public download URL redirects (302) once the file exists and returns 404 before.
+          exists=$(curl -s -o /dev/null -w '%{http_code}' --max-redirs 0 \
+            "https://sourceforge.net/projects/auricle/files${file}/download")
+          if [ "$exists" = "404" ]; then
+            echo "${file} is not on SourceForge yet; the next scheduled run will retry."
+            exit 0
+          fi
+
+          status=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Accept: application/json" -X PUT \
+            --data-urlencode "default=windows" \
+            --data-urlencode "api_key=${SF_API_KEY}" \
+            "https://sourceforge.net/projects/auricle/files${file}")
+          if [ "$status" != "200" ]; then
+            echo "::error::SourceForge API returned HTTP ${status} for ${file}."
+            exit 1
+          fi
+          echo "Windows default set to ${file} (was ${current:-none})."
