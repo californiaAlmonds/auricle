@@ -2518,6 +2518,259 @@ pub fn extract_vibrant_accent_from_path(path: &std::path::Path) -> Option<slint:
     image::open(path).ok().map(|img| extract_vibrant_accent_from_image(&img))
 }
 
+#[cfg(target_os = "windows")]
+fn set_clipboard_text(text: &str) -> bool {
+    use std::os::raw::c_void;
+    type HANDLE = *mut c_void;
+    type HGLOBAL = *mut c_void;
+    type HWND = *mut c_void;
+    type UINT = u32;
+    type BOOL = i32;
+
+    const CF_UNICODETEXT: UINT = 13;
+    const GMEM_MOVEABLE: UINT = 0x0002;
+
+    extern "system" {
+        fn OpenClipboard(hwnd: HWND) -> BOOL;
+        fn CloseClipboard() -> BOOL;
+        fn EmptyClipboard() -> BOOL;
+        fn SetClipboardData(uFormat: UINT, hMem: HANDLE) -> HANDLE;
+        fn GlobalAlloc(uFlags: UINT, dwBytes: usize) -> HGLOBAL;
+        fn GlobalFree(hMem: HGLOBAL) -> HGLOBAL;
+        fn GlobalLock(hMem: HGLOBAL) -> *mut c_void;
+        fn GlobalUnlock(hMem: HGLOBAL) -> BOOL;
+    }
+
+    let utf16: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let size = utf16.len() * std::mem::size_of::<u16>();
+
+    unsafe {
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return false;
+        }
+        EmptyClipboard();
+        let mut ok = false;
+        let h_mem = GlobalAlloc(GMEM_MOVEABLE, size);
+        if !h_mem.is_null() {
+            let ptr = GlobalLock(h_mem) as *mut u16;
+            if !ptr.is_null() {
+                std::ptr::copy_nonoverlapping(utf16.as_ptr(), ptr, utf16.len());
+                GlobalUnlock(h_mem);
+                if !SetClipboardData(CF_UNICODETEXT, h_mem).is_null() {
+                    ok = true;
+                } else {
+                    GlobalFree(h_mem);
+                }
+            } else {
+                GlobalFree(h_mem);
+            }
+        }
+        CloseClipboard();
+        ok
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_clipboard_text(_text: &str) -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn get_clipboard_text() -> Option<String> {
+    use std::os::raw::c_void;
+    type HANDLE = *mut c_void;
+    type HGLOBAL = *mut c_void;
+    type HWND = *mut c_void;
+    type UINT = u32;
+    type BOOL = i32;
+
+    const CF_UNICODETEXT: UINT = 13;
+
+    extern "system" {
+        fn OpenClipboard(hwnd: HWND) -> BOOL;
+        fn CloseClipboard() -> BOOL;
+        fn GetClipboardData(uFormat: UINT) -> HANDLE;
+        fn GlobalLock(hMem: HGLOBAL) -> *mut c_void;
+        fn GlobalSize(hMem: HGLOBAL) -> usize;
+        fn GlobalUnlock(hMem: HGLOBAL) -> BOOL;
+    }
+
+    unsafe {
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return None;
+        }
+        let handle = GetClipboardData(CF_UNICODETEXT);
+        let mut result = None;
+        if !handle.is_null() {
+            let max_u16 = GlobalSize(handle) / std::mem::size_of::<u16>();
+            let ptr = GlobalLock(handle) as *const u16;
+            if !ptr.is_null() && max_u16 > 0 {
+                let mut len = 0;
+                while len < max_u16 && *ptr.add(len) != 0 {
+                    len += 1;
+                }
+                let slice = std::slice::from_raw_parts(ptr, len);
+                result = String::from_utf16(slice).ok();
+                GlobalUnlock(handle);
+            }
+        }
+        CloseClipboard();
+        result
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn get_clipboard_text() -> Option<String> {
+    None
+}
+
+fn now_playing_to_party_track(np: &core::playback::NowPlaying, added_by: &str) -> crate::core::party::PartyTrack {
+    let thumbnail_url = if !np.video_id.is_empty() && np.video_id != "native-prototype" {
+        format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", np.video_id)
+    } else {
+        String::new()
+    };
+    crate::core::party::PartyTrack {
+        video_id: np.video_id.clone(),
+        title: np.title.clone(),
+        artist: np.artist.clone(),
+        album: np.album.clone(),
+        album_id: np.album_id.clone(),
+        artist_id: np.artist_id.clone(),
+        duration_secs: np.duration_secs,
+        thumbnail_url,
+        added_by: added_by.to_string(),
+    }
+}
+
+fn build_party_seed_from_playback(playback: &core::playback::PlaybackCore, local_name: &str) -> crate::core::party::PartySeedState {
+    let full_queue = playback.full_queue();
+    let queue: Vec<crate::core::party::PartyTrack> = full_queue.iter()
+        .filter(|np| !np.video_id.is_empty() && np.video_id != "native-prototype")
+        .map(|np| now_playing_to_party_track(np, local_name))
+        .collect();
+
+    let np = playback.now_playing();
+    let current_track = if !np.video_id.is_empty() && np.video_id != "native-prototype" {
+        Some(now_playing_to_party_track(&np, local_name))
+    } else {
+        None
+    };
+
+    let is_playing = playback.is_playing();
+    let position_ms = (playback.elapsed_secs() * 1000.0) as u64;
+    let repeat_mode = playback.repeat_mode().as_str().to_string();
+    let current_index = playback.queue_index();
+
+    crate::core::party::PartySeedState {
+        queue,
+        current_index,
+        current_track,
+        is_playing,
+        position_ms,
+        repeat_mode,
+    }
+}
+
+fn refresh_party_ui(ui: &NativeShellWindow) {
+    let snap = crate::core::party::party_manager().snapshot();
+    ui.set_party_status(SharedString::from(snap.status.as_str()));
+    ui.set_party_active(snap.is_active);
+    ui.set_party_is_host(snap.is_host);
+    ui.set_party_code(SharedString::from(snap.party_code.as_str()));
+    ui.set_party_invite_link(SharedString::from(snap.invite_link.as_str()));
+    ui.set_party_host_name(SharedString::from(snap.host_name.as_str()));
+    ui.set_party_member_count(snap.participant_count as i32);
+    ui.set_party_rtt_ms(snap.rtt_ms as i32);
+    ui.set_party_activity_text(SharedString::from(snap.last_action_desc.as_str()));
+    ui.set_party_error_text(SharedString::from(snap.error_text.as_str()));
+
+    let members: Vec<PartyMemberItem> = snap.participants.iter().map(|p| {
+        let initial = p.name.chars().next()
+            .map(|c| c.to_uppercase().to_string())
+            .unwrap_or_else(|| "?".to_string());
+        PartyMemberItem {
+            name: SharedString::from(p.name.as_str()),
+            platform: SharedString::from(p.platform.as_str()),
+            is_host: p.is_host,
+            initial: SharedString::from(initial.as_str()),
+        }
+    }).collect();
+    ui.set_party_members(ModelRc::new(VecModel::from(members)));
+}
+
+fn apply_pending_party_updates(ui: &NativeShellWindow, playback: &'static core::playback::PlaybackCore) {
+    let upd = crate::core::party::party_manager().poll_remote_update();
+    if upd.has_update {
+        if let Some(pstate) = upd.state {
+            let queue_np: Vec<core::playback::NowPlaying> = pstate.queue.iter().map(|t| {
+                core::playback::NowPlaying {
+                    video_id: t.video_id.clone(),
+                    title: t.title.clone(),
+                    artist: t.artist.clone(),
+                    album: t.album.clone(),
+                    album_id: t.album_id.clone(),
+                    artist_id: t.artist_id.clone(),
+                    duration_secs: t.duration_secs,
+                }
+            }).collect();
+
+            let target_repeat = match pstate.repeat_mode.as_str() {
+                "all" => core::playback::RepeatMode::All,
+                "one" => core::playback::RepeatMode::One,
+                _ => core::playback::RepeatMode::Off,
+            };
+
+            let cur_np = playback.now_playing();
+            let new_track_opt = pstate.current_track.as_ref();
+            let new_vid = new_track_opt.map(|t| t.video_id.as_str()).unwrap_or("");
+
+            if !new_vid.is_empty() && new_vid != cur_np.video_id {
+                let new_track = new_track_opt.unwrap();
+                {
+                    let mut state = playback.state_lock();
+                    state.queue = queue_np;
+                    state.queue_index = pstate.current_index.min(state.queue.len().saturating_sub(1));
+                    state.is_playing = pstate.is_playing;
+                    state.repeat_mode = target_repeat;
+                }
+                playback.set_now_playing(&new_track.video_id, &new_track.title, &new_track.artist, new_track.duration_secs);
+                {
+                    let mut state = playback.state_lock();
+                    state.queue_index = pstate.current_index.min(state.queue.len().saturating_sub(1));
+                    state.is_playing = pstate.is_playing;
+                }
+                if upd.target_position_ms > 500 {
+                    playback.seek_to_secs(upd.target_position_ms as f64 / 1000.0);
+                }
+                now_playing_ui::notify_track_changed(
+                    ui.as_weak(),
+                    new_track.video_id.clone(),
+                    new_track.title.clone(),
+                    new_track.artist.clone(),
+                    new_track.duration_secs,
+                );
+            } else {
+                {
+                    let mut state = playback.state_lock();
+                    state.queue = queue_np;
+                    state.queue_index = pstate.current_index.min(state.queue.len().saturating_sub(1));
+                    state.repeat_mode = target_repeat;
+                }
+                if playback.is_playing() != pstate.is_playing {
+                    playback.set_playing(pstate.is_playing);
+                }
+                let local_ms = (playback.elapsed_secs() * 1000.0) as i64;
+                let delta = (local_ms - upd.target_position_ms as i64).abs();
+                if (!playback.is_audio_loading() || !pstate.is_playing) && delta > 600 {
+                    playback.seek_to_secs(upd.target_position_ms as f64 / 1000.0);
+                }
+            }
+            refresh_native_shell_ui(ui, playback);
+        }
+    }
+}
+
 pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     // Unify storage: fold any legacy `ytm-native` data into `auricle` before
     // anything reads settings or user data.
@@ -2585,6 +2838,127 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 np.duration_secs,
             );
         }
+    }
+
+    // ── Auricle Party setup & deep-link ──────────────────────────────────────
+    {
+        let display_name = {
+            let settings = core::persistence::load_settings();
+            if !settings.party_display_name.is_empty() {
+                settings.party_display_name
+            } else {
+                "Desktop Listener".to_string()
+            }
+        };
+        ui.set_party_display_name(SharedString::from(display_name.as_str()));
+
+        // Wakeup callback for party background thread events
+        {
+            let ui_w = ui.as_weak();
+            crate::core::party::party_manager().set_wakeup_callback(Box::new(move || {
+                let ui_w2 = ui_w.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_w2.upgrade() {
+                        let playback = crate::core::bridge::playback_core();
+                        apply_pending_party_updates(&ui, playback);
+                        refresh_party_ui(&ui);
+                    }
+                }).ok();
+            }));
+        }
+
+        for arg in std::env::args().skip(1) {
+            if arg.contains("auricle://party/") {
+                ui.set_party_join_input(SharedString::from(arg.trim()));
+                ui.set_show_party_modal(true);
+                refresh_party_ui(&ui);
+                break;
+            }
+        }
+    }
+
+    // ── Auricle Party callbacks ───────────────────────────────────────────────
+    {
+        ui.on_save_party_display_name(move |name| {
+            let trimmed = name.trim().to_string();
+            let mut settings = core::persistence::load_settings();
+            settings.party_display_name = trimmed;
+            core::persistence::save_settings(&settings);
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_start_party(move |display_name| {
+            let name = if !display_name.trim().is_empty() {
+                display_name.trim().to_string()
+            } else {
+                let settings = core::persistence::load_settings();
+                if !settings.party_display_name.is_empty() {
+                    settings.party_display_name
+                } else {
+                    std::env::var("USERNAME").unwrap_or_else(|_| "Windows PC".to_string())
+                }
+            };
+            let playback = crate::core::bridge::playback_core();
+            let seed = build_party_seed_from_playback(playback, &name);
+            crate::core::party::party_manager().start_party(name, seed);
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_party_link_copied(false);
+                refresh_party_ui(&ui);
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_join_party(move |invite_input, display_name| {
+            let name = if !display_name.trim().is_empty() {
+                display_name.trim().to_string()
+            } else {
+                let settings = core::persistence::load_settings();
+                if !settings.party_display_name.is_empty() {
+                    settings.party_display_name
+                } else {
+                    std::env::var("USERNAME").unwrap_or_else(|_| "Windows PC".to_string())
+                }
+            };
+            crate::core::party::party_manager().join_party(invite_input.trim().to_string(), name);
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_party_link_copied(false);
+                refresh_party_ui(&ui);
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_leave_party(move || {
+            crate::core::party::party_manager().leave_party();
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_party_link_copied(false);
+                refresh_party_ui(&ui);
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_copy_party_link(move || {
+            let snap = crate::core::party::party_manager().snapshot();
+            if !snap.invite_link.is_empty() {
+                set_clipboard_text(&snap.invite_link);
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_party_link_copied(true);
+                }
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_paste_party_link(move || {
+            if let Some(text) = get_clipboard_text() {
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_party_join_input(SharedString::from(text.trim()));
+                }
+            }
+        });
     }
 
 
@@ -2965,6 +3339,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         ui.on_remove_from_queue(move |idx| {
             playback.remove_from_queue(idx as usize);
+            if crate::core::party::party_manager().snapshot().is_active {
+                crate::core::party::party_manager().send_action(
+                    crate::core::party::PartyAction::RemoveFromQueue { upcoming_index: idx as usize },
+                    false,
+                );
+            }
             if let Some(ui) = ui_weak.upgrade() {
                 let items: Vec<SongItem> = playback.queue_upcoming().iter().map(make_song_item).collect();
                 ui.set_queue(ModelRc::new(VecModel::from(items)));
@@ -3334,6 +3714,13 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         ui.on_toggle_play_pause(move || {
             playback.toggle_play_pause();
             let is_playing = playback.is_playing();
+            if crate::core::party::party_manager().snapshot().is_active {
+                let position_ms = (playback.elapsed_secs() * 1000.0) as u64;
+                crate::core::party::party_manager().send_action(
+                    crate::core::party::PartyAction::PlayPause { is_playing, position_ms },
+                    false,
+                );
+            }
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_is_playing(is_playing);
             }
@@ -3345,6 +3732,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         ui.on_prev_track(move || {
             playback.prev_track();
+            if crate::core::party::party_manager().snapshot().is_active {
+                crate::core::party::party_manager().send_action(
+                    crate::core::party::PartyAction::Prev,
+                    false,
+                );
+            }
             if let Some(ui) = ui_weak.upgrade() {
                 refresh_native_shell_ui(&ui, playback);
             }
@@ -3356,6 +3749,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         ui.on_next_track(move || {
             playback.next_track();
+            if crate::core::party::party_manager().snapshot().is_active {
+                crate::core::party::party_manager().send_action(
+                    crate::core::party::PartyAction::Next,
+                    false,
+                );
+            }
             if let Some(ui) = ui_weak.upgrade() {
                 refresh_native_shell_ui(&ui, playback);
             }
@@ -3376,6 +3775,20 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 state.is_playing = true;
             }
             playback.set_now_playing(video_id.as_str(), title.as_str(), artist.as_str(), duration_secs as u32);
+            if crate::core::party::party_manager().snapshot().is_active {
+                let track = crate::core::party::PartyTrack {
+                    video_id: video_id.to_string(),
+                    title: title.to_string(),
+                    artist: artist.to_string(),
+                    duration_secs: duration_secs as u32,
+                    thumbnail_url: format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", video_id),
+                    ..Default::default()
+                };
+                crate::core::party::party_manager().send_action(
+                    crate::core::party::PartyAction::PlayTrackNow { track },
+                    true,
+                );
+            }
             if let Some(ui) = ui_weak.upgrade() {
                 refresh_native_shell_ui(&ui, playback);
             }
@@ -3398,6 +3811,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             let dur = playback.track_duration_secs() as f64;
             let target_secs = fraction * dur;
             let applied = playback.seek_to_secs(target_secs);
+            if crate::core::party::party_manager().snapshot().is_active {
+                crate::core::party::party_manager().send_action(
+                    crate::core::party::PartyAction::Seek { position_ms: (target_secs * 1000.0) as u64 },
+                    false,
+                );
+            }
             // Only snap the UI when the audio actually moved. While streaming and
             // not yet cached, an arbitrary seek can't be honored — leave the bar
             // where playback really is so the timeline can't desync.
@@ -3434,6 +3853,20 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 q.iter().find(|s| s.video_id == video_id.as_str()).map(|s| s.duration_secs).unwrap_or(0)
             };
             playback.add_to_queue(video_id.as_str(), title.as_str(), artist.as_str(), dur);
+            if crate::core::party::party_manager().snapshot().is_active {
+                let track = crate::core::party::PartyTrack {
+                    video_id: video_id.to_string(),
+                    title: title.to_string(),
+                    artist: artist.to_string(),
+                    duration_secs: dur,
+                    thumbnail_url: format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", video_id),
+                    ..Default::default()
+                };
+                crate::core::party::party_manager().send_action(
+                    crate::core::party::PartyAction::AddToQueue { track, play_next: false },
+                    false,
+                );
+            }
             if let Some(ui) = ui_weak.upgrade() {
                 let items: Vec<SongItem> = playback.queue_upcoming().iter().map(make_song_item).collect();
                 ui.set_queue(ModelRc::new(VecModel::from(items)));
@@ -3448,6 +3881,20 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             playback.play_next(video_id.as_str(), title.as_str(), artist.as_str(), duration_secs as u32);
             // Also remove from autoplay queue if present
             playback.autoplay_remove_id(video_id.as_str());
+            if crate::core::party::party_manager().snapshot().is_active {
+                let track = crate::core::party::PartyTrack {
+                    video_id: video_id.to_string(),
+                    title: title.to_string(),
+                    artist: artist.to_string(),
+                    duration_secs: duration_secs as u32,
+                    thumbnail_url: format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", video_id),
+                    ..Default::default()
+                };
+                crate::core::party::party_manager().send_action(
+                    crate::core::party::PartyAction::AddToQueue { track, play_next: true },
+                    false,
+                );
+            }
             if let Some(ui) = ui_weak.upgrade() {
                 let items: Vec<SongItem> = playback.queue_upcoming().iter().map(make_song_item).collect();
                 ui.set_queue(ModelRc::new(VecModel::from(items)));
@@ -3486,6 +3933,13 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         ui.on_play_autoplay_song(move |index| {
             if let Some(song) = playback.play_autoplay_at_preserving_queues(index as usize) {
+                if crate::core::party::party_manager().snapshot().is_active {
+                    let track = now_playing_to_party_track(&song, "");
+                    crate::core::party::party_manager().send_action(
+                        crate::core::party::PartyAction::PlayTrackNow { track },
+                        false,
+                    );
+                }
                 if let Some(ui) = ui_weak.upgrade() {
                     refresh_native_shell_ui(&ui, playback);
                     let items: Vec<SongItem> = playback.autoplay_queue().iter().map(make_song_item).collect();
@@ -3508,6 +3962,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         ui.on_shuffle_queue(move || {
             let playback = crate::core::bridge::playback_core();
             if playback.shuffle_upcoming_user_queue() {
+                if crate::core::party::party_manager().snapshot().is_active {
+                    crate::core::party::party_manager().send_action(
+                        crate::core::party::PartyAction::ShuffleUpcoming,
+                        true,
+                    );
+                }
                 if let Some(ui) = ui_weak.upgrade() {
                     refresh_native_shell_ui(&ui, playback);
                 }
@@ -3521,6 +3981,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         ui.on_cycle_repeat(move || {
             let playback = crate::core::bridge::playback_core();
             let mode = playback.cycle_repeat_mode();
+            if crate::core::party::party_manager().snapshot().is_active {
+                crate::core::party::party_manager().send_action(
+                    crate::core::party::PartyAction::SetRepeatMode { mode: mode.as_str().to_string() },
+                    false,
+                );
+            }
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_repeat_mode(SharedString::from(mode.as_str()));
             }
@@ -4359,13 +4825,20 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     .collect();
                 if !songs.is_empty() {
                     let playback = crate::core::bridge::playback_core();
-                    playback.set_queue(songs);
+                    playback.set_queue(songs.clone());
                     {
                         let mut state = playback.state_lock();
                         state.is_playing = true;
                     }
                     let first = playback.now_playing();
                     playback.set_now_playing(&first.video_id, &first.title, &first.artist, first.duration_secs);
+                    if crate::core::party::party_manager().snapshot().is_active {
+                        let tracks: Vec<crate::core::party::PartyTrack> = songs.iter().map(|s| now_playing_to_party_track(s, "")).collect();
+                        crate::core::party::party_manager().send_action(
+                            crate::core::party::PartyAction::ReplaceQueue { tracks, start_index: 0, is_playing: true },
+                            false,
+                        );
+                    }
                     refresh_native_shell_ui(&ui, playback);
                 }
             }
@@ -4390,13 +4863,20 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 if !songs.is_empty() {
                     shuffle_vec(&mut songs);
                     let playback = crate::core::bridge::playback_core();
-                    playback.set_queue(songs);
+                    playback.set_queue(songs.clone());
                     {
                         let mut state = playback.state_lock();
                         state.is_playing = true;
                     }
                     let first = playback.now_playing();
                     playback.set_now_playing(&first.video_id, &first.title, &first.artist, first.duration_secs);
+                    if crate::core::party::party_manager().snapshot().is_active {
+                        let tracks: Vec<crate::core::party::PartyTrack> = songs.iter().map(|s| now_playing_to_party_track(s, "")).collect();
+                        crate::core::party::party_manager().send_action(
+                            crate::core::party::PartyAction::ReplaceQueue { tracks, start_index: 0, is_playing: true },
+                            false,
+                        );
+                    }
                     refresh_native_shell_ui(&ui, playback);
                 }
             }
@@ -4629,6 +5109,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         ui.on_move_queue_song_next(move |idx| {
             playback.move_queue_song_next(idx.max(0) as usize);
+            if crate::core::party::party_manager().snapshot().is_active {
+                crate::core::party::party_manager().send_action(
+                    crate::core::party::PartyAction::MoveQueueNext { upcoming_index: idx.max(0) as usize },
+                    false,
+                );
+            }
             if let Some(ui) = ui_weak.upgrade() {
                 let items: Vec<SongItem> = playback.queue_upcoming().iter().map(make_song_item).collect();
                 ui.set_queue(ModelRc::new(VecModel::from(items)));
@@ -4695,13 +5181,20 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     .collect();
                 if !songs.is_empty() {
                     let playback = crate::core::bridge::playback_core();
-                    playback.set_queue(songs);
+                    playback.set_queue(songs.clone());
                     {
                         let mut state = playback.state_lock();
                         state.is_playing = true;
                     }
                     let first = playback.now_playing();
                     playback.set_now_playing(&first.video_id, &first.title, &first.artist, first.duration_secs);
+                    if crate::core::party::party_manager().snapshot().is_active {
+                        let tracks: Vec<crate::core::party::PartyTrack> = songs.iter().map(|s| now_playing_to_party_track(s, "")).collect();
+                        crate::core::party::party_manager().send_action(
+                            crate::core::party::PartyAction::ReplaceQueue { tracks, start_index: 0, is_playing: true },
+                            false,
+                        );
+                    }
                     refresh_native_shell_ui(&ui, playback);
                 }
             }
@@ -5080,6 +5573,8 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             let mut thumb_fetch_done: Option<std::sync::mpsc::Receiver<()>> = None;
             let mut last_autoplay_refill: Option<std::time::Instant> = None;
             let mut last_notified_np_id = String::new();
+            let mut party_poll_counter: u32 = 0;
+            let mut last_party_drift_seek = std::time::Instant::now();
             #[cfg(target_os = "windows")]
             let mut smtc_attached = false;
 
@@ -5208,76 +5703,108 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     }
                 }
 
-                // Auto-advance when track ends
-                if playback.take_advance_pending() {
-                    playback.advance_after_track_end();
-                    let ui_w = ui_weak.clone();
-                    slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = ui_w.upgrade() {
-                            refresh_native_shell_ui(&ui, playback);
-                        }
-                    }).ok();
-                }
+                let party_snap = crate::core::party::party_manager().snapshot();
 
-                // Autoplay: play next from autoplay queue when user queue runs out
-                if playback.take_autoplay_needed() {
-                    if autoplay_enabled.load(std::sync::atomic::Ordering::Relaxed) {
-                        let next_song = playback.pop_autoplay();
-                        if let Some(song) = next_song {
-                            {
-                                let mut state = playback.state_lock();
-                                state.is_playing = true;
-                            }
-                            playback.set_now_playing(&song.video_id, &song.title, &song.artist, song.duration_secs);
-                            let ui_w = ui_weak.clone();
-                            slint::invoke_from_event_loop(move || {
-                                if let Some(ui) = ui_w.upgrade() {
-                                    refresh_native_shell_ui(&ui, playback);
-                                    // Update autoplay queue model
-                                    let items: Vec<SongItem> = playback.autoplay_queue().iter().map(make_song_item).collect();
-                                    ui.set_autoplay_queue(ModelRc::new(VecModel::from(items)));
-                                }
-                            }).ok();
-                        } else {
-                            // Autoplay queue exhausted — continue radio from the most
-                            // recently played track so we get a fresh continuation
-                            // instead of replaying the original seed's batch.
-                            let seed = {
-                                let np = playback.now_playing().video_id;
-                                if !np.is_empty() && np != "native-prototype" {
-                                    np
-                                } else {
-                                    playback.autoplay_seed()
-                                }
-                            };
-                            if !seed.is_empty() {
-                                // Keep the seed fresh for the next exhaustion cycle.
-                                playback.set_autoplay_seed(&seed);
-                                let ui_w = ui_weak.clone();
-                                std::thread::spawn(move || {
-                                    fetch_autoplay_queue(ui_w, seed, true);
-                                });
-                            } else {
-                                eprintln!("[autoplay] queue exhausted but no seed available — stopping");
-                                if playback.is_awaiting_autoplay_after_end() {
-                                    playback.stop_at_queue_end();
-                                    let ui_w = ui_weak.clone();
-                                    slint::invoke_from_event_loop(move || {
-                                        if let Some(ui) = ui_w.upgrade() {
-                                            refresh_native_shell_ui(&ui, playback);
-                                        }
-                                    }).ok();
-                                }
-                            }
+                // Auto-advance when track ends
+                if party_snap.is_active && !party_snap.is_host {
+                    // Guest pauses at track end and waits for Host's state broadcast
+                    playback.take_advance_pending();
+                    playback.take_autoplay_needed();
+                } else {
+                    if playback.take_advance_pending() {
+                        playback.advance_after_track_end();
+                        if party_snap.is_active && party_snap.is_host {
+                            let full = playback.full_queue();
+                            let tracks: Vec<crate::core::party::PartyTrack> = full.iter().map(|s| now_playing_to_party_track(s, "")).collect();
+                            crate::core::party::party_manager().send_action(
+                                crate::core::party::PartyAction::ReplaceQueue {
+                                    tracks,
+                                    start_index: playback.queue_index(),
+                                    is_playing: playback.is_playing(),
+                                },
+                                false,
+                            );
                         }
-                    } else if playback.is_awaiting_autoplay_after_end() {
-                        playback.stop_at_queue_end();
                         let ui_w = ui_weak.clone();
                         slint::invoke_from_event_loop(move || {
                             if let Some(ui) = ui_w.upgrade() {
                                 refresh_native_shell_ui(&ui, playback);
                             }
                         }).ok();
+                    }
+
+                    // Autoplay: play next from autoplay queue when user queue runs out
+                    if playback.take_autoplay_needed() {
+                        if autoplay_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                            let next_song = playback.pop_autoplay();
+                            if let Some(song) = next_song {
+                                {
+                                    let mut state = playback.state_lock();
+                                    state.is_playing = true;
+                                }
+                                playback.set_now_playing(&song.video_id, &song.title, &song.artist, song.duration_secs);
+                                if party_snap.is_active && party_snap.is_host {
+                                    let full = playback.full_queue();
+                                    let tracks: Vec<crate::core::party::PartyTrack> = full.iter().map(|s| now_playing_to_party_track(s, "")).collect();
+                                    crate::core::party::party_manager().send_action(
+                                        crate::core::party::PartyAction::ReplaceQueue {
+                                            tracks,
+                                            start_index: playback.queue_index(),
+                                            is_playing: true,
+                                        },
+                                        false,
+                                    );
+                                }
+                                let ui_w = ui_weak.clone();
+                                slint::invoke_from_event_loop(move || {
+                                    if let Some(ui) = ui_w.upgrade() {
+                                        refresh_native_shell_ui(&ui, playback);
+                                        // Update autoplay queue model
+                                        let items: Vec<SongItem> = playback.autoplay_queue().iter().map(make_song_item).collect();
+                                        ui.set_autoplay_queue(ModelRc::new(VecModel::from(items)));
+                                    }
+                                }).ok();
+                            } else {
+                                // Autoplay queue exhausted — continue radio from the most
+                                // recently played track so we get a fresh continuation
+                                // instead of replaying the original seed's batch.
+                                let seed = {
+                                    let np = playback.now_playing().video_id;
+                                    if !np.is_empty() && np != "native-prototype" {
+                                        np
+                                    } else {
+                                        playback.autoplay_seed()
+                                    }
+                                };
+                                if !seed.is_empty() {
+                                    // Keep the seed fresh for the next exhaustion cycle.
+                                    playback.set_autoplay_seed(&seed);
+                                    let ui_w = ui_weak.clone();
+                                    std::thread::spawn(move || {
+                                        fetch_autoplay_queue(ui_w, seed, true);
+                                    });
+                                } else {
+                                    eprintln!("[autoplay] queue exhausted but no seed available — stopping");
+                                    if playback.is_awaiting_autoplay_after_end() {
+                                        playback.stop_at_queue_end();
+                                        let ui_w = ui_weak.clone();
+                                        slint::invoke_from_event_loop(move || {
+                                            if let Some(ui) = ui_w.upgrade() {
+                                                refresh_native_shell_ui(&ui, playback);
+                                            }
+                                        }).ok();
+                                    }
+                                }
+                            }
+                        } else if playback.is_awaiting_autoplay_after_end() {
+                            playback.stop_at_queue_end();
+                            let ui_w = ui_weak.clone();
+                            slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = ui_w.upgrade() {
+                                    refresh_native_shell_ui(&ui, playback);
+                                }
+                            }).ok();
+                        }
                     }
                 }
 
@@ -5303,9 +5830,14 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 // Start the playback timer the moment audio actually begins playing.
                 if playback.take_audio_just_started() {
                     playback.on_audio_started();
+                    let np = playback.now_playing();
+                    if let Some(target_ms) = crate::core::party::party_manager().target_position_ms(&np.video_id) {
+                        if target_ms > 800 {
+                            playback.seek_to_secs(target_ms as f64 / 1000.0);
+                        }
+                    }
                     // NOW kick off the cache download — after stream URL is resolved
                     // so yt-dlp cookie DB isn't locked by a competing process.
-                    let np = playback.now_playing();
                     if !np.video_id.is_empty() && np.video_id != "native-prototype" {
                         crate::core::cache::spawn_cache_download(np.video_id.clone(), np.title.clone(), np.artist.clone());
                         // Persist as last played
@@ -5646,6 +6178,34 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     #[cfg(target_os = "windows")]
                     crate::core::media_controls::update(media_snap);
                 }).ok();
+
+                // ── Auricle Party periodic polling & drift correction ─────────
+                party_poll_counter += 1;
+                if party_poll_counter >= 2 {
+                    party_poll_counter = 0;
+                    let psnap = crate::core::party::party_manager().snapshot();
+                    if psnap.is_active || psnap.status != "off" {
+                        let ui_w_party = ui_weak.clone();
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui_w_party.upgrade() {
+                                apply_pending_party_updates(&ui, playback);
+                                refresh_party_ui(&ui);
+                            }
+                        }).ok();
+
+                        if is_playing && !playback.is_audio_loading() {
+                            let cur_vid = playback.now_playing().video_id;
+                            if let Some(target_ms) = crate::core::party::party_manager().target_position_ms(&cur_vid) {
+                                let current_ms = playback.elapsed_secs() * 1000.0;
+                                let delta = (current_ms - target_ms as f64).abs();
+                                if delta > 750.0 && last_party_drift_seek.elapsed() >= Duration::from_secs(4) {
+                                    last_party_drift_seek = Instant::now();
+                                    playback.seek_to_secs(target_ms as f64 / 1000.0);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         });
     }
