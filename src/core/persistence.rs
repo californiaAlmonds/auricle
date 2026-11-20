@@ -86,6 +86,9 @@ pub struct AppSettings {
     /// Explicit user opt-in for yt-dlp to use YouTube cookies from a local browser.
     #[serde(default)]
     pub use_browser_cookies: bool,
+    /// Display name used in Auricle Party sessions.
+    #[serde(default)]
+    pub party_display_name: String,
 }
 
 fn default_prefetch_depth() -> u32 { 1 }
@@ -104,6 +107,7 @@ impl Default for AppSettings {
             last_ytdlp_update_check: 0,
             thumb_cache_purged: false,
             use_browser_cookies: false,
+            party_display_name: String::new(),
         }
     }
 }

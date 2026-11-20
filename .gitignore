@@ -26,6 +26,7 @@ rearchitecture.md
 # ── Editor / local agent config (not shipped) ─────────────────
 .vscode/
 .github/agents/
+/.playwright-mcp/
 
 # ── OS / editor cruft ─────────────────────────────────────────
 .DS_Store

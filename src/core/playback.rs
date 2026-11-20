@@ -1,5 +1,5 @@
-﻿use std::sync::{mpsc, Mutex, OnceLock};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{mpsc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -77,12 +77,30 @@ impl NowPlaying {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepeatMode {
+    Off,
+    All,
+    One,
+}
+
+impl RepeatMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::All => "all",
+            Self::One => "one",
+        }
+    }
+}
+
 pub struct PlaybackState {
     pub queue: Vec<NowPlaying>,
     pub queue_index: usize,
     pub now_playing: NowPlaying,
     pub is_playing: bool,
     pub audio_enabled: bool,
+    pub repeat_mode: RepeatMode,
     audio_worker: Option<AudioWorker>,
     pub track_started_at: Option<std::time::Instant>,
     pub paused_elapsed: std::time::Duration,
@@ -97,6 +115,7 @@ struct AudioEngine {
     _stream: OutputStream,
     handle: OutputStreamHandle,
     sink: Sink,
+    device_name: Option<String>,
     current_video_id: Option<String>,
     current_is_cached: bool,
     /// CDN URL of the currently streaming track (for Range-request seeks)
@@ -108,6 +127,8 @@ struct AudioEngine {
     /// Duration (secs) of the loaded source, published so the polling loop can
     /// backfill songs whose metadata omitted a duration.
     duration_out: Arc<AtomicU32>,
+    source_duration_secs: Option<f64>,
+    stream_eof_clean: Option<Arc<crate::core::stream_player::StreamEofTracker>>,
 }
 
 enum AudioCommand {
@@ -135,6 +156,9 @@ enum AudioSource {
     CachedFile(std::path::PathBuf),
 }
 
+pub const AUTOPLAY_TARGET: usize = 15;
+pub const AUTOPLAY_MAX: usize = 25;
+
 pub struct PlaybackCore {
     state: Mutex<PlaybackState>,
     advance_pending: Arc<AtomicBool>,
@@ -155,6 +179,10 @@ pub struct PlaybackCore {
     /// UI layer; folded in here so callers use methods instead of raw shared locks.
     autoplay_queue: Mutex<Vec<NowPlaying>>,
     autoplay_seed: Mutex<String>,
+    autoplay_refilling: AtomicBool,
+    autoplay_generation: AtomicU64,
+    pub(crate) autoplay_refill_empty: AtomicBool,
+    track_ended_awaiting_autoplay: AtomicBool,
 }
 
 fn log_native_audio_error(stage: &str, code: &str, video_id: &str, detail: &str) {
@@ -174,7 +202,19 @@ fn log_native_audio_timing(stage: &str, code: &str, video_id: &str, started: Ins
     eprintln!("{message}");
 }
 
+fn default_output_device_name() -> Option<String> {
+    use rodio::cpal::traits::{DeviceTrait, HostTrait};
+    rodio::cpal::default_host()
+        .default_output_device()
+        .and_then(|d| d.name().ok())
+}
+
+fn device_changed(current: Option<&str>, recorded: Option<&str>) -> bool {
+    matches!(current, Some(cur) if Some(cur) != recorded)
+}
+
 fn create_audio_engine(duration_out: Arc<AtomicU32>) -> Result<AudioEngine, String> {
+    let device_name = default_output_device_name();
     let (_stream, handle) = OutputStream::try_default()
         .map_err(|err| format!("Failed to open native audio output: {err}"))?;
     let sink = Sink::try_new(&handle)
@@ -183,13 +223,33 @@ fn create_audio_engine(duration_out: Arc<AtomicU32>) -> Result<AudioEngine, Stri
         _stream,
         handle,
         sink,
+        device_name,
         current_video_id: None,
         current_is_cached: false,
         stream_url: None,
         stream_content_len: None,
         volume: 1.0,
         duration_out,
+        source_duration_secs: None,
+        stream_eof_clean: None,
     })
+}
+
+fn reopen_output_device(engine: &mut AudioEngine) -> Result<(), String> {
+    let (new_stream, new_handle) = OutputStream::try_default()
+        .map_err(|err| format!("Failed to reopen native audio output: {err}"))?;
+    let new_sink = Sink::try_new(&new_handle)
+        .map_err(|err| format!("Failed to create native audio sink: {err}"))?;
+    new_sink.set_volume(engine.volume);
+    engine.sink.stop();
+    engine.sink = new_sink;
+    engine.handle = new_handle;
+    let old_stream = std::mem::replace(&mut engine._stream, new_stream);
+    drop(old_stream);
+    engine.device_name = default_output_device_name();
+    engine.source_duration_secs = None;
+    engine.stream_eof_clean = None;
+    Ok(())
 }
 
 fn spawn_stream_fetch(events: mpsc::Sender<AudioEvent>, request_id: u64, video_id: String, force_refresh: bool) {
@@ -235,7 +295,7 @@ fn spawn_stream_fetch(events: mpsc::Sender<AudioEvent>, request_id: u64, video_i
     });
 }
 
-fn load_stream_into_engine(engine: &mut AudioEngine, video_id: &str, url: &str, fallback_content_len: Option<u64>, seek_secs: Option<f64>, tee_meta: Option<(&str, &str)>) -> Result<(), String> {
+fn load_stream_into_engine(engine: &mut AudioEngine, video_id: &str, url: &str, fallback_content_len: Option<u64>, seek_secs: Option<f64>, tee_meta: Option<(&str, &str)>, clamp_seek_to_end: bool) -> Result<(), String> {
     // Write-through-cache only a fresh full load (no seek). A seek starts mid-file
     // and would produce a non-contiguous cache file, so stream without teeing then.
     let decode_started = Instant::now();
@@ -249,10 +309,23 @@ fn load_stream_into_engine(engine: &mut AudioEngine, video_id: &str, url: &str, 
         e
     })?;
 
+    let exact_dur = source.duration_secs_f64();
+    let eof_clean = source.stream_eof_clean_handle();
+
     // Pre-seek on the raw source (HTTP range request) BEFORE appending — the same
     // reliable path cached files use, which sidesteps rodio's sink.try_seek chain.
     if let Some(secs) = seek_secs.filter(|&s| s > 0.5) {
-        source.seek_to(secs)?;
+        let target = if clamp_seek_to_end {
+            if let Some(d) = exact_dur.filter(|&d| d > 0.5) { secs.min((d - 0.35).max(0.0)) } else { secs }
+        } else {
+            if let Some(d) = exact_dur.filter(|&d| d > 0.0) {
+                if secs >= d - 1.5 { return Err(format!("stream seek target {secs:.1}s is at or past track end ({d:.1}s)")); }
+            }
+            secs
+        };
+        if target > 0.5 {
+            source.seek_to(target)?;
+        }
     }
 
     // Use content_len from the stream response, fall back to the HEAD-fetched value.
@@ -276,22 +349,54 @@ fn load_stream_into_engine(engine: &mut AudioEngine, video_id: &str, url: &str, 
     engine.current_is_cached = false;
     engine.stream_url = Some(url.to_string());
     engine.stream_content_len = content_len;
+    engine.source_duration_secs = exact_dur;
+    engine.stream_eof_clean = eof_clean;
     Ok(())
+}
+
+fn open_seeked_file_source(
+    path: &std::path::Path,
+    seek_secs: Option<f64>,
+    clamp_seek_to_end: bool,
+) -> Result<(StreamingAudioSource, Option<f64>), String> {
+    let mut source = StreamingAudioSource::from_file(path)
+        .map_err(|e| format!("Cache file decode error: {e}"))?;
+
+    let exact_dur = source.duration_secs_f64();
+    if let Some(secs) = seek_secs.filter(|&s| s > 0.1) {
+        if clamp_seek_to_end {
+            let target = if let Some(d) = exact_dur.filter(|&d| d > 0.5) {
+                secs.min((d - 0.35).max(0.0))
+            } else {
+                secs
+            };
+            if target > 0.1 {
+                source
+                    .seek_to(target)
+                    .map_err(|e| format!("Cache file seek_to({target:.1}s) failed: {e}"))?;
+            }
+        } else {
+            if let Some(d) = exact_dur.filter(|&d| d > 0.0) {
+                if secs >= d - 1.5 {
+                    return Err(format!(
+                        "resume target {secs:.1}s is at or past cached track end ({d:.1}s)"
+                    ));
+                }
+            }
+            source
+                .seek_to(secs)
+                .map_err(|e| format!("Cache file seek_to({secs:.1}s) failed: {e}"))?;
+        }
+    }
+
+    Ok((source, exact_dur))
 }
 
 /// Load a cached file into the engine, optionally pre-seeking to `seek_secs`.
 /// Seeking happens on the source BEFORE appending to the sink — avoids
 /// relying on sink.try_seek() which doesn't forward cleanly through rodio's pipeline.
-fn load_file_into_engine(engine: &mut AudioEngine, video_id: &str, path: &std::path::Path, seek_secs: Option<f64>) -> Result<(), String> {
-    let mut source = StreamingAudioSource::from_file(path)
-        .map_err(|e| format!("Cache file decode error: {e}"))?;
-
-    if let Some(secs) = seek_secs.filter(|&s| s > 0.1) {
-        if let Err(e) = source.seek_to(secs) {
-            eprintln!("[file-seek] seek_to({secs:.1}s) failed: {e}");
-            // Non-fatal: play from beginning rather than crash
-        }
-    }
+fn load_file_into_engine(engine: &mut AudioEngine, video_id: &str, path: &std::path::Path, seek_secs: Option<f64>, clamp_seek_to_end: bool) -> Result<(), String> {
+    let (source, exact_dur) = open_seeked_file_source(path, seek_secs, clamp_seek_to_end)?;
 
     let replacement_sink = Sink::try_new(&engine.handle)
         .map_err(|e| format!("Failed to replace sink: {e}"))?;
@@ -305,6 +410,8 @@ fn load_file_into_engine(engine: &mut AudioEngine, video_id: &str, path: &std::p
     engine.current_is_cached = true;
     engine.stream_url = None;
     engine.stream_content_len = None;
+    engine.source_duration_secs = exact_dur;
+    engine.stream_eof_clean = None;
     Ok(())
 }
 
@@ -354,6 +461,7 @@ fn spawn_audio_worker(
             // tell a mid-song stall (recover from cache) apart from the natural end
             // of the track (just advance).
             let mut current_duration_secs: f64 = 0.0;
+            let mut last_device_check = Instant::now();
 
             loop {
                 // Collect all immediately-available commands, then process them.
@@ -400,7 +508,7 @@ fn spawn_audio_worker(
                             }
 
                             engine.sink.stop();
-                            engine.current_video_id = None;
+                            engine.current_video_id = None; engine.source_duration_secs = None; engine.stream_eof_clean = None;
                             pending_seek = None;
 
                             if is_playing {
@@ -416,13 +524,19 @@ fn spawn_audio_worker(
                             is_playing = playing;
                             if !playing {
                                 // Freeze elapsed tracking
-                                if let Some(started) = playback_started_at.take() {
-                                    playback_base_secs += started.elapsed().as_secs_f64();
+                                if !audio_loading_flag.load(Ordering::Relaxed) {
+                                    if let Some(started) = playback_started_at.take() {
+                                        playback_base_secs += started.elapsed().as_secs_f64();
+                                    }
+                                } else {
+                                    playback_started_at = None;
                                 }
                                 engine.sink.pause();
                                 continue;
                             } else {
-                                playback_started_at = Some(std::time::Instant::now());
+                                if playback_started_at.is_none() && !audio_loading_flag.load(Ordering::Relaxed) && engine.current_video_id.is_some() {
+                                    playback_started_at = Some(std::time::Instant::now());
+                                }
                             }
                             if let Some(ref video_id) = requested_video.clone() {
                                 if engine.current_video_id.as_deref() == Some(video_id) {
@@ -437,7 +551,7 @@ fn spawn_audio_worker(
                                     audio_just_started_flag.store(false, Ordering::Relaxed);
                                 } else {
                                     engine.sink.stop();
-                                    engine.current_video_id = None;
+                                    engine.current_video_id = None; engine.source_duration_secs = None; engine.stream_eof_clean = None;
                                     audio_loading_flag.store(true, Ordering::Relaxed);
                                     audio_just_started_flag.store(false, Ordering::Relaxed);
                                     stream_retries = 0;
@@ -460,7 +574,7 @@ fn spawn_audio_worker(
                             // If user sought while streaming, honour that exact target.
                             // Otherwise use elapsed_secs (real playback position).
                             let seek_target = pending_seek.take().unwrap_or(elapsed_secs);
-                            match load_file_into_engine(&mut engine, &vid, &path, Some(seek_target)) {
+                            match load_file_into_engine(&mut engine, &vid, &path, Some(seek_target), false) {
                                 Ok(()) => {
                                     is_cached_flag.store(true, Ordering::Relaxed);
                                     if !is_playing { engine.sink.pause(); }
@@ -481,10 +595,10 @@ fn spawn_audio_worker(
                             let cached_path = AudioCache::global().lock().ok()
                                 .and_then(|mut c| c.get(&video_id));
                             if let Some(path) = cached_path {
-                                match load_file_into_engine(&mut engine, &video_id, &path, Some(secs)) {
+                                match load_file_into_engine(&mut engine, &video_id, &path, Some(secs), true) {
                                     Ok(()) => {
                                         is_cached_flag.store(true, Ordering::Relaxed);
-                                        playback_base_secs = secs;
+                                        playback_base_secs = secs.min(engine.source_duration_secs.unwrap_or(secs));
                                         playback_started_at = if is_playing { Some(std::time::Instant::now()) } else { None };
                                         if !is_playing { engine.sink.pause(); }
                                     }
@@ -497,10 +611,10 @@ fn spawn_audio_worker(
                                     let path2 = AudioCache::global().lock().ok()
                                         .and_then(|mut c| c.get(&cached_vid));
                                     if let Some(path) = path2 {
-                                        match load_file_into_engine(&mut engine, &cached_vid, &path, Some(secs)) {
+                                        match load_file_into_engine(&mut engine, &cached_vid, &path, Some(secs), true) {
                                             Ok(()) => {
-                                                playback_base_secs = secs;
-                                                playback_started_at = if is_playing { Some(std::time::Instant::now()) } else { None };
+                                                playback_base_secs = secs.min(engine.source_duration_secs.unwrap_or(secs));
+                                        playback_started_at = if is_playing { Some(std::time::Instant::now()) } else { None };
                                                 if !is_playing { engine.sink.pause(); }
                                             }
                                             Err(e) => eprintln!("[seek-cached] reload+seek failed: {e}"),
@@ -518,14 +632,14 @@ fn spawn_audio_worker(
                                 let in_place = engine.sink.try_seek(Duration::from_secs_f64(secs.max(0.0)));
                                 if in_place.is_ok() {
                                     eprintln!("[seek] stream in-place seek → {secs:.1}s");
-                                    playback_base_secs = secs;
-                                    playback_started_at = if is_playing { Some(std::time::Instant::now()) } else { None };
+                                    playback_base_secs = secs.min(engine.source_duration_secs.unwrap_or(secs));
+                                        playback_started_at = if is_playing { Some(std::time::Instant::now()) } else { None };
                                 } else if let Some(url) = url {
-                                    match load_stream_into_engine(&mut engine, &video_id, &url, clen, Some(secs), None) {
+                                    match load_stream_into_engine(&mut engine, &video_id, &url, clen, Some(secs), None, true) {
                                         Ok(()) => {
                                             eprintln!("[seek] stream reloaded at {secs:.1}s");
-                                            playback_base_secs = secs;
-                                            playback_started_at = if is_playing { Some(std::time::Instant::now()) } else { None };
+                                            playback_base_secs = secs.min(engine.source_duration_secs.unwrap_or(secs));
+                                        playback_started_at = if is_playing { Some(std::time::Instant::now()) } else { None };
                                             if !is_playing { engine.sink.pause(); }
                                         }
                                         Err(e) => {
@@ -552,7 +666,7 @@ fn spawn_audio_worker(
                             }
                             match result {
                                 Ok(AudioSource::Stream(url, content_len)) => {
-                                    if let Err(err) = load_stream_into_engine(&mut engine, &video_id, &url, content_len, None, Some((&requested_title, &requested_artist))) {
+                                    if let Err(err) = load_stream_into_engine(&mut engine, &video_id, &url, content_len, None, Some((&requested_title, &requested_artist)), false) {
                                         // Most common cause: expired/unauthorized signed CDN
                                         // URL (HTTP 401/403) from a prefetched radio track.
                                         if stream_retries < MAX_STREAM_RETRIES {
@@ -573,11 +687,14 @@ fn spawn_audio_worker(
                                                 crate::core::addons::force_ytdlp_update_once();
                                             }
                                             audio_loading_flag.store(false, Ordering::Relaxed);
-                                            engine.current_video_id = None;
+                                            engine.current_video_id = None; engine.source_duration_secs = None; engine.stream_eof_clean = None;
                                             stream_retries = 0;
                                             advance_pending.store(true, Ordering::Relaxed);
                                         }
                                     } else {
+                                        if let Some(d) = engine.source_duration_secs.filter(|&d| d > 0.0) {
+                                            current_duration_secs = d;
+                                        }
                                         is_cached_flag.store(false, Ordering::Relaxed);
                                         audio_loading_flag.store(false, Ordering::Relaxed);
                                         audio_just_started_flag.store(true, Ordering::Relaxed);
@@ -588,13 +705,14 @@ fn spawn_audio_worker(
                                     }
                                 }
                                 Ok(AudioSource::CachedFile(path)) => {
-                                    if let Err(err) = load_file_into_engine(&mut engine, &video_id, &path, None) {
+                                    if let Err(err) = load_file_into_engine(&mut engine, &video_id, &path, None, false) {
                                         log_native_audio_error("playback", "cache-load-failed", &video_id, &err);
                                         // Fall back to streaming (fresh stream attempt)
                                         stream_retries = 0;
                                         latest_request_id = latest_request_id.saturating_add(1);
                                         spawn_stream_fetch(event_sender.clone(), latest_request_id, video_id, false);
                                     } else {
+                                        if let Some(d) = engine.source_duration_secs.filter(|&d| d > 0.0) { current_duration_secs = d; }
                                         is_cached_flag.store(true, Ordering::Relaxed);
                                         audio_loading_flag.store(false, Ordering::Relaxed);
                                         audio_just_started_flag.store(true, Ordering::Relaxed);
@@ -616,11 +734,106 @@ fn spawn_audio_worker(
                                         // Give up — unfreeze the UI and skip to the next track.
                                         log_native_audio_error("extract", "stream-url-giveup", &video_id, &err);
                                         audio_loading_flag.store(false, Ordering::Relaxed);
-                                        engine.current_video_id = None;
+                                        engine.current_video_id = None; engine.source_duration_secs = None; engine.stream_eof_clean = None;
                                         stream_retries = 0;
                                         advance_pending.store(true, Ordering::Relaxed);
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+
+                // Default output device watch: check ~once per second and reopen the
+                // rodio OutputStream when Windows switches default output (e.g. earphones plugged in).
+                if last_device_check.elapsed() >= Duration::from_secs(1) {
+                    last_device_check = Instant::now();
+                    let current_device = default_output_device_name();
+                    if device_changed(current_device.as_deref(), engine.device_name.as_deref()) {
+                        let new_name = current_device.clone().unwrap_or_default();
+                        let old_name = engine.device_name.as_deref().unwrap_or("-");
+                        let log_vid = engine.current_video_id.as_deref()
+                            .or(requested_video.as_deref())
+                            .unwrap_or("-")
+                            .to_string();
+                        let message = format!(
+                            "[native-audio][stage=device][code=default-device-changed] video_id={log_vid} detail={old_name} -> {new_name}"
+                        );
+                        log::info!("{message}");
+                        eprintln!("{message}");
+
+                        let clean_stream_eof = engine.stream_eof_clean.as_ref().is_some_and(|f| f.is_clean_eof());
+                        let effective_dur = engine.source_duration_secs.filter(|&d| d > 0.0).unwrap_or(current_duration_secs);
+                        let elapsed = playback_base_secs
+                            + if is_playing {
+                                playback_started_at.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0)
+                            } else {
+                                0.0
+                            };
+                        let near_end = clean_stream_eof || (effective_dur > 0.0 && elapsed >= effective_dur - 2.0);
+
+                        match reopen_output_device(&mut engine) {
+                            Ok(()) => {
+                                if engine.device_name.is_none() {
+                                    engine.device_name = current_device;
+                                }
+                                if let Some(vid) = engine.current_video_id.clone() {
+                                    let reload_result = if near_end {
+                                        // Reloading past the end would fail and restart the song; just advance.
+                                        engine.current_video_id = None; engine.source_duration_secs = None; engine.stream_eof_clean = None;
+                                        if is_playing { advance_pending.store(true, Ordering::Relaxed); }
+                                        Ok(())
+                                    } else if engine.current_is_cached {
+                                        match AudioCache::global().lock().ok().and_then(|mut c| c.get(&vid)) {
+                                            Some(path) => load_file_into_engine(&mut engine, &vid, &path, Some(elapsed), false),
+                                            None => Err("Cached file not found in AudioCache".to_string()),
+                                        }
+                                    } else if let Some(url) = engine.stream_url.clone() {
+                                        let clen = engine.stream_content_len;
+                                        load_stream_into_engine(&mut engine, &vid, &url, clen, Some(elapsed), None, false)
+                                    } else {
+                                        Err("No stream URL or cached file available for reload".to_string())
+                                    };
+
+                                    match reload_result {
+                                        Ok(()) => {
+                                            playback_base_secs = elapsed;
+                                            playback_started_at = if is_playing { Some(Instant::now()) } else { None };
+                                            sink_empty_count = 0;
+                                            if !is_playing {
+                                                engine.sink.pause();
+                                            }
+                                        }
+                                        Err(err) => {
+                                            log_native_audio_error("device", "device-reload-failed", &vid, &err);
+                                            engine.current_video_id = None; engine.source_duration_secs = None; engine.stream_eof_clean = None;
+                                            sink_empty_count = 0;
+                                            if is_playing {
+                                                if let Some(ref req_vid) = requested_video {
+                                                    audio_loading_flag.store(true, Ordering::Relaxed);
+                                                    audio_just_started_flag.store(false, Ordering::Relaxed);
+                                                    stream_retries = 0;
+                                                    latest_request_id = latest_request_id.saturating_add(1);
+                                                    spawn_stream_fetch(
+                                                        event_sender.clone(),
+                                                        latest_request_id,
+                                                        req_vid.clone(),
+                                                        true,
+                                                    );
+                                                } else {
+                                                    audio_loading_flag.store(false, Ordering::Relaxed);
+                                                }
+                                            } else {
+                                                audio_loading_flag.store(false, Ordering::Relaxed);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                log_native_audio_error("device", "device-reopen-failed", &log_vid, &err);
+                                // Back off so a device that isn't ready yet isn't retried (and logged) every second.
+                                last_device_check = Instant::now() + Duration::from_secs(4);
                             }
                         }
                     }
@@ -638,31 +851,27 @@ fn spawn_audio_worker(
 
                     // At ~400ms of empty sink on a streaming track, try cache fallback
                     // before declaring the song finished.
-                    if sink_empty_count == 5 && !engine.current_is_cached {
-                        let elapsed = playback_base_secs
-                            + playback_started_at.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
-                        // Only recover genuine mid-song stalls. If the stream simply
-                        // reached its natural end, skip the cache load (it would seek
-                        // past the end and could restart the track) and let the
-                        // advance debounce fire.
-                        let near_end = current_duration_secs > 0.0
-                            && elapsed >= current_duration_secs - 5.0;
-                        if !near_end {
-                            if let Some(ref vid) = engine.current_video_id.clone() {
-                                let cached_path = crate::core::cache::AudioCache::global().lock().ok()
-                                    .and_then(|mut c| c.get(vid));
-                                if let Some(path) = cached_path {
-                                    match load_file_into_engine(&mut engine, vid, &path, Some(elapsed)) {
-                                        Ok(()) => {
-                                            is_cached_flag.store(true, Ordering::Relaxed);
-                                            sink_empty_count = 0;
-                                            playback_base_secs = elapsed;
-                                            playback_started_at = Some(std::time::Instant::now());
-                                            eprintln!("[cache-fallback] {vid} → resumed from cache at {elapsed:.1}s");
-                                        }
-                                        Err(e) => {
-                                            eprintln!("[cache-fallback] {vid} failed: {e}");
-                                        }
+                    let clean_stream_eof = engine.stream_eof_clean.as_ref().is_some_and(|f| f.is_clean_eof());
+                    let effective_dur = engine.source_duration_secs.filter(|&d| d > 0.0).unwrap_or(current_duration_secs);
+                    let elapsed = playback_base_secs + playback_started_at.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
+                    let near_end = clean_stream_eof || (effective_dur > 0.0 && elapsed >= effective_dur - 5.0);
+
+                    if sink_empty_count == 5 && !engine.current_is_cached && !near_end {
+                        if let Some(ref vid) = engine.current_video_id.clone() {
+                            let cached_path = crate::core::cache::AudioCache::global().lock().ok()
+                                .and_then(|mut c| c.get(vid));
+                            if let Some(path) = cached_path {
+                                match load_file_into_engine(&mut engine, vid, &path, Some(elapsed), false) {
+                                    Ok(()) => {
+                                        if let Some(d) = engine.source_duration_secs.filter(|&d| d > 0.0) { current_duration_secs = d; }
+                                        is_cached_flag.store(true, Ordering::Relaxed);
+                                        sink_empty_count = 0;
+                                        playback_base_secs = elapsed;
+                                        playback_started_at = Some(std::time::Instant::now());
+                                        eprintln!("[cache-fallback] {vid} → resumed from cache at {elapsed:.1}s");
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[cache-fallback] {vid} failed: {e}");
                                     }
                                 }
                             }
@@ -670,7 +879,7 @@ fn spawn_audio_worker(
                     }
 
                     if sink_empty_count >= 15 {
-                        engine.current_video_id = None;
+                        engine.current_video_id = None; engine.source_duration_secs = None; engine.stream_eof_clean = None;
                         advance_pending.store(true, Ordering::Relaxed);
                         sink_empty_count = 0;
                     }
@@ -725,6 +934,7 @@ impl PlaybackCore {
                 },
                 is_playing: false,
                 audio_enabled: false,
+                repeat_mode: RepeatMode::Off,
                 audio_worker: None,
                 track_started_at: None,
                 paused_elapsed: std::time::Duration::ZERO,
@@ -741,7 +951,25 @@ impl PlaybackCore {
             detected_duration: Arc::new(AtomicU32::new(0)),
             autoplay_queue: Mutex::new(Vec::new()),
             autoplay_seed: Mutex::new(String::new()),
+            autoplay_refilling: AtomicBool::new(false),
+            autoplay_generation: AtomicU64::new(0),
+            autoplay_refill_empty: AtomicBool::new(false),
+            track_ended_awaiting_autoplay: AtomicBool::new(false),
         }
+    }
+
+    pub fn cycle_repeat_mode(&self) -> RepeatMode {
+        let mut state = self.state.lock().unwrap();
+        state.repeat_mode = match state.repeat_mode {
+            RepeatMode::Off => RepeatMode::All,
+            RepeatMode::All => RepeatMode::One,
+            RepeatMode::One => RepeatMode::Off,
+        };
+        state.repeat_mode
+    }
+
+    pub fn repeat_mode(&self) -> RepeatMode {
+        self.state.lock().unwrap().repeat_mode
     }
 
     pub fn enable_audio_output(&self) -> Result<(), String> {
@@ -798,6 +1026,7 @@ impl PlaybackCore {
     }
 
     pub fn toggle_play_pause(&self) -> bool {
+        self.track_ended_awaiting_autoplay.store(false, Ordering::Relaxed);
         let is_playing = {
             let mut state = self.state.lock().unwrap();
             let now = std::time::Instant::now();
@@ -821,6 +1050,7 @@ impl PlaybackCore {
     }
 
     pub fn set_playing(&self, is_playing: bool) {
+        self.track_ended_awaiting_autoplay.store(false, Ordering::Relaxed);
         {
             let mut state = self.state.lock().unwrap();
             let now = std::time::Instant::now();
@@ -859,6 +1089,7 @@ impl PlaybackCore {
         duration_secs: u32,
     ) {
         let mut state = self.state.lock().unwrap();
+        self.track_ended_awaiting_autoplay.store(false, Ordering::Relaxed);
 
         // Save previous track BEFORE overwriting
         let prev = state.now_playing.clone();
@@ -907,6 +1138,7 @@ impl PlaybackCore {
     }
 
     pub fn prev_track(&self) {
+        self.track_ended_awaiting_autoplay.store(false, Ordering::Relaxed);
         // Standard player behavior: if we're more than 3s into the track,
         // restart it rather than jumping to the previous song.
         if self.elapsed_secs() > 3.0 {
@@ -959,14 +1191,19 @@ impl PlaybackCore {
     }
 
     pub fn next_track(&self) {
+        self.track_ended_awaiting_autoplay.store(false, Ordering::Relaxed);
         let mut state = self.state.lock().unwrap();
         if state.queue.is_empty() { return; }
         if state.queue_index + 1 >= state.queue.len() {
-            // Reached end of queue — request autoplay radio fetch
-            self.autoplay_needed.store(true, Ordering::Relaxed);
-            return;
+            if state.repeat_mode == RepeatMode::All {
+                state.queue_index = 0;
+            } else {
+                self.autoplay_needed.store(true, Ordering::Relaxed);
+                return;
+            }
+        } else {
+            state.queue_index += 1;
         }
-        state.queue_index += 1;
         state.now_playing = state.queue[state.queue_index].clone();
         // Reset timer so progress bar starts from 0
         state.paused_elapsed = std::time::Duration::ZERO;
@@ -1046,6 +1283,7 @@ impl PlaybackCore {
     }
 
     pub fn set_queue(&self, songs: Vec<NowPlaying>) {
+        self.track_ended_awaiting_autoplay.store(false, Ordering::Relaxed);
         if songs.is_empty() { return; }
         let mut state = self.state.lock().unwrap();
         state.queue = songs;
@@ -1057,8 +1295,67 @@ impl PlaybackCore {
         self.sync_audio_playback();
     }
 
+    pub fn has_upcoming_user_queue(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state.queue.len() > state.queue_index.saturating_add(1)
+    }
+
+    pub fn shuffle_upcoming_user_queue(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        let upcoming_len = state.queue.len().saturating_sub(state.queue_index.saturating_add(1));
+        if upcoming_len < 2 {
+            return false;
+        }
+        let start = state.queue_index + 1;
+        
+        let mut seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        seed = seed.wrapping_add(COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        
+        let mut next_u64 = || {
+            let mut z = seed.wrapping_add(0x9e3779b97f4a7c15);
+            seed = z;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+            z ^ (z >> 31)
+        };
+
+        let original = state.queue[start..].to_vec();
+
+        let slice = &mut state.queue[start..];
+        for i in (1..slice.len()).rev() {
+            let j = (next_u64() % ((i + 1) as u64)) as usize;
+            slice.swap(i, j);
+        }
+
+        let mut changed = false;
+        for (a, b) in slice.iter().zip(original.iter()) {
+            if a.video_id != b.video_id {
+                changed = true;
+                break;
+            }
+        }
+
+        if !changed {
+            slice.rotate_left(1);
+        }
+
+        true
+    }
+
     pub fn full_queue(&self) -> Vec<NowPlaying> {
         self.state.lock().unwrap().queue.clone()
+    }
+
+    pub fn queue_index(&self) -> usize {
+        self.state.lock().unwrap().queue_index
+    }
+
+    pub fn is_audio_loading(&self) -> bool {
+        self.audio_loading.load(Ordering::Relaxed)
     }
 
     /// Returns only songs AFTER the current queue_index (i.e. upcoming, not including now-playing).
@@ -1083,11 +1380,13 @@ impl PlaybackCore {
         }
         let state = self.state.lock().unwrap();
         let base = state.paused_elapsed.as_secs_f64();
-        if let Some(started) = state.track_started_at {
+        let raw = if let Some(started) = state.track_started_at {
             base + started.elapsed().as_secs_f64()
         } else {
             base
-        }
+        };
+        let dur = state.now_playing.duration_secs as f64;
+        if dur > 0.0 { raw.min(dur) } else { raw }
     }
 
     pub fn track_duration_secs(&self) -> u32 {
@@ -1131,11 +1430,13 @@ impl PlaybackCore {
         // Timer elapsed already reflects any user seeks (seek_to_secs updates it).
         let elapsed_secs = {
             let base = state.paused_elapsed.as_secs_f64();
-            if let Some(started) = state.track_started_at {
+            let raw = if let Some(started) = state.track_started_at {
                 base + started.elapsed().as_secs_f64()
             } else {
                 base
-            }
+            };
+            let dur = state.now_playing.duration_secs as f64;
+            if dur > 0.0 { raw.min(dur) } else { raw }
         };
         if let Some(ref worker) = state.audio_worker {
             let _ = worker.sender.send(AudioCommand::UpgradeToCache { path, elapsed_secs });
@@ -1150,6 +1451,141 @@ impl PlaybackCore {
     }
 
     /// Returns true (and clears the flag) if the audio worker detected a track completion.
+    pub fn advance_after_track_end(&self) {
+        let mut state = self.state.lock().unwrap();
+        if state.queue.is_empty() {
+            drop(state);
+            self.stop_at_queue_end();
+            return;
+        }
+
+        match state.repeat_mode {
+            RepeatMode::One => {
+                state.is_playing = true;
+                state.paused_elapsed = std::time::Duration::ZERO;
+                state.track_started_at = Some(std::time::Instant::now());
+                drop(state);
+                self.sync_audio_playback();
+                return;
+            }
+            RepeatMode::All => {
+                if state.queue_index + 1 < state.queue.len() {
+                    state.queue_index += 1;
+                } else if !state.queue.is_empty() {
+                    let prev = state.now_playing.clone();
+                    if state.queue.len() > 1 {
+                        if !prev.video_id.is_empty() && prev.video_id != "native-prototype" {
+                            if state.history.back().map(|h| h.video_id.as_str()) != Some(&prev.video_id) {
+                                state.history.push_back(prev);
+                                if state.history.len() > 50 {
+                                    state.history.pop_front();
+                                }
+                            }
+                        }
+                    }
+                    state.queue_index = 0;
+                }
+                state.now_playing = state.queue[state.queue_index].clone();
+                state.is_playing = true;
+                state.paused_elapsed = std::time::Duration::ZERO;
+                state.track_started_at = Some(std::time::Instant::now());
+                self.track_ended_awaiting_autoplay.store(false, Ordering::Relaxed);
+                drop(state);
+                self.sync_audio_playback();
+                self.prewarm_next_queue_url();
+                return;
+            }
+            RepeatMode::Off => {}
+        }
+
+        if state.queue_index + 1 >= state.queue.len() {
+            if state.now_playing.duration_secs > 0 {
+                state.paused_elapsed = Duration::from_secs(state.now_playing.duration_secs as u64);
+            } else if let Some(started) = state.track_started_at {
+                state.paused_elapsed += started.elapsed();
+            }
+            state.track_started_at = None;
+            self.track_ended_awaiting_autoplay.store(true, Ordering::Relaxed);
+            self.autoplay_needed.store(true, Ordering::Relaxed);
+            return;
+        }
+        state.queue_index += 1;
+        state.now_playing = state.queue[state.queue_index].clone();
+        state.paused_elapsed = Duration::ZERO;
+        state.track_started_at = if state.is_playing { Some(std::time::Instant::now()) } else { None };
+        self.track_ended_awaiting_autoplay.store(false, Ordering::Relaxed);
+        drop(state);
+        self.sync_audio_playback();
+        self.prewarm_next_queue_url();
+    }
+
+    pub fn is_currently_active_track(&self, video_id: &str) -> bool {
+        if video_id.is_empty() || video_id == "native-prototype" {
+            return false;
+        }
+        let s = self.state.lock().unwrap();
+        s.is_playing && s.now_playing.video_id == video_id
+    }
+
+    pub fn play_autoplay_at_preserving_queues(&self, index: usize) -> Option<NowPlaying> {
+        let song = {
+            let mut aq = self.autoplay_queue.lock().unwrap();
+            if index >= aq.len() {
+                return None;
+            }
+            aq.remove(index)
+        };
+
+        *self.autoplay_seed.lock().unwrap() = song.video_id.clone();
+
+        let mut state = self.state.lock().unwrap();
+        let prev = state.now_playing.clone();
+        if !prev.video_id.is_empty() && prev.video_id != "native-prototype" && prev.video_id != song.video_id {
+            if state.history.back().map(|h| h.video_id.as_str()) != Some(&prev.video_id) {
+                state.history.push_back(prev);
+                if state.history.len() > 50 {
+                    state.history.pop_front();
+                }
+            }
+        }
+
+        if state.queue.is_empty() {
+            state.queue.push(song.clone());
+            state.queue_index = 0;
+        } else {
+            let idx = state.queue_index.min(state.queue.len().saturating_sub(1));
+            state.queue[idx] = song.clone();
+            state.queue_index = idx;
+        }
+
+        state.now_playing = song.clone();
+        state.is_playing = true;
+        state.paused_elapsed = std::time::Duration::ZERO;
+        state.track_started_at = Some(std::time::Instant::now());
+        drop(state);
+
+        self.sync_audio_playback();
+
+        Some(song)
+    }
+
+    pub fn is_awaiting_autoplay_after_end(&self) -> bool {
+        self.track_ended_awaiting_autoplay.load(Ordering::Relaxed)
+    }
+
+    pub fn stop_at_queue_end(&self) {
+        self.track_ended_awaiting_autoplay.store(false, Ordering::Relaxed);
+        let mut state = self.state.lock().unwrap();
+        state.is_playing = false;
+        state.paused_elapsed = Duration::ZERO;
+        state.track_started_at = None;
+        let sender = state.audio_worker.as_ref().map(|w| w.sender.clone());
+        drop(state);
+        if let Some(s) = sender {
+            let _ = s.send(AudioCommand::SetPlaying(false));
+        }
+    }
+
     pub fn take_advance_pending(&self) -> bool {
         self.advance_pending.swap(false, Ordering::Relaxed)
     }
@@ -1178,7 +1614,9 @@ impl PlaybackCore {
 
     /// Replace the entire autoplay queue (e.g. after fetching a fresh radio batch).
     pub fn set_autoplay_queue(&self, songs: Vec<NowPlaying>) {
-        *self.autoplay_queue.lock().unwrap() = songs;
+        let mut q = self.autoplay_queue.lock().unwrap();
+        self.autoplay_generation.fetch_add(1, Ordering::AcqRel);
+        *q = songs;
     }
 
     /// Snapshot of the current autoplay queue.
@@ -1188,7 +1626,14 @@ impl PlaybackCore {
 
     /// Empty the autoplay queue.
     pub fn clear_autoplay_queue(&self) {
-        self.autoplay_queue.lock().unwrap().clear();
+        let mut q = self.autoplay_queue.lock().unwrap();
+        self.autoplay_generation.fetch_add(1, Ordering::AcqRel);
+        q.clear();
+    }
+
+    /// Current autoplay queue generation, incremented on replace or clear.
+    pub fn autoplay_generation(&self) -> u64 {
+        self.autoplay_generation.load(Ordering::Acquire)
     }
 
     /// Remove and return the next autoplay song (front of the queue).
@@ -1222,6 +1667,77 @@ impl PlaybackCore {
     /// Current autoplay seed video id.
     pub fn autoplay_seed(&self) -> String {
         self.autoplay_seed.lock().unwrap().clone()
+    }
+
+    /// Append songs to the autoplay queue, skipping empty ids and duplicates against
+    /// the autoplay queue, now-playing, the user queue, and the 30 most recent history
+    /// entries. Stops at `AUTOPLAY_MAX` total and returns how many were added.
+    pub fn append_autoplay(&self, songs: Vec<NowPlaying>, generation: u64) -> usize {
+        let mut excluded: std::collections::HashSet<String> = {
+            let state = self.state.lock().unwrap();
+            let mut set: std::collections::HashSet<String> = state
+                .history
+                .iter()
+                .take(30)
+                .map(|h| h.video_id.clone())
+                .collect();
+            for s in &state.queue {
+                set.insert(s.video_id.clone());
+            }
+            if !state.now_playing.video_id.is_empty() {
+                set.insert(state.now_playing.video_id.clone());
+            }
+            set
+        };
+        let mut q = self.autoplay_queue.lock().unwrap();
+        if self.autoplay_generation.load(Ordering::Acquire) != generation {
+            return 0;
+        }
+        for s in q.iter() {
+            excluded.insert(s.video_id.clone());
+        }
+        let mut added = 0;
+        for song in songs {
+            if q.len() >= AUTOPLAY_MAX {
+                break;
+            }
+            if song.video_id.is_empty() || excluded.contains(&song.video_id) {
+                continue;
+            }
+            excluded.insert(song.video_id.clone());
+            q.push(song);
+            added += 1;
+        }
+        added
+    }
+
+    /// Seed for topping up the autoplay queue: last autoplay entry, else current
+    /// now-playing id, else the stored autoplay seed.
+    pub fn autoplay_refill_seed(&self) -> String {
+        if let Some(last) = self.autoplay_queue.lock().unwrap().last() {
+            if !last.video_id.is_empty() && last.video_id != "native-prototype" {
+                return last.video_id.clone();
+            }
+        }
+        let np = self.now_playing().video_id;
+        if !np.is_empty() && np != "native-prototype" {
+            return np;
+        }
+        self.autoplay_seed()
+    }
+
+    pub fn try_begin_autoplay_refill(&self) -> bool {
+        self.autoplay_refilling
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub fn end_autoplay_refill(&self) {
+        self.autoplay_refilling.store(false, Ordering::Release);
+    }
+
+    pub fn last_autoplay_refill_empty(&self) -> bool {
+        self.autoplay_refill_empty.load(Ordering::Acquire)
     }
 
     /// Returns (and clears) a stream-detected duration in seconds, or 0 if none.
@@ -1259,6 +1775,7 @@ impl PlaybackCore {
 
     /// Set now_playing without triggering audio playback (for restoring last session).
     pub fn set_now_playing_paused(&self, np: NowPlaying) {
+        self.track_ended_awaiting_autoplay.store(false, Ordering::Relaxed);
         let mut state = self.state.lock().unwrap();
         state.now_playing = np;
         state.is_playing = false;
@@ -1457,6 +1974,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn device_changed_detects_new_default_device() {
+        assert!(!device_changed(None, None));
+        assert!(!device_changed(None, Some("Speakers")));
+        assert!(!device_changed(Some("Speakers"), Some("Speakers")));
+        assert!(device_changed(Some("Headphones"), Some("Speakers")));
+        assert!(device_changed(Some("Headphones"), None));
+    }
+
+    #[test]
     #[ignore = "requires an uncached AURICLE_TEST_VIDEO_ID, network, yt-dlp and an audio output device; writes tee staging audio"]
     fn live_uncached_audio_worker_starts_stream() {
         let video_id = std::env::var("AURICLE_TEST_VIDEO_ID")
@@ -1549,7 +2075,7 @@ mod tests {
                 log_native_audio_timing("length-lookup", if content_len.is_some() { "length-ready" } else { "length-unknown" }, &video_id, length_started);
 
                 *worker_stage.lock().unwrap() = "stream-load";
-                load_stream_into_engine(&mut engine, &video_id, &url, content_len, None, None)
+                load_stream_into_engine(&mut engine, &video_id, &url, content_len, None, None, false)
                     .map_err(|_| "stream-load-failed")?;
 
                 *worker_stage.lock().unwrap() = "sink-progress";
@@ -1579,5 +2105,317 @@ mod tests {
                 mpsc::RecvTimeoutError::Disconnected => "live-worker-disconnected",
             }, started.elapsed().as_millis()),
         }
+    }
+
+    #[test]
+    fn elapsed_secs_clamps_to_duration() {
+        let core = test_core();
+        {
+            let mut state = core.state.lock().unwrap();
+            state.now_playing.duration_secs = 10;
+            state.paused_elapsed = Duration::from_secs(12);
+        }
+        assert_eq!(core.elapsed_secs(), 10.0);
+        {
+            let mut state = core.state.lock().unwrap();
+            state.now_playing.duration_secs = 0; // unbounded
+        }
+        assert_eq!(core.elapsed_secs(), 12.0);
+    }
+
+    #[test]
+    fn advance_after_track_end_freezes_timer() {
+        let core = test_core();
+        {
+            let mut state = core.state.lock().unwrap();
+            state.queue = vec![dummy_song("1")];
+            state.queue_index = 0;
+            state.now_playing = state.queue[0].clone();
+            state.paused_elapsed = Duration::from_secs(0);
+        }
+        core.advance_after_track_end();
+        assert!(core.is_awaiting_autoplay_after_end());
+        assert!(core.take_autoplay_needed());
+        assert_eq!(core.elapsed_secs(), 180.0); // frozen
+    }
+
+    #[test]
+    fn manual_next_track_at_end() {
+        let core = test_core();
+        {
+            let mut state = core.state.lock().unwrap();
+            state.queue = vec![dummy_song("1")];
+            state.queue_index = 0;
+        }
+        core.next_track();
+        assert!(!core.is_awaiting_autoplay_after_end());
+        assert!(core.take_autoplay_needed());
+    }
+
+    #[test]
+    fn stop_at_queue_end_clears_state() {
+        let core = test_core();
+        core.track_ended_awaiting_autoplay.store(true, Ordering::Relaxed);
+        {
+            let mut state = core.state.lock().unwrap();
+            state.is_playing = true;
+            state.paused_elapsed = Duration::from_secs(180);
+        }
+        core.stop_at_queue_end();
+        assert!(!core.is_playing());
+        assert!(!core.is_awaiting_autoplay_after_end());
+        assert_eq!(core.elapsed_secs(), 0.0);
+    }
+
+    #[test]
+    fn open_seeked_file_source_rejects_past_end_resume_and_clamps_user_seek() {
+        use std::io::Write;
+        let wav_path = std::env::temp_dir().join(format!(
+            "auricle_playback_seek_guard_{}.wav",
+            std::process::id()
+        ));
+        let sample_rate: u32 = 8000;
+        let num_samples: u32 = sample_rate * 4; // 4.0 seconds
+        let data_len: u32 = num_samples * 2;
+        let file_len: u32 = 36 + data_len;
+        {
+            let mut f = std::fs::File::create(&wav_path).expect("create temp wav");
+            f.write_all(b"RIFF").unwrap();
+            f.write_all(&file_len.to_le_bytes()).unwrap();
+            f.write_all(b"WAVEfmt ").unwrap();
+            f.write_all(&16u32.to_le_bytes()).unwrap();
+            f.write_all(&1u16.to_le_bytes()).unwrap();
+            f.write_all(&1u16.to_le_bytes()).unwrap();
+            f.write_all(&sample_rate.to_le_bytes()).unwrap();
+            f.write_all(&(sample_rate * 2).to_le_bytes()).unwrap();
+            f.write_all(&2u16.to_le_bytes()).unwrap();
+            f.write_all(&16u16.to_le_bytes()).unwrap();
+            f.write_all(b"data").unwrap();
+            f.write_all(&data_len.to_le_bytes()).unwrap();
+            f.write_all(&vec![0u8; data_len as usize]).unwrap();
+        }
+
+        // Mid-song cache-fallback resume succeeds.
+        assert!(open_seeked_file_source(&wav_path, Some(1.0), false).is_ok());
+        // Near-end and past-EOF cache-fallback resumes MUST return Err instead of replaying from 0:00.
+        assert!(open_seeked_file_source(&wav_path, Some(3.0), false).is_err());
+        assert!(open_seeked_file_source(&wav_path, Some(4.4), false).is_err());
+        // Explicit user scrub to 100% / rounded-up integer duration clamps cleanly near end.
+        assert!(open_seeked_file_source(&wav_path, Some(4.2), true).is_ok());
+
+        let _ = std::fs::remove_file(&wav_path);
+    }
+
+    fn test_core() -> PlaybackCore {
+        PlaybackCore {
+            state: Mutex::new(PlaybackState {
+                queue: Vec::new(),
+                queue_index: 0,
+                now_playing: NowPlaying::default(),
+                is_playing: false,
+                audio_enabled: false,
+                repeat_mode: RepeatMode::Off,
+                audio_worker: None,
+                track_started_at: None,
+                paused_elapsed: Duration::ZERO,
+                history: std::collections::VecDeque::new(),
+            }),
+            advance_pending: Arc::new(AtomicBool::new(false)),
+            liked_ids: Mutex::new(std::collections::HashSet::new()),
+            liked_songs: Mutex::new(Vec::new()),
+            disliked_ids: Mutex::new(std::collections::HashSet::new()),
+            current_is_cached: Arc::new(AtomicBool::new(false)),
+            audio_loading: Arc::new(AtomicBool::new(false)),
+            audio_just_started: Arc::new(AtomicBool::new(false)),
+            autoplay_needed: Arc::new(AtomicBool::new(false)),
+            detected_duration: Arc::new(AtomicU32::new(0)),
+            autoplay_queue: Mutex::new(Vec::new()),
+            autoplay_seed: Mutex::new(String::new()),
+            autoplay_refilling: AtomicBool::new(false),
+            autoplay_generation: AtomicU64::new(0),
+            autoplay_refill_empty: AtomicBool::new(false),
+            track_ended_awaiting_autoplay: AtomicBool::new(false),
+        }
+    }
+
+    fn dummy_song(id: &str) -> NowPlaying {
+        NowPlaying {
+            video_id: id.to_string(),
+            title: format!("Title {id}"),
+            artist: "Artist".to_string(),
+            duration_secs: 180,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn append_autoplay_deduplicates_caps_and_checks_generation() {
+        let core = test_core();
+        assert_eq!(core.autoplay_generation(), 0);
+        {
+            let mut state = core.state.lock().unwrap();
+            state.now_playing = dummy_song("np_1");
+            state.queue = vec![dummy_song("np_1"), dummy_song("q_1")];
+            for i in 0..35 {
+                state.history.push_back(dummy_song(&format!("hist_{i}")));
+            }
+        }
+        core.set_autoplay_queue(vec![dummy_song("ap_existing")]);
+        let gen = core.autoplay_generation();
+        assert_eq!(gen, 1);
+
+        let added = core.append_autoplay(
+            vec![
+                dummy_song(""),
+                dummy_song("np_1"),
+                dummy_song("q_1"),
+                dummy_song("ap_existing"),
+                dummy_song("hist_0"),
+                dummy_song("hist_29"),
+                dummy_song("hist_30"), // beyond the 30 most recent history entries -> allowed
+                dummy_song("new_1"),
+                dummy_song("new_1"), // duplicate within batch -> skipped
+                dummy_song("new_2"),
+            ],
+            gen,
+        );
+        assert_eq!(added, 3);
+        let ids: Vec<String> = core.autoplay_queue().into_iter().map(|s| s.video_id).collect();
+        assert_eq!(ids, vec!["ap_existing", "hist_30", "new_1", "new_2"]);
+
+        let batch: Vec<NowPlaying> = (0..30).map(|i| dummy_song(&format!("fill_{i}"))).collect();
+        let added_more = core.append_autoplay(batch, gen);
+        assert_eq!(added_more, AUTOPLAY_MAX - 4);
+        assert_eq!(core.autoplay_queue().len(), AUTOPLAY_MAX);
+
+        // Stale generation after set_autoplay_queue must be ignored without changes
+        core.set_autoplay_queue(vec![dummy_song("fresh_seed")]);
+        let gen_after_set = core.autoplay_generation();
+        assert_eq!(gen_after_set, 2);
+        assert_eq!(core.append_autoplay(vec![dummy_song("stale_add")], gen), 0);
+        assert_eq!(
+            core.autoplay_queue().into_iter().map(|s| s.video_id).collect::<Vec<_>>(),
+            vec!["fresh_seed"]
+        );
+
+        // Stale generation after clear_autoplay_queue must also be ignored
+        core.clear_autoplay_queue();
+        let gen_after_clear = core.autoplay_generation();
+        assert_eq!(gen_after_clear, 3);
+        assert_eq!(
+            core.append_autoplay(vec![dummy_song("stale_after_clear")], gen_after_set),
+            0
+        );
+        assert!(core.autoplay_queue().is_empty());
+        assert_eq!(
+            core.append_autoplay(vec![dummy_song("valid_after_clear")], gen_after_clear),
+            1
+        );
+        assert_eq!(core.autoplay_queue().len(), 1);
+    }
+
+    #[test]
+    fn autoplay_refill_seed_and_guard_work() {
+        let core = test_core();
+        core.set_autoplay_seed("seed_fallback");
+        assert_eq!(core.autoplay_refill_seed(), "seed_fallback");
+
+        core.state.lock().unwrap().now_playing = dummy_song("now_vid");
+        assert_eq!(core.autoplay_refill_seed(), "now_vid");
+
+        core.set_autoplay_queue(vec![dummy_song("ap_1"), dummy_song("ap_2")]);
+        assert_eq!(core.autoplay_refill_seed(), "ap_2");
+
+        assert!(core.try_begin_autoplay_refill());
+        assert!(!core.try_begin_autoplay_refill());
+        core.end_autoplay_refill();
+        assert!(core.try_begin_autoplay_refill());
+        core.end_autoplay_refill();
+
+        assert!(!core.last_autoplay_refill_empty());
+        core.autoplay_refill_empty.store(true, Ordering::Release);
+        assert!(core.last_autoplay_refill_empty());
+    }
+
+    #[test]
+    fn play_autoplay_at_preserving_queues_works() {
+        let core = test_core();
+        {
+            let mut state = core.state.lock().unwrap();
+            state.now_playing = dummy_song("np_1");
+            state.queue = vec![dummy_song("np_1"), dummy_song("q_1"), dummy_song("q_2")];
+            state.queue_index = 0;
+        }
+        core.set_autoplay_queue(vec![dummy_song("ap_1"), dummy_song("ap_2"), dummy_song("ap_3")]);
+        let played = core.play_autoplay_at_preserving_queues(1);
+        assert_eq!(played.unwrap().video_id, "ap_2");
+        assert_eq!(core.autoplay_queue().into_iter().map(|s| s.video_id).collect::<Vec<_>>(), vec!["ap_1", "ap_3"]);
+        let state = core.state.lock().unwrap();
+        assert_eq!(state.now_playing.video_id, "ap_2");
+        assert_eq!(state.queue.iter().map(|s| s.video_id.as_str()).collect::<Vec<_>>(), vec!["ap_2", "q_1", "q_2"]);
+        assert_eq!(state.history.back().unwrap().video_id, "np_1");
+    }
+
+    #[test]
+    fn shuffle_upcoming_user_queue_preserves_autoplay() {
+        let core = test_core();
+        {
+            let mut state = core.state.lock().unwrap();
+            state.queue = vec![dummy_song("np_1")];
+            state.queue_index = 0;
+        }
+        core.set_autoplay_queue(vec![dummy_song("ap_1"), dummy_song("ap_2"), dummy_song("ap_3")]);
+        assert!(!core.shuffle_upcoming_user_queue());
+        assert_eq!(
+            core.autoplay_queue().iter().map(|s| s.video_id.as_str()).collect::<Vec<_>>(),
+            vec!["ap_1", "ap_2", "ap_3"]
+        );
+
+        {
+            let mut state = core.state.lock().unwrap();
+            state.queue = vec![dummy_song("np_1"), dummy_song("q_1"), dummy_song("q_2"), dummy_song("q_3")];
+            state.queue_index = 0;
+        }
+        let shuffled = core.shuffle_upcoming_user_queue();
+        assert!(shuffled);
+        assert_eq!(
+            core.autoplay_queue().iter().map(|s| s.video_id.as_str()).collect::<Vec<_>>(),
+            vec!["ap_1", "ap_2", "ap_3"]
+        );
+        let state = core.state.lock().unwrap();
+        assert_eq!(state.queue[0].video_id, "np_1");
+        assert_eq!(state.queue.len(), 4);
+    }
+
+    #[test]
+    fn repeat_mode_one_replays() {
+        let core = test_core();
+        {
+            let mut state = core.state.lock().unwrap();
+            state.queue = vec![dummy_song("np_1"), dummy_song("q_1")];
+            state.queue_index = 0;
+            state.now_playing = state.queue[0].clone();
+            state.repeat_mode = RepeatMode::One;
+        }
+        core.advance_after_track_end();
+        let state = core.state.lock().unwrap();
+        assert_eq!(state.queue_index, 0);
+        assert_eq!(state.now_playing.video_id, "np_1");
+    }
+
+    #[test]
+    fn repeat_mode_all_wraps() {
+        let core = test_core();
+        {
+            let mut state = core.state.lock().unwrap();
+            state.queue = vec![dummy_song("np_1"), dummy_song("q_1")];
+            state.queue_index = 1;
+            state.now_playing = state.queue[1].clone();
+            state.repeat_mode = RepeatMode::All;
+        }
+        core.advance_after_track_end();
+        let state = core.state.lock().unwrap();
+        assert_eq!(state.queue_index, 0);
+        assert_eq!(state.now_playing.video_id, "np_1");
     }
 }

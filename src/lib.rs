@@ -4,9 +4,12 @@ use ytmapi_rs::common::YoutubeID;
 
 pub mod core;
 mod context_ui;
+mod discography_ui;
+mod now_playing_ui;
 mod search_ui;
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use slint::{Model, ModelRc, SharedString, VecModel};
 
 
@@ -755,16 +758,21 @@ fn spawn_artist_thumb_loader(ui_weak: slint::Weak<NativeShellWindow>) {
     });
 }
 
-fn fetch_autoplay_queue(
-    ui_weak: slint::Weak<NativeShellWindow>,
-    video_id: String,
-    resume: bool,
-) {
-    let seed_vid = video_id.clone();
-    let rt = tokio::runtime::Builder::new_current_thread()
+fn fetch_radio_songs(seed: &str) -> Vec<core::playback::NowPlaying> {
+    if seed.is_empty() {
+        return Vec::new();
+    }
+    let seed_vid = seed.to_string();
+    let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .unwrap();
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("[autoplay] failed to build runtime: {e}");
+            return Vec::new();
+        }
+    };
     let songs = rt.block_on(async {
         let api = match crate::core::net::ytmusic().await {
             Ok(a) => a,
@@ -774,7 +782,7 @@ fn fetch_autoplay_queue(
             }
         };
         use ytmapi_rs::common::YoutubeID;
-        let vid = ytmapi_rs::common::VideoID::from_raw(video_id);
+        let vid = ytmapi_rs::common::VideoID::from_raw(seed_vid.clone());
         let tracks = match api.get_watch_playlist_from_video_id(vid).await {
             Ok(t) => t,
             Err(e) => {
@@ -813,27 +821,103 @@ fn fetch_autoplay_queue(
     // ordering: a familiar artist only nudges a song a few spots earlier, while
     // most of the queue stays whatever radio returned — so unfamiliar music keeps
     // coming through and discovery is preserved. `BIAS` is the one subtlety knob.
-    let songs: Vec<core::playback::NowPlaying> = {
-        let taste = TasteAffinity::build();
-        if taste.is_empty() {
-            songs
-        } else {
-            const BIAS: f32 = 2.5; // max spots a full-taste match can climb
-            let mut ranked: Vec<(f32, usize, core::playback::NowPlaying)> = songs
-                .into_iter()
-                .enumerate()
-                .map(|(i, s)| (i as f32 - BIAS * taste.score(&s.artist), i, s))
-                .collect();
-            ranked.sort_by(|a, b| a.0
-                .partial_cmp(&b.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.1.cmp(&b.1)));
-            ranked.into_iter().map(|(_, _, s)| s).collect()
-        }
-    };
+    let taste = TasteAffinity::build();
+    if taste.is_empty() {
+        songs
+    } else {
+        const BIAS: f32 = 2.5; // max spots a full-taste match can climb
+        let mut ranked: Vec<(f32, usize, core::playback::NowPlaying)> = songs
+            .into_iter()
+            .enumerate()
+            .map(|(i, s)| (i as f32 - BIAS * taste.score(&s.artist), i, s))
+            .collect();
+        ranked.sort_by(|a, b| a.0
+            .partial_cmp(&b.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.cmp(&b.1)));
+        ranked.into_iter().map(|(_, _, s)| s).collect()
+    }
+}
 
+fn spawn_autoplay_thumbnails(
+    ui_weak: slint::Weak<NativeShellWindow>,
+    songs: &[core::playback::NowPlaying],
+) {
+    let need_thumbs: Vec<String> = songs
+        .iter()
+        .filter(|s| {
+            !s.video_id.is_empty()
+                && !std::env::temp_dir().join(format!("ytm_thumb_{}.jpg", s.video_id)).exists()
+        })
+        .map(|s| s.video_id.clone())
+        .collect();
+    if need_thumbs.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || {
+        let http = match reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(8))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        for vid in need_thumbs {
+            let url = format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", vid);
+            let thumb_path = std::env::temp_dir().join(format!("ytm_thumb_{}.jpg", vid));
+            if let Ok(resp) = http.get(&url).send() {
+                if let Ok(bytes) = resp.bytes() {
+                    if let Ok(img) = image::load_from_memory(&bytes) {
+                        let rgba = img.to_rgba8();
+                        let (w, h) = (rgba.width(), rgba.height());
+                        // Save to disk for future use
+                        let _ = std::fs::write(&thumb_path, bytes.as_ref());
+                        let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(rgba.as_raw(), w, h);
+                        let ui_w = ui_weak.clone();
+                        let vid_copy = vid.clone();
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui_w.upgrade() {
+                                let slint_img = slint::Image::from_rgba8(buf);
+                                let model = ui.get_autoplay_queue();
+                                for i in 0..model.row_count() {
+                                    if let Some(mut row) = model.row_data(i) {
+                                        if row.video_id.as_str() == vid_copy {
+                                            row.thumbnail = slint_img;
+                                            row.has_thumbnail = true;
+                                            model.set_row_data(i, row);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }).ok();
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn fetch_autoplay_queue(
+    ui_weak: slint::Weak<NativeShellWindow>,
+    video_id: String,
+    resume: bool,
+) {
+    let songs = fetch_radio_songs(&video_id);
     if songs.is_empty() {
         eprintln!("[autoplay] watch playlist returned 0 songs");
+        if resume {
+            let pb = crate::core::bridge::playback_core();
+            if pb.is_awaiting_autoplay_after_end() {
+                pb.stop_at_queue_end();
+                let ui_w = ui_weak.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_w.upgrade() {
+                        refresh_native_shell_ui(&ui, crate::core::bridge::playback_core());
+                    }
+                }).ok();
+            }
+        }
         return;
     }
     // Store in shared state
@@ -846,64 +930,58 @@ fn fetch_autoplay_queue(
     if resume {
         crate::core::bridge::playback_core().request_autoplay();
     }
-    // Collect video IDs that need thumbnails
-    let need_thumbs: Vec<(usize, String)> = songs.iter().enumerate()
-        .filter(|(_, s)| {
-            !s.video_id.is_empty()
-                && !std::env::temp_dir().join(format!("ytm_thumb_{}.jpg", s.video_id)).exists()
-        })
-        .map(|(i, s)| (i, s.video_id.clone()))
-        .collect();
 
     let ui_weak2 = ui_weak.clone();
     // Update UI model
     slint::invoke_from_event_loop(move || {
         if let Some(ui) = ui_weak.upgrade() {
-            let items: Vec<SongItem> = songs.iter().map(|np| make_song_item(np)).collect();
+            let current = crate::core::bridge::playback_core().autoplay_queue();
+            let items: Vec<SongItem> = current.iter().map(make_song_item).collect();
             ui.set_autoplay_queue(ModelRc::new(VecModel::from(items)));
         }
     }).ok();
 
-    // Fetch thumbnails in background using the standard thumbnail CDN URL
-    if !need_thumbs.is_empty() {
-        std::thread::spawn(move || {
-            let http = match reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(8))
-                .build() {
-                Ok(c) => c,
-                Err(_) => return,
-            };
-            for (idx, vid) in &need_thumbs {
-                let url = format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", vid);
-                let thumb_path = std::env::temp_dir().join(format!("ytm_thumb_{}.jpg", vid));
-                if let Ok(resp) = http.get(&url).send() {
-                    if let Ok(bytes) = resp.bytes() {
-                        if let Ok(img) = image::load_from_memory(&bytes) {
-                            let rgba = img.to_rgba8();
-                            let (w, h) = (rgba.width(), rgba.height());
-                            // Save to disk for future use
-                            let _ = std::fs::write(&thumb_path, bytes.as_ref());
-                            let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(rgba.as_raw(), w, h);
-                            let ui_w = ui_weak2.clone();
-                            let idx_copy = *idx;
-                            slint::invoke_from_event_loop(move || {
-                                if let Some(ui) = ui_w.upgrade() {
-                                    let slint_img = slint::Image::from_rgba8(buf);
-                                    let model = ui.get_autoplay_queue();
-                                    if let Some(row) = model.row_data(idx_copy) {
-                                        let mut updated = row;
-                                        updated.thumbnail = slint_img;
-                                        updated.has_thumbnail = true;
-                                        model.set_row_data(idx_copy, updated);
-                                    }
-                                }
-                            }).ok();
-                        }
-                    }
-                }
-            }
-        });
+    spawn_autoplay_thumbnails(ui_weak2, &songs);
+}
+
+fn refill_autoplay_queue(ui_weak: slint::Weak<NativeShellWindow>) {
+    let pb = crate::core::bridge::playback_core();
+    if !pb.try_begin_autoplay_refill() {
+        return;
     }
+    std::thread::spawn(move || {
+        struct RefillGuard(&'static core::playback::PlaybackCore);
+        impl Drop for RefillGuard {
+            fn drop(&mut self) {
+                self.0.end_autoplay_refill();
+            }
+        }
+        let pb = crate::core::bridge::playback_core();
+        let _guard = RefillGuard(pb);
+        let generation = pb.autoplay_generation();
+        let seed = pb.autoplay_refill_seed();
+        let added = if seed.is_empty() {
+            0
+        } else {
+            let songs = fetch_radio_songs(&seed);
+            pb.append_autoplay(songs, generation)
+        };
+        pb.autoplay_refill_empty
+            .store(added == 0, std::sync::atomic::Ordering::Release);
+        drop(_guard);
+        if added > 0 {
+            let full = pb.autoplay_queue();
+            let ui_w = ui_weak.clone();
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_w.upgrade() {
+                    let current = crate::core::bridge::playback_core().autoplay_queue();
+                    let items: Vec<SongItem> = current.iter().map(make_song_item).collect();
+                    ui.set_autoplay_queue(ModelRc::new(VecModel::from(items)));
+                }
+            }).ok();
+            spawn_autoplay_thumbnails(ui_weak, &full);
+        }
+    });
 }
 
 fn refresh_native_shell_ui(ui: &NativeShellWindow, playback: &'static core::playback::PlaybackCore) {
@@ -918,20 +996,39 @@ fn refresh_native_shell_ui(ui: &NativeShellWindow, playback: &'static core::play
     ui.set_track_initial(SharedString::from(initial.as_str()));
     ui.set_is_liked(playback.is_liked(&track.video_id));
 
+    let can_shuffle = playback.has_upcoming_user_queue();
+    if ui.get_can_shuffle_queue() != can_shuffle {
+        ui.set_can_shuffle_queue(can_shuffle);
+    }
+    let repeat_str = playback.repeat_mode().as_str();
+    if ui.get_repeat_mode().as_str() != repeat_str {
+        ui.set_repeat_mode(SharedString::from(repeat_str));
+    }
+
     // Fetch each list once under lock, then reuse for both the models and the
     // missing-thumbnail scan below.
     let upcoming = playback.queue_upcoming();
     let liked = playback.get_liked_songs();
+    let mut history: Vec<core::playback::NowPlaying> = playback
+        .get_history()
+        .into_iter()
+        .take(20)
+        .filter(|h| !h.video_id.is_empty() && h.video_id != track.video_id && h.video_id != "native-prototype")
+        .collect();
+    history.reverse();
 
     let queue_items: Vec<SongItem> = upcoming.iter().map(make_song_item).collect();
     ui.set_queue(ModelRc::new(VecModel::from(queue_items)));
+
+    let history_items: Vec<SongItem> = history.iter().map(make_song_item).collect();
+    ui.set_queue_history(ModelRc::new(VecModel::from(history_items)));
 
     let liked_items: Vec<SongItem> = liked.iter().map(make_song_item).collect();
     ui.set_liked_songs(ModelRc::new(VecModel::from(liked_items)));
 
     // Spawn background thumbnail fetch for items missing thumbnails
     let mut missing_vids: Vec<String> = Vec::new();
-    for np in upcoming.iter().chain(liked.iter()) {
+    for np in upcoming.iter().chain(history.iter()).chain(liked.iter()) {
         if np.video_id.is_empty() || missing_vids.contains(&np.video_id) {
             continue;
         }
@@ -985,6 +1082,28 @@ fn refresh_native_shell_ui(ui: &NativeShellWindow, playback: &'static core::play
                         if changed {
                             ui.set_queue(ModelRc::new(VecModel::from(items)));
                         }
+                        // Refresh queue history thumbnails
+                        let model = ui.get_queue_history();
+                        let count = model.row_count();
+                        let mut items: Vec<SongItem> = Vec::with_capacity(count);
+                        let mut changed = false;
+                        for i in 0..count {
+                            let mut item = model.row_data(i).unwrap();
+                            if !item.has_thumbnail {
+                                let tp = std::env::temp_dir().join(format!("ytm_thumb_{}.jpg", item.video_id.as_str()));
+                                if tp.exists() {
+                                    if let Ok(img) = slint::Image::load_from_path(&tp) {
+                                        item.thumbnail = img;
+                                        item.has_thumbnail = true;
+                                        changed = true;
+                                    }
+                                }
+                            }
+                            items.push(item);
+                        }
+                        if changed {
+                            ui.set_queue_history(ModelRc::new(VecModel::from(items)));
+                        }
                         // Refresh liked songs thumbnails
                         let model = ui.get_liked_songs();
                         let count = model.row_count();
@@ -1016,6 +1135,163 @@ fn refresh_native_shell_ui(ui: &NativeShellWindow, playback: &'static core::play
 
 fn format_duration_secs(secs: u32) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
+}
+
+struct HeroState {
+    window_seed: usize,
+    video_id: String,
+    pick_offset: usize,
+    is_taste_seed: bool,
+}
+
+static HERO_STATE: std::sync::OnceLock<Mutex<HeroState>> = std::sync::OnceLock::new();
+
+fn get_hero_state() -> &'static Mutex<HeroState> {
+    HERO_STATE.get_or_init(|| Mutex::new(HeroState {
+        window_seed: 0,
+        video_id: String::new(),
+        pick_offset: 0,
+        is_taste_seed: false,
+    }))
+}
+
+fn current_time_window_and_eyebrow() -> (usize, &'static str) {
+    let unix_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let window = (unix_secs / (4 * 3600)) as usize;
+    let eyebrows = [
+        "FEATURED FOR YOU",
+        "MADE FOR YOUR TASTE",
+        "FRESH PICK FOR YOU",
+        "CURATED FROM YOUR TASTE",
+        "YOUR DAILY SPOTLIGHT",
+        "RECOMMENDED FOR YOU",
+    ];
+    let eyebrow = eyebrows[window % eyebrows.len()];
+    (window, eyebrow)
+}
+
+fn maybe_seed_home_hero(ui: &NativeShellWindow, force_next: bool) {
+    let extract = |model: ModelRc<SongItem>| -> Vec<SongItem> {
+        (0..model.row_count())
+            .filter_map(|i| model.row_data(i))
+            .filter(|s| !s.video_id.is_empty())
+            .collect()
+    };
+
+    let personalized = extract(ui.get_personalized_songs());
+    let followed = extract(ui.get_home_followed_songs());
+    let liked = extract(ui.get_liked_songs());
+    let trending = extract(ui.get_trending_songs());
+
+    let is_taste = !personalized.is_empty() || !followed.is_empty() || !liked.is_empty();
+
+    let mut candidates = Vec::new();
+    candidates.extend(personalized);
+    candidates.extend(followed);
+    candidates.extend(liked);
+    candidates.extend(trending);
+
+    if candidates.is_empty() {
+        return;
+    }
+
+    let (current_window, eyebrow) = current_time_window_and_eyebrow();
+    let mut state = get_hero_state().lock().unwrap();
+
+    if force_next {
+        state.pick_offset = state.pick_offset.wrapping_add(1);
+    } else if !state.video_id.is_empty() && state.window_seed == current_window {
+        if !state.is_taste_seed && is_taste {
+            // Upgrade from fallback to taste once
+        } else {
+            return;
+        }
+    }
+
+    state.window_seed = current_window;
+    state.is_taste_seed = is_taste;
+
+    let idx = (current_window + state.pick_offset) % candidates.len();
+    let pick = candidates[idx].clone();
+    state.video_id = pick.video_id.to_string();
+    drop(state);
+
+    ui.set_hero_video_id(pick.video_id.clone());
+    ui.set_hero_title(pick.title.clone());
+    ui.set_hero_artist(pick.artist.clone());
+    ui.set_hero_duration_secs(pick.duration_secs);
+    ui.set_hero_eyebrow(SharedString::from(eyebrow));
+
+    let vid = pick.video_id.to_string();
+    let ui_weak = ui.as_weak();
+    core::net::spawn(move || {
+        let hero_cache_path = std::env::temp_dir().join(format!("ytm_hero_{}.jpg", vid));
+        let thumb_cache_path = std::env::temp_dir().join(format!("ytm_thumb_{}.jpg", vid));
+
+        let mut bytes_opt: Option<Vec<u8>> = None;
+        if hero_cache_path.exists() {
+            if let Ok(b) = std::fs::read(&hero_cache_path) {
+                bytes_opt = Some(b);
+            }
+        } else if thumb_cache_path.exists() {
+            if let Ok(b) = std::fs::read(&thumb_cache_path) {
+                bytes_opt = Some(b);
+            }
+        }
+
+        if bytes_opt.is_none() {
+            let http = core::net::http();
+            let url_hq = format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", vid);
+            if let Ok(resp) = http.get(&url_hq).send() {
+                if resp.status().is_success() {
+                    if let Ok(bytes) = resp.bytes() {
+                        let b = bytes.to_vec();
+                        let _ = std::fs::write(&hero_cache_path, &b);
+                        bytes_opt = Some(b);
+                    }
+                }
+            }
+            if bytes_opt.is_none() {
+                let url_mq = format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", vid);
+                if let Ok(resp) = http.get(&url_mq).send() {
+                    if resp.status().is_success() {
+                        if let Ok(bytes) = resp.bytes() {
+                            let b = bytes.to_vec();
+                            let _ = std::fs::write(&hero_cache_path, &b);
+                            bytes_opt = Some(b);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(bytes) = bytes_opt {
+            if let Ok(img) = image::load_from_memory(&bytes) {
+                let accent_color = extract_vibrant_accent_from_image(&img);
+                let rgba = img.to_rgba8();
+                let (w, h) = (rgba.width(), rgba.height());
+                let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(rgba.as_raw(), w, h);
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        if ui.get_hero_video_id().as_str() == vid.as_str() {
+                            let slint_img = slint::Image::from_rgba8(buf);
+                            ui.set_hero_thumbnail(slint_img);
+                            ui.set_hero_has_thumbnail(true);
+                            let theme = ui.global::<Theme>();
+                            if !theme.get_has_hero_accent() {
+                                theme.set_hero_accent(theme.get_effective_accent());
+                            }
+                            theme.set_has_hero_accent(true);
+                            animate_theme_targets(&ui, None, None, Some(accent_color), false);
+                        }
+                    }
+                }).ok();
+            }
+        }
+    });
 }
 
 fn fetch_trending_songs(ui_weak: slint::Weak<NativeShellWindow>) {
@@ -1091,6 +1367,7 @@ fn fetch_trending_songs(ui_weak: slint::Weak<NativeShellWindow>) {
                     }).collect();
                     let model = std::rc::Rc::new(slint::VecModel::from(items));
                     ui.set_trending_songs(slint::ModelRc::from(model));
+                    maybe_seed_home_hero(&ui, false);
                 }
             }).ok();
 
@@ -1251,6 +1528,7 @@ fn fetch_followed_songs(ui_weak: slint::Weak<NativeShellWindow>) {
                     }
                 }).collect();
                 ui.set_home_followed_songs(ModelRc::new(VecModel::from(items)));
+                maybe_seed_home_hero(&ui, false);
             }
         }).ok();
         if !thumb_urls.is_empty() {
@@ -1348,6 +1626,7 @@ fn fetch_personalized_songs(ui_weak: slint::Weak<NativeShellWindow>) {
                     }).collect();
                     let model = std::rc::Rc::new(slint::VecModel::from(items));
                     ui.set_personalized_songs(slint::ModelRc::from(model));
+                    maybe_seed_home_hero(&ui, false);
                 }
             }).ok();
 
@@ -1464,8 +1743,6 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
         sorted_words.sort_by(|a, b| b.1.cmp(&a.1));
         sorted_words.first().map(|(word, _)| word.clone())
     };
-
-    let top_artists_clone = top_artists.clone();
 
     // Seed artists for New Releases: followed artists carry real channel ids (so we
     // can pull their actual discography); taste names fill in behind them.
@@ -1589,142 +1866,6 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
                                         if let Some(ui) = ui_w.upgrade() {
                                             let slint_img = slint::Image::from_rgba8(buf);
                                             let model = ui.get_home_new_releases();
-                                            if let Some(row) = model.row_data(idx_copy) {
-                                                let mut updated = row;
-                                                updated.thumbnail = slint_img;
-                                                updated.has_thumbnail = true;
-                                                model.set_row_data(idx_copy, updated);
-                                            }
-                                        }
-                                    }).ok();
-                                }
-                            }
-                        }
-                    }
-                });
-            }
-        });
-    }
-
-    // ── Thread 2: Mixes (3 personalized mixes from search) ────────────────────
-    {
-        let ui_weak = ui_weak.clone();
-        let artists = top_artists_clone.clone();
-        core::net::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-            let (mix1, mix2, mix3, mix1_title, mix2_title, mix3_title) = rt.block_on(async {
-                use ytmapi_rs::query::{SearchQuery, search::SongsFilter};
-                let api = match crate::core::net::ytmusic().await {
-                    Ok(a) => a,
-                    Err(_) => return (Vec::new(), Vec::new(), Vec::new(), String::new(), String::new(), String::new()),
-                };
-
-                // Mix 1: "Your Mix" - songs similar to top artist
-                let artist1 = artists.first().cloned().unwrap_or_else(|| "popular".to_string());
-                let mix1_title = format!("{} Mix", artist1);
-                let query1 = format!("{} mix songs", artist1);
-                let mix1: Vec<(String, String, String, u32, String)> = api.query(SearchQuery::new(query1).with_filter(SongsFilter)).await
-                    .unwrap_or_default()
-                    .into_iter().take(10)
-                    .map(|s| {
-                        let dur = parse_duration(&s.duration).unwrap_or(0);
-                        let thumb = pick_thumb(&s.thumbnails).map(|t| t.url.clone()).unwrap_or_default();
-                        (s.video_id.get_raw().to_string(), s.title, s.artist, dur, thumb)
-                    }).collect();
-
-                // Mix 2: "Discover Mix" - songs from second artist or discovery
-                let artist2 = artists.get(1).cloned().unwrap_or_else(|| "new music".to_string());
-                let mix2_title = format!("Discover: {}", artist2);
-                let query2 = format!("{} discover new songs", artist2);
-                let mix2: Vec<(String, String, String, u32, String)> = api.query(SearchQuery::new(query2).with_filter(SongsFilter)).await
-                    .unwrap_or_default()
-                    .into_iter().take(10)
-                    .map(|s| {
-                        let dur = parse_duration(&s.duration).unwrap_or(0);
-                        let thumb = pick_thumb(&s.thumbnails).map(|t| t.url.clone()).unwrap_or_default();
-                        (s.video_id.get_raw().to_string(), s.title, s.artist, dur, thumb)
-                    }).collect();
-
-                // Mix 3: "Chill Mix" - relaxing songs
-                let mix3_title = "Chill Mix".to_string();
-                let query3 = "chill vibes relax lo-fi".to_string();
-                let mix3: Vec<(String, String, String, u32, String)> = api.query(SearchQuery::new(query3).with_filter(SongsFilter)).await
-                    .unwrap_or_default()
-                    .into_iter().take(10)
-                    .map(|s| {
-                        let dur = parse_duration(&s.duration).unwrap_or(0);
-                        let thumb = pick_thumb(&s.thumbnails).map(|t| t.url.clone()).unwrap_or_default();
-                        (s.video_id.get_raw().to_string(), s.title, s.artist, dur, thumb)
-                    }).collect();
-
-                (mix1, mix2, mix3, mix1_title, mix2_title, mix3_title)
-            });
-
-            if mix1.is_empty() && mix2.is_empty() && mix3.is_empty() { return; }
-
-            // Collect all thumb URLs for fetching
-            let all_thumb_urls: Vec<(u8, usize, String)> = mix1.iter().enumerate()
-                .filter(|(_, (_, _, _, _, url))| !url.is_empty())
-                .map(|(i, (_, _, _, _, url))| (1u8, i, url.clone()))
-                .chain(mix2.iter().enumerate()
-                    .filter(|(_, (_, _, _, _, url))| !url.is_empty())
-                    .map(|(i, (_, _, _, _, url))| (2u8, i, url.clone())))
-                .chain(mix3.iter().enumerate()
-                    .filter(|(_, (_, _, _, _, url))| !url.is_empty())
-                    .map(|(i, (_, _, _, _, url))| (3u8, i, url.clone())))
-                .collect();
-
-            let ui_weak2 = ui_weak.clone();
-            slint::invoke_from_event_loop(move || {
-                if let Some(ui) = ui_weak.upgrade() {
-                    let make_song_items = |raw: &[(String, String, String, u32, String)]| -> Vec<SongItem> {
-                        raw.iter().map(|(vid, title, artist, dur, _)| {
-                            let avatar = title.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "?".to_string());
-                            SongItem {
-                                video_id: SharedString::from(vid.as_str()),
-                                title: SharedString::from(title.as_str()),
-                                artist: SharedString::from(artist.as_str()),
-                                album: SharedString::default(),
-                                duration_str: SharedString::from(format_duration_secs(*dur).as_str()),
-                                avatar_letter: SharedString::from(avatar.as_str()),
-                                duration_secs: *dur as i32,
-                                thumbnail: slint::Image::default(),
-                                has_thumbnail: false,
-                            }
-                        }).collect()
-                    };
-                    ui.set_home_mix_1(ModelRc::new(VecModel::from(make_song_items(&mix1))));
-                    ui.set_home_mix_2(ModelRc::new(VecModel::from(make_song_items(&mix2))));
-                    ui.set_home_mix_3(ModelRc::new(VecModel::from(make_song_items(&mix3))));
-                    ui.set_home_mix_1_title(SharedString::from(mix1_title.as_str()));
-                    ui.set_home_mix_2_title(SharedString::from(mix2_title.as_str()));
-                    ui.set_home_mix_3_title(SharedString::from(mix3_title.as_str()));
-                }
-            }).ok();
-
-            // Fetch thumbnails for mixes
-            if !all_thumb_urls.is_empty() {
-                core::net::spawn(move || {
-                    let http = core::net::http();
-                    for (mix_num, idx, url) in &all_thumb_urls {
-                        if let Ok(resp) = http.get(url).send() {
-                            if let Ok(bytes) = resp.bytes() {
-                                if let Ok(img) = image::load_from_memory(&bytes) {
-                                    let rgba = img.to_rgba8();
-                                    let (w, h) = (rgba.width(), rgba.height());
-                                    let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(rgba.as_raw(), w, h);
-                                    let ui_w = ui_weak2.clone();
-                                    let mix_num_copy = *mix_num;
-                                    let idx_copy = *idx;
-                                    slint::invoke_from_event_loop(move || {
-                                        if let Some(ui) = ui_w.upgrade() {
-                                            let slint_img = slint::Image::from_rgba8(buf);
-                                            let model = match mix_num_copy {
-                                                1 => ui.get_home_mix_1(),
-                                                2 => ui.get_home_mix_2(),
-                                                3 => ui.get_home_mix_3(),
-                                                _ => return,
-                                            };
                                             if let Some(row) = model.row_data(idx_copy) {
                                                 let mut updated = row;
                                                 updated.thumbnail = slint_img;
@@ -1917,6 +2058,7 @@ fn fetch_home_enhanced_data(ui_weak: slint::Weak<NativeShellWindow>) {
 
 fn normalize_theme_name(name: &str) -> &'static str {
     match name {
+        "Dynamic" => "Dynamic",
         "Solar Red" => "Solar Red",
         "Ember" => "Ember",
         "Earth" => "Earth",
@@ -1932,16 +2074,17 @@ fn normalize_theme_name(name: &str) -> &'static str {
 
 fn theme_accent(name: &str) -> slint::Color {
     let (r, g, b) = match normalize_theme_name(name) {
-        "Solar Red" => (0xe2, 0x50, 0x3f),
-        "Ember" => (0xf2, 0x70, 0x3a),
-        "Earth" => (0xb0, 0x6a, 0x43),
-        "Forest" => (0x3f, 0xa9, 0x6a),
-        "Ocean" => (0x16, 0x99, 0xa8),
-        "Sky" => (0x46, 0xa6, 0xe6),
-        "Twilight" => (0x8b, 0x5c, 0xf6),
-        "Rose" => (0xe2, 0x6a, 0xa0),
-        "Mono" => (0x6b, 0x72, 0x80),
-        _ => (0x64, 0x86, 0xb0),
+        "Dynamic" => (0x7c, 0x8c, 0xf8),
+        "Solar Red" => (0xfa, 0x2d, 0x48),
+        "Ember" => (0xf9, 0x73, 0x16),
+        "Earth" => (0xc2, 0x78, 0x49),
+        "Forest" => (0x24, 0xc4, 0x66),
+        "Ocean" => (0x14, 0xb8, 0xc4),
+        "Sky" => (0x38, 0xbd, 0xf8),
+        "Twilight" => (0x9b, 0x6d, 0xff),
+        "Rose" => (0xec, 0x48, 0x99),
+        "Mono" => (0x8b, 0x95, 0xa5),
+        _ => (0x5b, 0x8d, 0xef),
     };
     slint::Color::from_rgb_u8(r, g, b)
 }
@@ -1989,9 +2132,643 @@ fn theme_is_light(mode: &str) -> bool {
     }
 }
 
+fn srgb_u8_to_linear(c: u8) -> f32 {
+    let v = c as f32 / 255.0;
+    if v <= 0.04045 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb_u8(x: f32) -> u8 {
+    let x = x.clamp(0.0, 1.0);
+    let v = if x <= 0.0031308 {
+        12.92 * x
+    } else {
+        1.055 * x.powf(1.0 / 2.4) - 0.055
+    };
+    (v.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+fn color_to_oklab(c: slint::Color) -> (f32, f32, f32) {
+    let r = srgb_u8_to_linear(c.red());
+    let g = srgb_u8_to_linear(c.green());
+    let b = srgb_u8_to_linear(c.blue());
+
+    let l_cone = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b;
+    let m_cone = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b;
+    let s_cone = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b;
+
+    let l_ = l_cone.max(0.0).cbrt();
+    let m_ = m_cone.max(0.0).cbrt();
+    let s_ = s_cone.max(0.0).cbrt();
+
+    let l = 0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_;
+    let a = 1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_;
+    let b_ok = 0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_;
+
+    (l, a, b_ok)
+}
+
+fn oklab_to_color(l: f32, a: f32, b: f32) -> slint::Color {
+    let l_ = l + 0.3963377774 * a + 0.2158037573 * b;
+    let m_ = l - 0.1055613458 * a - 0.0638541728 * b;
+    let s_ = l - 0.0894841775 * a - 1.2914855480 * b;
+
+    let l_cone = l_ * l_ * l_;
+    let m_cone = m_ * m_ * m_;
+    let s_cone = s_ * s_ * s_;
+
+    let r_lin =  4.0767416621 * l_cone - 3.3077115913 * m_cone + 0.2309699292 * s_cone;
+    let g_lin = -1.2684380046 * l_cone + 2.6097574011 * m_cone - 0.3413193965 * s_cone;
+    let b_lin = -0.0041960863 * l_cone - 0.7034186147 * m_cone + 1.7076147010 * s_cone;
+
+    let r = linear_to_srgb_u8(r_lin);
+    let g = linear_to_srgb_u8(g_lin);
+    let b_u8 = linear_to_srgb_u8(b_lin);
+
+    slint::Color::from_rgb_u8(r, g, b_u8)
+}
+
+pub(crate) fn oklab_lerp_color(from: slint::Color, to: slint::Color, t: f32) -> slint::Color {
+    let t = t.clamp(0.0, 1.0);
+    if t <= 0.0 {
+        return from;
+    }
+    if t >= 1.0 {
+        return to;
+    }
+    let (l1, a1, b1) = color_to_oklab(from);
+    let (l2, a2, b2) = color_to_oklab(to);
+    let l = l1 + (l2 - l1) * t;
+    let a = a1 + (a2 - a1) * t;
+    let b = b1 + (b2 - b1) * t;
+    oklab_to_color(l, a, b)
+}
+
+fn colors_close(a: slint::Color, b: slint::Color) -> bool {
+    (a.red() as i16 - b.red() as i16).abs() <= 1
+        && (a.green() as i16 - b.green() as i16).abs() <= 1
+        && (a.blue() as i16 - b.blue() as i16).abs() <= 1
+}
+
+struct AccentAnimState {
+    timer: slint::Timer,
+    start: Instant,
+    accent_from: slint::Color,
+    accent_to: slint::Color,
+    art_from: slint::Color,
+    art_to: slint::Color,
+    hero_from: slint::Color,
+    hero_to: slint::Color,
+    running: bool,
+}
+
+impl Default for AccentAnimState {
+    fn default() -> Self {
+        Self {
+            timer: slint::Timer::default(),
+            start: Instant::now(),
+            accent_from: slint::Color::default(),
+            accent_to: slint::Color::default(),
+            art_from: slint::Color::default(),
+            art_to: slint::Color::default(),
+            hero_from: slint::Color::default(),
+            hero_to: slint::Color::default(),
+            running: false,
+        }
+    }
+}
+
+thread_local! {
+    static ACCENT_ANIM: std::cell::RefCell<AccentAnimState> = std::cell::RefCell::new(AccentAnimState::default());
+}
+
+fn animate_theme_targets(
+    ui: &NativeShellWindow,
+    accent_to: Option<slint::Color>,
+    art_to: Option<slint::Color>,
+    hero_to: Option<slint::Color>,
+    immediate: bool,
+) {
+    let theme = ui.global::<Theme>();
+    let cur_accent = theme.get_accent();
+    let cur_art = theme.get_art_accent();
+    let cur_hero = theme.get_hero_accent();
+
+    ACCENT_ANIM.with(|anim_cell| {
+        let mut anim = anim_cell.borrow_mut();
+        let final_accent_to = accent_to.unwrap_or(if anim.running { anim.accent_to } else { cur_accent });
+        let final_art_to = art_to.unwrap_or(if anim.running { anim.art_to } else { cur_art });
+        let final_hero_to = hero_to.unwrap_or(if anim.running { anim.hero_to } else { cur_hero });
+
+        if immediate {
+            anim.timer.stop();
+            anim.running = false;
+            anim.accent_from = final_accent_to;
+            anim.accent_to = final_accent_to;
+            anim.art_from = final_art_to;
+            anim.art_to = final_art_to;
+            anim.hero_from = final_hero_to;
+            anim.hero_to = final_hero_to;
+            theme.set_accent(final_accent_to);
+            theme.set_art_accent(final_art_to);
+            theme.set_hero_accent(final_hero_to);
+            return;
+        }
+
+        if colors_close(cur_accent, final_accent_to)
+            && colors_close(cur_art, final_art_to)
+            && colors_close(cur_hero, final_hero_to)
+            && (!anim.running
+                || (colors_close(anim.accent_to, final_accent_to)
+                    && colors_close(anim.art_to, final_art_to)
+                    && colors_close(anim.hero_to, final_hero_to)))
+        {
+            if !anim.running {
+                return;
+            }
+        }
+
+        anim.accent_from = cur_accent;
+        anim.accent_to = final_accent_to;
+        anim.art_from = cur_art;
+        anim.art_to = final_art_to;
+        anim.hero_from = cur_hero;
+        anim.hero_to = final_hero_to;
+        anim.start = Instant::now();
+        anim.running = true;
+
+        let ui_weak = ui.as_weak();
+        anim.timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(16),
+            move || {
+                ACCENT_ANIM.with(|anim_cell| {
+                    let mut anim = anim_cell.borrow_mut();
+                    if !anim.running {
+                        anim.timer.stop();
+                        return;
+                    }
+                    let raw_t = (anim.start.elapsed().as_secs_f32() / 1.10).clamp(0.0, 1.0);
+                    let Some(ui) = ui_weak.upgrade() else {
+                        anim.running = false;
+                        anim.timer.stop();
+                        return;
+                    };
+                    let theme = ui.global::<Theme>();
+                    if raw_t >= 1.0 {
+                        theme.set_accent(anim.accent_to);
+                        theme.set_art_accent(anim.art_to);
+                        theme.set_hero_accent(anim.hero_to);
+                        anim.running = false;
+                        anim.timer.stop();
+                    } else {
+                        let eased = raw_t * raw_t * (3.0 - 2.0 * raw_t);
+                        theme.set_accent(oklab_lerp_color(anim.accent_from, anim.accent_to, eased));
+                        theme.set_art_accent(oklab_lerp_color(anim.art_from, anim.art_to, eased));
+                        theme.set_hero_accent(oklab_lerp_color(anim.hero_from, anim.hero_to, eased));
+                    }
+                });
+            },
+        );
+    });
+}
+
+fn apply_theme_with_mode(ui: &NativeShellWindow, name: &str, mode: &str, immediate: bool) {
+    let norm = normalize_theme_name(name);
+    let is_dyn = norm == "Dynamic";
+    let theme = ui.global::<Theme>();
+    theme.set_is_dynamic(is_dyn);
+    theme.set_is_light(theme_is_light(mode));
+
+    let art_target = ACCENT_ANIM.with(|anim_cell| {
+        let anim = anim_cell.borrow();
+        if anim.running {
+            anim.art_to
+        } else {
+            theme.get_art_accent()
+        }
+    });
+    let target_accent = if is_dyn && theme.get_has_art_accent() {
+        art_target
+    } else {
+        theme_accent(norm)
+    };
+    animate_theme_targets(ui, Some(target_accent), None, None, immediate);
+}
+
 fn apply_theme(ui: &NativeShellWindow, name: &str, mode: &str) {
-    ui.global::<Theme>().set_accent(theme_accent(name));
-    ui.global::<Theme>().set_is_light(theme_is_light(mode));
+    apply_theme_with_mode(ui, name, mode, false);
+}
+
+fn apply_art_accent(ui: &NativeShellWindow, art_color: Option<slint::Color>) {
+    let theme = ui.global::<Theme>();
+    match art_color {
+        Some(c) => {
+            theme.set_has_art_accent(true);
+            let accent_target = if theme.get_is_dynamic() {
+                Some(c)
+            } else {
+                None
+            };
+            animate_theme_targets(ui, accent_target, Some(c), None, false);
+        }
+        None => {
+            theme.set_has_art_accent(false);
+            if theme.get_is_dynamic() {
+                animate_theme_targets(ui, Some(theme_accent("Dynamic")), None, None, false);
+            }
+        }
+    }
+}
+
+fn rgb_to_hsv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+    let v = max;
+    let s = if max > 0.0 { delta / max } else { 0.0 };
+    let h = if delta <= 1e-6 {
+        0.0
+    } else if (max - r).abs() < 1e-6 {
+        60.0 * (((g - b) / delta).rem_euclid(6.0))
+    } else if (max - g).abs() < 1e-6 {
+        60.0 * (((b - r) / delta) + 2.0)
+    } else {
+        60.0 * (((r - g) / delta) + 4.0)
+    };
+    (h.rem_euclid(360.0), s, v)
+}
+
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
+    let c = v * s;
+    let h_prime = (h.rem_euclid(360.0)) / 60.0;
+    let x = c * (1.0 - ((h_prime % 2.0) - 1.0).abs());
+    let m = v - c;
+    let (r1, g1, b1) = if h_prime < 1.0 {
+        (c, x, 0.0)
+    } else if h_prime < 2.0 {
+        (x, c, 0.0)
+    } else if h_prime < 3.0 {
+        (0.0, c, x)
+    } else if h_prime < 4.0 {
+        (0.0, x, c)
+    } else if h_prime < 5.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+    let r = ((r1 + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    let g = ((g1 + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    let b = ((b1 + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    (r, g, b)
+}
+
+pub fn extract_vibrant_accent_from_image(img: &image::DynamicImage) -> slint::Color {
+    let rgba = img.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+    if w == 0 || h == 0 {
+        return slint::Color::from_rgb_u8(0x8b, 0x95, 0xa5);
+    }
+
+    let x_step = (w / 24).max(1);
+    let y_step = (h / 24).max(1);
+
+    // Skip top/bottom 12% letterbox bars (e.g. YouTube mqdefault.jpg 16:9 black bars)
+    let mut y_start = (h as f32 * 0.12) as u32;
+    let mut y_end = (h as f32 * 0.88).ceil() as u32;
+    if y_start >= y_end || y_end > h {
+        y_start = 0;
+        y_end = h;
+    }
+
+    let mut bin_weights = [0.0f32; 12];
+    let mut bin_r = [0.0f32; 12];
+    let mut bin_g = [0.0f32; 12];
+    let mut bin_b = [0.0f32; 12];
+    let mut total_vivid_weight = 0.0f32;
+
+    let mut y = y_start;
+    while y < y_end {
+        let mut x = 0;
+        while x < w {
+            let px = rgba.get_pixel(x, y);
+            let alpha = px[3];
+            if alpha >= 128 {
+                let r = px[0] as f32 / 255.0;
+                let g = px[1] as f32 / 255.0;
+                let b = px[2] as f32 / 255.0;
+                let (h_val, s, v) = rgb_to_hsv(r, g, b);
+
+                let is_near_black = v < 0.12;
+                let is_near_white = v > 0.96 && s < 0.12;
+                if !is_near_black && !is_near_white {
+                    let weight = s.powf(1.6) * (1.0 - ((v - 0.62).abs() * 1.35).min(0.9));
+                    if weight > 0.001 {
+                        let bin = ((h_val / 30.0).floor() as usize).min(11);
+                        bin_weights[bin] += weight;
+                        bin_r[bin] += r * weight;
+                        bin_g[bin] += g * weight;
+                        bin_b[bin] += b * weight;
+                        total_vivid_weight += weight;
+                    }
+                }
+            }
+            x += x_step;
+        }
+        y += y_step;
+    }
+
+    if total_vivid_weight < 1e-3 {
+        return slint::Color::from_rgb_u8(0x8b, 0x95, 0xa5);
+    }
+
+    let mut best_bin = 0;
+    let mut best_weight = 0.0f32;
+    for (i, &bw) in bin_weights.iter().enumerate() {
+        if bw > best_weight {
+            best_weight = bw;
+            best_bin = i;
+        }
+    }
+
+    if best_weight < 1e-4 {
+        return slint::Color::from_rgb_u8(0x8b, 0x95, 0xa5);
+    }
+
+    let avg_r = bin_r[best_bin] / best_weight;
+    let avg_g = bin_g[best_bin] / best_weight;
+    let avg_b = bin_b[best_bin] / best_weight;
+
+    let (h_val, s, v) = rgb_to_hsv(avg_r, avg_g, avg_b);
+    let norm_s = s.clamp(0.52, 0.82);
+    let norm_v = v.clamp(0.68, 0.88);
+    let (final_r, final_g, final_b) = hsv_to_rgb(h_val, norm_s, norm_v);
+
+    slint::Color::from_rgb_u8(final_r, final_g, final_b)
+}
+
+pub fn extract_vibrant_accent_from_bytes(bytes: &[u8]) -> Option<slint::Color> {
+    image::load_from_memory(bytes).ok().map(|img| extract_vibrant_accent_from_image(&img))
+}
+
+pub fn extract_vibrant_accent_from_path(path: &std::path::Path) -> Option<slint::Color> {
+    image::open(path).ok().map(|img| extract_vibrant_accent_from_image(&img))
+}
+
+#[cfg(target_os = "windows")]
+fn set_clipboard_text(text: &str) -> bool {
+    use std::os::raw::c_void;
+    type HANDLE = *mut c_void;
+    type HGLOBAL = *mut c_void;
+    type HWND = *mut c_void;
+    type UINT = u32;
+    type BOOL = i32;
+
+    const CF_UNICODETEXT: UINT = 13;
+    const GMEM_MOVEABLE: UINT = 0x0002;
+
+    extern "system" {
+        fn OpenClipboard(hwnd: HWND) -> BOOL;
+        fn CloseClipboard() -> BOOL;
+        fn EmptyClipboard() -> BOOL;
+        fn SetClipboardData(uFormat: UINT, hMem: HANDLE) -> HANDLE;
+        fn GlobalAlloc(uFlags: UINT, dwBytes: usize) -> HGLOBAL;
+        fn GlobalFree(hMem: HGLOBAL) -> HGLOBAL;
+        fn GlobalLock(hMem: HGLOBAL) -> *mut c_void;
+        fn GlobalUnlock(hMem: HGLOBAL) -> BOOL;
+    }
+
+    let utf16: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let size = utf16.len() * std::mem::size_of::<u16>();
+
+    unsafe {
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return false;
+        }
+        EmptyClipboard();
+        let mut ok = false;
+        let h_mem = GlobalAlloc(GMEM_MOVEABLE, size);
+        if !h_mem.is_null() {
+            let ptr = GlobalLock(h_mem) as *mut u16;
+            if !ptr.is_null() {
+                std::ptr::copy_nonoverlapping(utf16.as_ptr(), ptr, utf16.len());
+                GlobalUnlock(h_mem);
+                if !SetClipboardData(CF_UNICODETEXT, h_mem).is_null() {
+                    ok = true;
+                } else {
+                    GlobalFree(h_mem);
+                }
+            } else {
+                GlobalFree(h_mem);
+            }
+        }
+        CloseClipboard();
+        ok
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_clipboard_text(_text: &str) -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn get_clipboard_text() -> Option<String> {
+    use std::os::raw::c_void;
+    type HANDLE = *mut c_void;
+    type HGLOBAL = *mut c_void;
+    type HWND = *mut c_void;
+    type UINT = u32;
+    type BOOL = i32;
+
+    const CF_UNICODETEXT: UINT = 13;
+
+    extern "system" {
+        fn OpenClipboard(hwnd: HWND) -> BOOL;
+        fn CloseClipboard() -> BOOL;
+        fn GetClipboardData(uFormat: UINT) -> HANDLE;
+        fn GlobalLock(hMem: HGLOBAL) -> *mut c_void;
+        fn GlobalSize(hMem: HGLOBAL) -> usize;
+        fn GlobalUnlock(hMem: HGLOBAL) -> BOOL;
+    }
+
+    unsafe {
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return None;
+        }
+        let handle = GetClipboardData(CF_UNICODETEXT);
+        let mut result = None;
+        if !handle.is_null() {
+            let max_u16 = GlobalSize(handle) / std::mem::size_of::<u16>();
+            let ptr = GlobalLock(handle) as *const u16;
+            if !ptr.is_null() && max_u16 > 0 {
+                let mut len = 0;
+                while len < max_u16 && *ptr.add(len) != 0 {
+                    len += 1;
+                }
+                let slice = std::slice::from_raw_parts(ptr, len);
+                result = String::from_utf16(slice).ok();
+                GlobalUnlock(handle);
+            }
+        }
+        CloseClipboard();
+        result
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn get_clipboard_text() -> Option<String> {
+    None
+}
+
+fn now_playing_to_party_track(np: &core::playback::NowPlaying, added_by: &str) -> crate::core::party::PartyTrack {
+    let thumbnail_url = if !np.video_id.is_empty() && np.video_id != "native-prototype" {
+        format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", np.video_id)
+    } else {
+        String::new()
+    };
+    crate::core::party::PartyTrack {
+        video_id: np.video_id.clone(),
+        title: np.title.clone(),
+        artist: np.artist.clone(),
+        album: np.album.clone(),
+        album_id: np.album_id.clone(),
+        artist_id: np.artist_id.clone(),
+        duration_secs: np.duration_secs,
+        thumbnail_url,
+        added_by: added_by.to_string(),
+    }
+}
+
+fn build_party_seed_from_playback(playback: &core::playback::PlaybackCore, local_name: &str) -> crate::core::party::PartySeedState {
+    let full_queue = playback.full_queue();
+    let queue: Vec<crate::core::party::PartyTrack> = full_queue.iter()
+        .filter(|np| !np.video_id.is_empty() && np.video_id != "native-prototype")
+        .map(|np| now_playing_to_party_track(np, local_name))
+        .collect();
+
+    let np = playback.now_playing();
+    let current_track = if !np.video_id.is_empty() && np.video_id != "native-prototype" {
+        Some(now_playing_to_party_track(&np, local_name))
+    } else {
+        None
+    };
+
+    let is_playing = playback.is_playing();
+    let position_ms = (playback.elapsed_secs() * 1000.0) as u64;
+    let repeat_mode = playback.repeat_mode().as_str().to_string();
+    let current_index = playback.queue_index();
+
+    crate::core::party::PartySeedState {
+        queue,
+        current_index,
+        current_track,
+        is_playing,
+        position_ms,
+        repeat_mode,
+    }
+}
+
+fn refresh_party_ui(ui: &NativeShellWindow) {
+    let snap = crate::core::party::party_manager().snapshot();
+    ui.set_party_status(SharedString::from(snap.status.as_str()));
+    ui.set_party_active(snap.is_active);
+    ui.set_party_is_host(snap.is_host);
+    ui.set_party_code(SharedString::from(snap.party_code.as_str()));
+    ui.set_party_invite_link(SharedString::from(snap.invite_link.as_str()));
+    ui.set_party_host_name(SharedString::from(snap.host_name.as_str()));
+    ui.set_party_member_count(snap.participant_count as i32);
+    ui.set_party_rtt_ms(snap.rtt_ms as i32);
+    ui.set_party_activity_text(SharedString::from(snap.last_action_desc.as_str()));
+    ui.set_party_error_text(SharedString::from(snap.error_text.as_str()));
+
+    let members: Vec<PartyMemberItem> = snap.participants.iter().map(|p| {
+        let initial = p.name.chars().next()
+            .map(|c| c.to_uppercase().to_string())
+            .unwrap_or_else(|| "?".to_string());
+        PartyMemberItem {
+            name: SharedString::from(p.name.as_str()),
+            platform: SharedString::from(p.platform.as_str()),
+            is_host: p.is_host,
+            initial: SharedString::from(initial.as_str()),
+        }
+    }).collect();
+    ui.set_party_members(ModelRc::new(VecModel::from(members)));
+}
+
+fn apply_pending_party_updates(ui: &NativeShellWindow, playback: &'static core::playback::PlaybackCore) {
+    let upd = crate::core::party::party_manager().poll_remote_update();
+    if upd.has_update {
+        if let Some(pstate) = upd.state {
+            let queue_np: Vec<core::playback::NowPlaying> = pstate.queue.iter().map(|t| {
+                core::playback::NowPlaying {
+                    video_id: t.video_id.clone(),
+                    title: t.title.clone(),
+                    artist: t.artist.clone(),
+                    album: t.album.clone(),
+                    album_id: t.album_id.clone(),
+                    artist_id: t.artist_id.clone(),
+                    duration_secs: t.duration_secs,
+                }
+            }).collect();
+
+            let target_repeat = match pstate.repeat_mode.as_str() {
+                "all" => core::playback::RepeatMode::All,
+                "one" => core::playback::RepeatMode::One,
+                _ => core::playback::RepeatMode::Off,
+            };
+
+            let cur_np = playback.now_playing();
+            let new_track_opt = pstate.current_track.as_ref();
+            let new_vid = new_track_opt.map(|t| t.video_id.as_str()).unwrap_or("");
+
+            if !new_vid.is_empty() && new_vid != cur_np.video_id {
+                let new_track = new_track_opt.unwrap();
+                {
+                    let mut state = playback.state_lock();
+                    state.queue = queue_np;
+                    state.queue_index = pstate.current_index.min(state.queue.len().saturating_sub(1));
+                    state.is_playing = pstate.is_playing;
+                    state.repeat_mode = target_repeat;
+                }
+                playback.set_now_playing(&new_track.video_id, &new_track.title, &new_track.artist, new_track.duration_secs);
+                {
+                    let mut state = playback.state_lock();
+                    state.queue_index = pstate.current_index.min(state.queue.len().saturating_sub(1));
+                    state.is_playing = pstate.is_playing;
+                }
+                if upd.target_position_ms > 500 {
+                    playback.seek_to_secs(upd.target_position_ms as f64 / 1000.0);
+                }
+                now_playing_ui::notify_track_changed(
+                    ui.as_weak(),
+                    new_track.video_id.clone(),
+                    new_track.title.clone(),
+                    new_track.artist.clone(),
+                    new_track.duration_secs,
+                );
+            } else {
+                {
+                    let mut state = playback.state_lock();
+                    state.queue = queue_np;
+                    state.queue_index = pstate.current_index.min(state.queue.len().saturating_sub(1));
+                    state.repeat_mode = target_repeat;
+                }
+                if playback.is_playing() != pstate.is_playing {
+                    playback.set_playing(pstate.is_playing);
+                }
+                let local_ms = (playback.elapsed_secs() * 1000.0) as i64;
+                let delta = (local_ms - upd.target_position_ms as i64).abs();
+                if (!playback.is_audio_loading() || !pstate.is_playing) && delta > 600 {
+                    playback.seek_to_secs(upd.target_position_ms as f64 / 1000.0);
+                }
+            }
+            refresh_native_shell_ui(ui, playback);
+        }
+    }
 }
 
 pub fn run_native_shell() -> Result<(), slint::PlatformError> {
@@ -2036,7 +2813,7 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         let mode = normalize_theme_mode(&settings.theme_mode);
         ui.set_theme_name(SharedString::from(name));
         ui.set_theme_mode(SharedString::from(mode));
-        apply_theme(&ui, name, mode);
+        apply_theme_with_mode(&ui, name, mode, true);
     }
 
     // Open at a comfortable desktop size instead of the content's (short) preferred
@@ -2047,6 +2824,141 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     {
         let liked_items: Vec<SongItem> = playback.get_liked_songs().iter().map(make_song_item).collect();
         ui.set_liked_songs(ModelRc::new(VecModel::from(liked_items)));
+        maybe_seed_home_hero(&ui, false);
+    }
+
+    {
+        let np = playback.now_playing();
+        if !np.video_id.is_empty() {
+            now_playing_ui::notify_track_changed(
+                ui.as_weak(),
+                np.video_id,
+                np.title,
+                np.artist,
+                np.duration_secs,
+            );
+        }
+    }
+
+    // ── Auricle Party setup & deep-link ──────────────────────────────────────
+    {
+        let display_name = {
+            let settings = core::persistence::load_settings();
+            if !settings.party_display_name.is_empty() {
+                settings.party_display_name
+            } else {
+                "Desktop Listener".to_string()
+            }
+        };
+        ui.set_party_display_name(SharedString::from(display_name.as_str()));
+
+        // Wakeup callback for party background thread events
+        {
+            let ui_w = ui.as_weak();
+            crate::core::party::party_manager().set_wakeup_callback(Box::new(move || {
+                let ui_w2 = ui_w.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_w2.upgrade() {
+                        let playback = crate::core::bridge::playback_core();
+                        apply_pending_party_updates(&ui, playback);
+                        refresh_party_ui(&ui);
+                    }
+                }).ok();
+            }));
+        }
+
+        for arg in std::env::args().skip(1) {
+            if arg.contains("auricle://party/") {
+                ui.set_party_join_input(SharedString::from(arg.trim()));
+                ui.set_show_party_modal(true);
+                refresh_party_ui(&ui);
+                break;
+            }
+        }
+    }
+
+    // ── Auricle Party callbacks ───────────────────────────────────────────────
+    {
+        ui.on_save_party_display_name(move |name| {
+            let trimmed = name.trim().to_string();
+            let mut settings = core::persistence::load_settings();
+            settings.party_display_name = trimmed;
+            core::persistence::save_settings(&settings);
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_start_party(move |display_name| {
+            let name = if !display_name.trim().is_empty() {
+                display_name.trim().to_string()
+            } else {
+                let settings = core::persistence::load_settings();
+                if !settings.party_display_name.is_empty() {
+                    settings.party_display_name
+                } else {
+                    std::env::var("USERNAME").unwrap_or_else(|_| "Windows PC".to_string())
+                }
+            };
+            let playback = crate::core::bridge::playback_core();
+            let seed = build_party_seed_from_playback(playback, &name);
+            crate::core::party::party_manager().start_party(name, seed);
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_party_link_copied(false);
+                refresh_party_ui(&ui);
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_join_party(move |invite_input, display_name| {
+            let name = if !display_name.trim().is_empty() {
+                display_name.trim().to_string()
+            } else {
+                let settings = core::persistence::load_settings();
+                if !settings.party_display_name.is_empty() {
+                    settings.party_display_name
+                } else {
+                    std::env::var("USERNAME").unwrap_or_else(|_| "Windows PC".to_string())
+                }
+            };
+            crate::core::party::party_manager().join_party(invite_input.trim().to_string(), name);
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_party_link_copied(false);
+                refresh_party_ui(&ui);
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_leave_party(move || {
+            crate::core::party::party_manager().leave_party();
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_party_link_copied(false);
+                refresh_party_ui(&ui);
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_copy_party_link(move || {
+            let snap = crate::core::party::party_manager().snapshot();
+            if !snap.invite_link.is_empty() {
+                set_clipboard_text(&snap.invite_link);
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_party_link_copied(true);
+                }
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_paste_party_link(move || {
+            if let Some(text) = get_clipboard_text() {
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_party_join_input(SharedString::from(text.trim()));
+                }
+            }
+        });
     }
 
 
@@ -2413,6 +3325,10 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         ui.on_toggle_queue_pane(move || {
             if let Some(ui) = ui_weak.upgrade() {
+                if ui.get_current_view().as_str() == "NowPlaying" {
+                    ui.set_queue_pane_open(false);
+                    return;
+                }
                 ui.set_queue_pane_open(!ui.get_queue_pane_open());
             }
         });
@@ -2423,6 +3339,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         ui.on_remove_from_queue(move |idx| {
             playback.remove_from_queue(idx as usize);
+            if crate::core::party::party_manager().snapshot().is_active {
+                crate::core::party::party_manager().send_action(
+                    crate::core::party::PartyAction::RemoveFromQueue { upcoming_index: idx as usize },
+                    false,
+                );
+            }
             if let Some(ui) = ui_weak.upgrade() {
                 let items: Vec<SongItem> = playback.queue_upcoming().iter().map(make_song_item).collect();
                 ui.set_queue(ModelRc::new(VecModel::from(items)));
@@ -2606,6 +3528,21 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         ui.set_can_go_forward(cursor < hist.len().saturating_sub(1));
     }
 
+    {
+        let nav_history = nav_history.clone();
+        let nav_cursor = nav_cursor.clone();
+        let nav_restoring = nav_restoring.clone();
+        discography_ui::wire(&ui, cur_artist.clone(), move |ui, artist_id| {
+            if !nav_restoring.load(std::sync::atomic::Ordering::Relaxed) {
+                push_nav_entry(&nav_history, &nav_cursor, "Discography".to_string(), artist_id.to_string());
+                let hist = nav_history.lock().unwrap();
+                let cur = *nav_cursor.lock().unwrap();
+                update_nav_buttons(ui, &hist, cur);
+            }
+        });
+    }
+    now_playing_ui::wire(&ui);
+
     // ── Navigate ──────────────────────────────────────────────────────────────
     {
         let ui_weak = ui.as_weak();
@@ -2613,12 +3550,31 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         let nav_cursor = nav_cursor.clone();
         ui.on_navigate(move |view| {
             if let Some(ui) = ui_weak.upgrade() {
+                if view == "Discography" {
+                    let artist_id = ui.get_discography_artist_id();
+                    if !artist_id.is_empty() { ui.invoke_navigate_to_discography(artist_id); }
+                    return;
+                }
                 context_ui::invalidate(&ui);
                 ui.set_current_view(view.clone());
                 push_nav_entry(&nav_history, &nav_cursor, view.to_string(), String::new());
                 let hist = nav_history.lock().unwrap();
                 let cur = *nav_cursor.lock().unwrap();
                 update_nav_buttons(&ui, &hist, cur);
+                if view.as_str() == "NowPlaying" {
+                    ui.set_queue_pane_open(false);
+                    let playback = crate::core::bridge::playback_core();
+                    let np = playback.now_playing();
+                    if !np.video_id.is_empty() {
+                        now_playing_ui::notify_track_changed(
+                            ui.as_weak(),
+                            np.video_id,
+                            np.title,
+                            np.artist,
+                            np.duration_secs,
+                        );
+                    }
+                }
                 // Trigger explore data load when navigating to Explore
                 if view.as_str() == "Explore" {
                     ui.invoke_load_explore_data();
@@ -2656,6 +3612,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                         drop(hist);
                         ui.invoke_navigate_to_artist(SharedString::from(entry.context_id.as_str()));
                         nav_restoring.store(false, std::sync::atomic::Ordering::Relaxed);
+                    } else if entry.view == "Discography" && !entry.context_id.is_empty() {
+                        nav_restoring.store(true, std::sync::atomic::Ordering::Relaxed);
+                        drop(cur);
+                        drop(hist);
+                        ui.invoke_navigate_to_discography(SharedString::from(entry.context_id.as_str()));
+                        nav_restoring.store(false, std::sync::atomic::Ordering::Relaxed);
                     } else if entry.view == "Album" && !entry.context_id.is_empty() {
                         nav_restoring.store(true, std::sync::atomic::Ordering::Relaxed);
                         drop(cur);
@@ -2668,6 +3630,19 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                         drop(hist);
                         ui.invoke_navigate_to_playlist(SharedString::from(entry.context_id.as_str()));
                         nav_restoring.store(false, std::sync::atomic::Ordering::Relaxed);
+                    } else if entry.view == "NowPlaying" {
+                        ui.set_queue_pane_open(false);
+                        let playback = crate::core::bridge::playback_core();
+                        let np = playback.now_playing();
+                        if !np.video_id.is_empty() {
+                            now_playing_ui::notify_track_changed(
+                                ui.as_weak(),
+                                np.video_id,
+                                np.title,
+                                np.artist,
+                                np.duration_secs,
+                            );
+                        }
                     }
                 }
             }
@@ -2696,6 +3671,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                         drop(hist);
                         ui.invoke_navigate_to_artist(SharedString::from(entry.context_id.as_str()));
                         nav_restoring.store(false, std::sync::atomic::Ordering::Relaxed);
+                    } else if entry.view == "Discography" && !entry.context_id.is_empty() {
+                        nav_restoring.store(true, std::sync::atomic::Ordering::Relaxed);
+                        drop(cur);
+                        drop(hist);
+                        ui.invoke_navigate_to_discography(SharedString::from(entry.context_id.as_str()));
+                        nav_restoring.store(false, std::sync::atomic::Ordering::Relaxed);
                     } else if entry.view == "Album" && !entry.context_id.is_empty() {
                         nav_restoring.store(true, std::sync::atomic::Ordering::Relaxed);
                         drop(cur);
@@ -2708,6 +3689,19 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                         drop(hist);
                         ui.invoke_navigate_to_playlist(SharedString::from(entry.context_id.as_str()));
                         nav_restoring.store(false, std::sync::atomic::Ordering::Relaxed);
+                    } else if entry.view == "NowPlaying" {
+                        ui.set_queue_pane_open(false);
+                        let playback = crate::core::bridge::playback_core();
+                        let np = playback.now_playing();
+                        if !np.video_id.is_empty() {
+                            now_playing_ui::notify_track_changed(
+                                ui.as_weak(),
+                                np.video_id,
+                                np.title,
+                                np.artist,
+                                np.duration_secs,
+                            );
+                        }
                     }
                 }
             }
@@ -2720,6 +3714,13 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         ui.on_toggle_play_pause(move || {
             playback.toggle_play_pause();
             let is_playing = playback.is_playing();
+            if crate::core::party::party_manager().snapshot().is_active {
+                let position_ms = (playback.elapsed_secs() * 1000.0) as u64;
+                crate::core::party::party_manager().send_action(
+                    crate::core::party::PartyAction::PlayPause { is_playing, position_ms },
+                    false,
+                );
+            }
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_is_playing(is_playing);
             }
@@ -2731,6 +3732,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         ui.on_prev_track(move || {
             playback.prev_track();
+            if crate::core::party::party_manager().snapshot().is_active {
+                crate::core::party::party_manager().send_action(
+                    crate::core::party::PartyAction::Prev,
+                    false,
+                );
+            }
             if let Some(ui) = ui_weak.upgrade() {
                 refresh_native_shell_ui(&ui, playback);
             }
@@ -2742,6 +3749,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         ui.on_next_track(move || {
             playback.next_track();
+            if crate::core::party::party_manager().snapshot().is_active {
+                crate::core::party::party_manager().send_action(
+                    crate::core::party::PartyAction::Next,
+                    false,
+                );
+            }
             if let Some(ui) = ui_weak.upgrade() {
                 refresh_native_shell_ui(&ui, playback);
             }
@@ -2752,6 +3765,9 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     {
         let ui_weak = ui.as_weak();
         ui.on_play_song(move |video_id, title, artist, duration_secs| {
+            if playback.is_currently_active_track(video_id.as_str()) {
+                return;
+            }
             // set_now_playing calls sync_audio_playback internally.
             // We set is_playing FIRST so sync_audio_playback actually starts audio.
             {
@@ -2759,6 +3775,20 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 state.is_playing = true;
             }
             playback.set_now_playing(video_id.as_str(), title.as_str(), artist.as_str(), duration_secs as u32);
+            if crate::core::party::party_manager().snapshot().is_active {
+                let track = crate::core::party::PartyTrack {
+                    video_id: video_id.to_string(),
+                    title: title.to_string(),
+                    artist: artist.to_string(),
+                    duration_secs: duration_secs as u32,
+                    thumbnail_url: format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", video_id),
+                    ..Default::default()
+                };
+                crate::core::party::party_manager().send_action(
+                    crate::core::party::PartyAction::PlayTrackNow { track },
+                    true,
+                );
+            }
             if let Some(ui) = ui_weak.upgrade() {
                 refresh_native_shell_ui(&ui, playback);
             }
@@ -2781,6 +3811,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             let dur = playback.track_duration_secs() as f64;
             let target_secs = fraction * dur;
             let applied = playback.seek_to_secs(target_secs);
+            if crate::core::party::party_manager().snapshot().is_active {
+                crate::core::party::party_manager().send_action(
+                    crate::core::party::PartyAction::Seek { position_ms: (target_secs * 1000.0) as u64 },
+                    false,
+                );
+            }
             // Only snap the UI when the audio actually moved. While streaming and
             // not yet cached, an arbitrary seek can't be honored — leave the bar
             // where playback really is so the timeline can't desync.
@@ -2817,6 +3853,20 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 q.iter().find(|s| s.video_id == video_id.as_str()).map(|s| s.duration_secs).unwrap_or(0)
             };
             playback.add_to_queue(video_id.as_str(), title.as_str(), artist.as_str(), dur);
+            if crate::core::party::party_manager().snapshot().is_active {
+                let track = crate::core::party::PartyTrack {
+                    video_id: video_id.to_string(),
+                    title: title.to_string(),
+                    artist: artist.to_string(),
+                    duration_secs: dur,
+                    thumbnail_url: format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", video_id),
+                    ..Default::default()
+                };
+                crate::core::party::party_manager().send_action(
+                    crate::core::party::PartyAction::AddToQueue { track, play_next: false },
+                    false,
+                );
+            }
             if let Some(ui) = ui_weak.upgrade() {
                 let items: Vec<SongItem> = playback.queue_upcoming().iter().map(make_song_item).collect();
                 ui.set_queue(ModelRc::new(VecModel::from(items)));
@@ -2831,6 +3881,20 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             playback.play_next(video_id.as_str(), title.as_str(), artist.as_str(), duration_secs as u32);
             // Also remove from autoplay queue if present
             playback.autoplay_remove_id(video_id.as_str());
+            if crate::core::party::party_manager().snapshot().is_active {
+                let track = crate::core::party::PartyTrack {
+                    video_id: video_id.to_string(),
+                    title: title.to_string(),
+                    artist: artist.to_string(),
+                    duration_secs: duration_secs as u32,
+                    thumbnail_url: format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", video_id),
+                    ..Default::default()
+                };
+                crate::core::party::party_manager().send_action(
+                    crate::core::party::PartyAction::AddToQueue { track, play_next: true },
+                    false,
+                );
+            }
             if let Some(ui) = ui_weak.upgrade() {
                 let items: Vec<SongItem> = playback.queue_upcoming().iter().map(make_song_item).collect();
                 ui.set_queue(ModelRc::new(VecModel::from(items)));
@@ -2868,24 +3932,111 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     {
         let ui_weak = ui.as_weak();
         ui.on_play_autoplay_song(move |index| {
-            let song = playback.autoplay_get(index as usize);
-            if let Some(song) = song {
-                {
-                    let mut state = playback.state_lock();
-                    state.is_playing = true;
+            if let Some(song) = playback.play_autoplay_at_preserving_queues(index as usize) {
+                if crate::core::party::party_manager().snapshot().is_active {
+                    let track = now_playing_to_party_track(&song, "");
+                    crate::core::party::party_manager().send_action(
+                        crate::core::party::PartyAction::PlayTrackNow { track },
+                        false,
+                    );
                 }
-                playback.set_now_playing(&song.video_id, &song.title, &song.artist, song.duration_secs);
+                if let Some(ui) = ui_weak.upgrade() {
+                    refresh_native_shell_ui(&ui, playback);
+                    let items: Vec<SongItem> = playback.autoplay_queue().iter().map(make_song_item).collect();
+                    ui.set_autoplay_queue(ModelRc::new(VecModel::from(items)));
+                    now_playing_ui::notify_track_changed(
+                        ui.as_weak(),
+                        song.video_id.clone(),
+                        song.title.clone(),
+                        song.artist.clone(),
+                        song.duration_secs,
+                    );
+                }
+            }
+        });
+    }
+
+    // ── Shuffle queue ────────────────────────────────────────────────────────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_shuffle_queue(move || {
+            let playback = crate::core::bridge::playback_core();
+            if playback.shuffle_upcoming_user_queue() {
+                if crate::core::party::party_manager().snapshot().is_active {
+                    crate::core::party::party_manager().send_action(
+                        crate::core::party::PartyAction::ShuffleUpcoming,
+                        true,
+                    );
+                }
                 if let Some(ui) = ui_weak.upgrade() {
                     refresh_native_shell_ui(&ui, playback);
                 }
-                // Re-seed autoplay from the newly played song
-                playback.set_autoplay_seed(&song.video_id);
-                playback.clear_autoplay_queue();
-                let ui_w = ui_weak.clone();
-                let vid = song.video_id.clone();
-                std::thread::spawn(move || {
-                    fetch_autoplay_queue(ui_w, vid, false);
-                });
+            }
+        });
+    }
+
+    // ── Cycle repeat mode ────────────────────────────────────────────────────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_cycle_repeat(move || {
+            let playback = crate::core::bridge::playback_core();
+            let mode = playback.cycle_repeat_mode();
+            if crate::core::party::party_manager().snapshot().is_active {
+                crate::core::party::party_manager().send_action(
+                    crate::core::party::PartyAction::SetRepeatMode { mode: mode.as_str().to_string() },
+                    false,
+                );
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_repeat_mode(SharedString::from(mode.as_str()));
+            }
+        });
+    }
+
+    // ── Open Now Playing view ────────────────────────────────────────────────
+    {
+        let ui_weak = ui.as_weak();
+        let nav_history = nav_history.clone();
+        let nav_cursor = nav_cursor.clone();
+        ui.on_open_now_playing(move || {
+            let Some(ui) = ui_weak.upgrade() else { return; };
+            if ui.get_now_playing_video_id().as_str().is_empty() {
+                return;
+            }
+            if ui.get_current_view().as_str() == "NowPlaying" {
+                if ui.get_can_go_back() {
+                    ui.invoke_nav_back();
+                } else {
+                    ui.set_current_view(SharedString::from("Home"));
+                }
+            } else {
+                ui.set_is_loading(false);
+                ui.set_queue_pane_open(false);
+                context_ui::invalidate(&ui);
+                push_nav_entry(&nav_history, &nav_cursor, "NowPlaying".to_string(), String::new());
+                let hist = nav_history.lock().unwrap();
+                let cur = *nav_cursor.lock().unwrap();
+                update_nav_buttons(&ui, &hist, cur);
+                ui.set_current_view(SharedString::from("NowPlaying"));
+                let playback = crate::core::bridge::playback_core();
+                let np = playback.now_playing();
+                now_playing_ui::notify_track_changed(
+                    ui.as_weak(),
+                    np.video_id,
+                    np.title,
+                    np.artist,
+                    np.duration_secs,
+                );
+            }
+        });
+    }
+
+    // ── Refresh hero pick ────────────────────────────────────────────────────
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_refresh_hero_pick(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                maybe_seed_home_hero(&ui, true);
             }
         });
     }
@@ -3110,6 +4261,9 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 ui.set_artist_view_related(ModelRc::new(VecModel::from(Vec::<ArtistItem>::new())));
                 ui.set_artist_view_videos(ModelRc::new(VecModel::from(Vec::<SongItem>::new())));
                 ui.set_artist_view_has_latest(false);
+                ui.set_artist_row_sorting(false);
+                ui.set_artist_row_fallback(ModelRc::new(VecModel::from(Vec::<AlbumItem>::new())));
+                discography_ui::cancel_artist_row();
             }
 
             let cur_artist = cur_artist.clone();
@@ -3244,45 +4398,37 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                     });
                                 }
 
-                                // Convert albums
-                                let mut album_thumb_urls: Vec<(usize, String)> = vec![];
-                                let albums: Vec<AlbumItem> = artist.top_releases.albums.iter()
+                                // Convert releases (albums + singles in native order)
+                                let combined_releases: Vec<(String, (AlbumItem, Option<String>))> = artist.top_releases.albums.iter()
+                                    .chain(artist.top_releases.singles.iter())
                                     .flat_map(|section| section.results.iter())
-                                    .enumerate()
-                                    .map(|(i, a)| {
-                                        if let Some(t) = pick_thumb(&a.thumbnails) {
-                                            album_thumb_urls.push((i, t.url.clone()));
-                                        }
-                                        AlbumItem {
+                                    .map(|a| {
+                                        let browse_id = a.album_id.get_raw().to_string();
+                                        let thumb_url = pick_thumb(&a.thumbnails).map(|t| t.url.clone());
+                                        let item = AlbumItem {
                                             title: SharedString::from(a.title.as_str()),
-                                            browse_id: SharedString::from(a.album_id.get_raw()),
+                                            browse_id: SharedString::from(browse_id.as_str()),
                                             artist: SharedString::from(artist.name.as_str()),
                                             year: SharedString::from(a.year.as_str()),
                                             thumbnail: Default::default(),
                                             has_thumbnail: false,
+                                        };
+                                        (browse_id, (item, thumb_url))
+                                    })
+                                    .collect();
+                                let mut album_thumb_urls: Vec<(String, String)> = vec![];
+                                let albums: Vec<AlbumItem> = discography_ui::filter_preview_releases(combined_releases)
+                                    .into_iter()
+                                    .map(|(item, thumb_url)| {
+                                        if let Some(url) = thumb_url {
+                                            album_thumb_urls.push((item.browse_id.to_string(), url));
                                         }
-                                    }).collect();
+                                        item
+                                    })
+                                    .collect();
+                                ui.set_artist_row_sorting(false);
                                 ui.set_artist_view_albums(ModelRc::new(VecModel::from(albums)));
-
-                                // Convert singles
-                                let mut single_thumb_urls: Vec<(usize, String)> = vec![];
-                                let singles: Vec<AlbumItem> = artist.top_releases.singles.iter()
-                                    .flat_map(|section| section.results.iter())
-                                    .enumerate()
-                                    .map(|(i, a)| {
-                                        if let Some(t) = pick_thumb(&a.thumbnails) {
-                                            single_thumb_urls.push((i, t.url.clone()));
-                                        }
-                                        AlbumItem {
-                                            title: SharedString::from(a.title.as_str()),
-                                            browse_id: SharedString::from(a.album_id.get_raw()),
-                                            artist: SharedString::from(artist.name.as_str()),
-                                            year: SharedString::from(a.year.as_str()),
-                                            thumbnail: Default::default(),
-                                            has_thumbnail: false,
-                                        }
-                                    }).collect();
-                                ui.set_artist_view_singles(ModelRc::new(VecModel::from(singles)));
+                                ui.set_artist_view_singles(ModelRc::new(VecModel::from(Vec::<AlbumItem>::new())));
 
                                 // Convert videos
                                 let mut video_thumb_urls: Vec<(usize, String)> = vec![];
@@ -3372,7 +4518,6 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
 
                                 // Fetch artist thumbnail
                                 let ui_w_albums = ui_weak3.clone();
-                                let ui_w_singles = ui_weak3.clone();
                                 let ui_w_videos = ui_weak3.clone();
                                 let ui_w_related = ui_weak3.clone();
                                 let ui_w_latest = ui_weak3.clone();
@@ -3404,69 +4549,35 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                 // Fetch album thumbnails in artist view
                                 if !album_thumb_urls.is_empty() {
                                     let ui_w = ui_w_albums;
+                                    let thumb_path = |id: &str| {
+                                        let safe: String = id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
+                                        std::env::temp_dir().join(format!("ytm_artist_release_{safe}.jpg"))
+                                    };
                                     std::thread::spawn(move || {
                                         if let Ok(client) = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(5)).build() {
-                                            for (idx, url) in &album_thumb_urls {
-                                                let path = std::env::temp_dir().join(format!("ytm_artist_album_{}.jpg", idx));
-                                                if let Ok(resp) = client.get(url).send() {
-                                                    if resp.status().is_success() {
-                                                        if let Ok(bytes) = resp.bytes() {
-                                                            let _ = std::fs::write(&path, &bytes);
-                                                        }
-                                                    }
+                                            let mut loaded: Vec<String> = Vec::new();
+                                            for (id, url) in &album_thumb_urls {
+                                                let path = thumb_path(id);
+                                                if !path.exists() {
+                                                    let Ok(resp) = client.get(url).send() else { continue };
+                                                    if !resp.status().is_success() { continue; }
+                                                    let Ok(bytes) = resp.bytes() else { continue };
+                                                    if std::fs::write(&path, &bytes).is_err() { continue; }
                                                 }
+                                                loaded.push(id.clone());
                                             }
-                                            let indices: Vec<usize> = album_thumb_urls.iter().map(|(i, _)| *i).collect();
                                             slint::invoke_from_event_loop(move || {
                                                 if let Some(ui) = ui_w.upgrade() {
                                                     let model = ui.get_artist_view_albums();
-                                                    let mut items: Vec<AlbumItem> = (0..model.row_count()).map(|i| model.row_data(i).unwrap()).collect();
-                                                    for idx in indices {
-                                                        let path = std::env::temp_dir().join(format!("ytm_artist_album_{}.jpg", idx));
-                                                        if path.exists() {
-                                                            if let Ok(img) = slint::Image::load_from_path(&path) {
-                                                                items[idx].thumbnail = img;
-                                                                items[idx].has_thumbnail = true;
-                                                            }
+                                                    for row in 0..model.row_count() {
+                                                        let Some(mut item) = model.row_data(row) else { continue };
+                                                        if item.has_thumbnail || !loaded.iter().any(|id| id.as_str() == item.browse_id.as_str()) { continue; }
+                                                        if let Ok(img) = slint::Image::load_from_path(&thumb_path(item.browse_id.as_str())) {
+                                                            item.thumbnail = img;
+                                                            item.has_thumbnail = true;
+                                                            model.set_row_data(row, item);
                                                         }
                                                     }
-                                                    ui.set_artist_view_albums(ModelRc::new(VecModel::from(items)));
-                                                }
-                                            }).ok();
-                                        }
-                                    });
-                                }
-
-                                // Fetch single thumbnails
-                                if !single_thumb_urls.is_empty() {
-                                    let ui_w = ui_w_singles;
-                                    std::thread::spawn(move || {
-                                        if let Ok(client) = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(5)).build() {
-                                            for (idx, url) in &single_thumb_urls {
-                                                let path = std::env::temp_dir().join(format!("ytm_artist_single_{}.jpg", idx));
-                                                if let Ok(resp) = client.get(url).send() {
-                                                    if resp.status().is_success() {
-                                                        if let Ok(bytes) = resp.bytes() {
-                                                            let _ = std::fs::write(&path, &bytes);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            let indices: Vec<usize> = single_thumb_urls.iter().map(|(i, _)| *i).collect();
-                                            slint::invoke_from_event_loop(move || {
-                                                if let Some(ui) = ui_w.upgrade() {
-                                                    let model = ui.get_artist_view_singles();
-                                                    let mut items: Vec<AlbumItem> = (0..model.row_count()).map(|i| model.row_data(i).unwrap()).collect();
-                                                    for idx in indices {
-                                                        let path = std::env::temp_dir().join(format!("ytm_artist_single_{}.jpg", idx));
-                                                        if path.exists() {
-                                                            if let Ok(img) = slint::Image::load_from_path(&path) {
-                                                                items[idx].thumbnail = img;
-                                                                items[idx].has_thumbnail = true;
-                                                            }
-                                                        }
-                                                    }
-                                                    ui.set_artist_view_singles(ModelRc::new(VecModel::from(items)));
                                                 }
                                             }).ok();
                                         }
@@ -3714,13 +4825,20 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     .collect();
                 if !songs.is_empty() {
                     let playback = crate::core::bridge::playback_core();
-                    playback.set_queue(songs);
+                    playback.set_queue(songs.clone());
                     {
                         let mut state = playback.state_lock();
                         state.is_playing = true;
                     }
                     let first = playback.now_playing();
                     playback.set_now_playing(&first.video_id, &first.title, &first.artist, first.duration_secs);
+                    if crate::core::party::party_manager().snapshot().is_active {
+                        let tracks: Vec<crate::core::party::PartyTrack> = songs.iter().map(|s| now_playing_to_party_track(s, "")).collect();
+                        crate::core::party::party_manager().send_action(
+                            crate::core::party::PartyAction::ReplaceQueue { tracks, start_index: 0, is_playing: true },
+                            false,
+                        );
+                    }
                     refresh_native_shell_ui(&ui, playback);
                 }
             }
@@ -3745,13 +4863,20 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 if !songs.is_empty() {
                     shuffle_vec(&mut songs);
                     let playback = crate::core::bridge::playback_core();
-                    playback.set_queue(songs);
+                    playback.set_queue(songs.clone());
                     {
                         let mut state = playback.state_lock();
                         state.is_playing = true;
                     }
                     let first = playback.now_playing();
                     playback.set_now_playing(&first.video_id, &first.title, &first.artist, first.duration_secs);
+                    if crate::core::party::party_manager().snapshot().is_active {
+                        let tracks: Vec<crate::core::party::PartyTrack> = songs.iter().map(|s| now_playing_to_party_track(s, "")).collect();
+                        crate::core::party::party_manager().send_action(
+                            crate::core::party::PartyAction::ReplaceQueue { tracks, start_index: 0, is_playing: true },
+                            false,
+                        );
+                    }
                     refresh_native_shell_ui(&ui, playback);
                 }
             }
@@ -3984,6 +5109,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
         let ui_weak = ui.as_weak();
         ui.on_move_queue_song_next(move |idx| {
             playback.move_queue_song_next(idx.max(0) as usize);
+            if crate::core::party::party_manager().snapshot().is_active {
+                crate::core::party::party_manager().send_action(
+                    crate::core::party::PartyAction::MoveQueueNext { upcoming_index: idx.max(0) as usize },
+                    false,
+                );
+            }
             if let Some(ui) = ui_weak.upgrade() {
                 let items: Vec<SongItem> = playback.queue_upcoming().iter().map(make_song_item).collect();
                 ui.set_queue(ModelRc::new(VecModel::from(items)));
@@ -4050,13 +5181,20 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     .collect();
                 if !songs.is_empty() {
                     let playback = crate::core::bridge::playback_core();
-                    playback.set_queue(songs);
+                    playback.set_queue(songs.clone());
                     {
                         let mut state = playback.state_lock();
                         state.is_playing = true;
                     }
                     let first = playback.now_playing();
                     playback.set_now_playing(&first.video_id, &first.title, &first.artist, first.duration_secs);
+                    if crate::core::party::party_manager().snapshot().is_active {
+                        let tracks: Vec<crate::core::party::PartyTrack> = songs.iter().map(|s| now_playing_to_party_track(s, "")).collect();
+                        crate::core::party::party_manager().send_action(
+                            crate::core::party::PartyAction::ReplaceQueue { tracks, start_index: 0, is_playing: true },
+                            false,
+                        );
+                    }
                     refresh_native_shell_ui(&ui, playback);
                 }
             }
@@ -4433,6 +5571,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
             let mut last_sidebar_album_sig = String::new(); // dedupes the sidebar album rebuild
             let mut thumb_refresh_counter: u32 = 0;
             let mut thumb_fetch_done: Option<std::sync::mpsc::Receiver<()>> = None;
+            let mut last_autoplay_refill: Option<std::time::Instant> = None;
+            let mut last_notified_np_id = String::new();
+            let mut party_poll_counter: u32 = 0;
+            let mut last_party_drift_seek = std::time::Instant::now();
+            #[cfg(target_os = "windows")]
+            let mut smtc_attached = false;
 
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(500));
@@ -4474,6 +5618,80 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                         }
                     }
 
+                    if !smtc_attached && hwnd_val != 0 {
+                        smtc_attached = true;
+                        let ui_w_smtc = ui_weak.clone();
+                        slint::invoke_from_event_loop(move || {
+                            let ui_w_act = ui_w_smtc.clone();
+                            crate::core::media_controls::attach(hwnd_val, move |action| {
+                                let ui_w = ui_w_act.clone();
+                                slint::invoke_from_event_loop(move || {
+                                    let Some(ui) = ui_w.upgrade() else { return; };
+                                    let playback = crate::core::bridge::playback_core();
+                                    match action {
+                                        crate::core::media_controls::MediaAction::PlayPause => {
+                                            ui.invoke_toggle_play_pause();
+                                        }
+                                        crate::core::media_controls::MediaAction::Play => {
+                                            if !playback.is_playing() {
+                                                ui.invoke_toggle_play_pause();
+                                            }
+                                        }
+                                        crate::core::media_controls::MediaAction::Pause => {
+                                            if playback.is_playing() {
+                                                ui.invoke_toggle_play_pause();
+                                            }
+                                        }
+                                        crate::core::media_controls::MediaAction::Next => {
+                                            ui.invoke_next_track();
+                                        }
+                                        crate::core::media_controls::MediaAction::Previous => {
+                                            ui.invoke_prev_track();
+                                        }
+                                        crate::core::media_controls::MediaAction::SeekTo(secs) => {
+                                            let dur = playback.track_duration_secs() as f64;
+                                            if dur > 0.0 {
+                                                let fraction = (secs / dur).clamp(0.0, 1.0) as f32;
+                                                ui.invoke_seek(fraction);
+                                            } else {
+                                                playback.seek_to_secs(secs);
+                                            }
+                                        }
+                                        crate::core::media_controls::MediaAction::SeekBy(delta_secs) => {
+                                            let target = (playback.elapsed_secs() + delta_secs).max(0.0);
+                                            let dur = playback.track_duration_secs() as f64;
+                                            if dur > 0.0 {
+                                                let fraction = (target / dur).clamp(0.0, 1.0) as f32;
+                                                ui.invoke_seek(fraction);
+                                            } else {
+                                                playback.seek_to_secs(target);
+                                            }
+                                        }
+                                    }
+                                    let np = playback.now_playing();
+                                    let album = if !np.album.is_empty() {
+                                        np.album
+                                    } else {
+                                        crate::core::playback::get_song_meta(&np.video_id)
+                                            .map(|m| m.album)
+                                            .unwrap_or_default()
+                                    };
+                                    crate::core::media_controls::update(
+                                        crate::core::media_controls::MediaSnapshot {
+                                            video_id: np.video_id,
+                                            title: np.title,
+                                            artist: np.artist,
+                                            album,
+                                            duration_secs: playback.track_duration_secs(),
+                                            elapsed_secs: playback.elapsed_secs(),
+                                            is_playing: playback.is_playing(),
+                                        },
+                                    );
+                                }).ok();
+                            });
+                        }).ok();
+                    }
+
                     let settings = core::persistence::load_settings();
                     if settings.minimize_to_tray && hwnd_val != 0 {
                         let hwnd = HWND(hwnd_val as *mut _);
@@ -4485,69 +5703,141 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     }
                 }
 
-                // Auto-advance when track ends
-                if playback.take_advance_pending() {
-                    playback.next_track();
-                    let ui_w = ui_weak.clone();
-                    slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = ui_w.upgrade() {
-                            refresh_native_shell_ui(&ui, playback);
-                        }
-                    }).ok();
-                }
+                let party_snap = crate::core::party::party_manager().snapshot();
 
-                // Autoplay: play next from autoplay queue when user queue runs out
-                if playback.take_autoplay_needed() {
-                    if autoplay_enabled.load(std::sync::atomic::Ordering::Relaxed) {
-                        let next_song = playback.pop_autoplay();
-                        if let Some(song) = next_song {
-                            {
-                                let mut state = playback.state_lock();
-                                state.is_playing = true;
+                // Auto-advance when track ends
+                if party_snap.is_active && !party_snap.is_host {
+                    // Guest pauses at track end and waits for Host's state broadcast
+                    playback.take_advance_pending();
+                    playback.take_autoplay_needed();
+                } else {
+                    if playback.take_advance_pending() {
+                        playback.advance_after_track_end();
+                        if party_snap.is_active && party_snap.is_host {
+                            let full = playback.full_queue();
+                            let tracks: Vec<crate::core::party::PartyTrack> = full.iter().map(|s| now_playing_to_party_track(s, "")).collect();
+                            crate::core::party::party_manager().send_action(
+                                crate::core::party::PartyAction::ReplaceQueue {
+                                    tracks,
+                                    start_index: playback.queue_index(),
+                                    is_playing: playback.is_playing(),
+                                },
+                                false,
+                            );
+                        }
+                        let ui_w = ui_weak.clone();
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui_w.upgrade() {
+                                refresh_native_shell_ui(&ui, playback);
                             }
-                            playback.set_now_playing(&song.video_id, &song.title, &song.artist, song.duration_secs);
+                        }).ok();
+                    }
+
+                    // Autoplay: play next from autoplay queue when user queue runs out
+                    if playback.take_autoplay_needed() {
+                        if autoplay_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                            let next_song = playback.pop_autoplay();
+                            if let Some(song) = next_song {
+                                {
+                                    let mut state = playback.state_lock();
+                                    state.is_playing = true;
+                                }
+                                playback.set_now_playing(&song.video_id, &song.title, &song.artist, song.duration_secs);
+                                if party_snap.is_active && party_snap.is_host {
+                                    let full = playback.full_queue();
+                                    let tracks: Vec<crate::core::party::PartyTrack> = full.iter().map(|s| now_playing_to_party_track(s, "")).collect();
+                                    crate::core::party::party_manager().send_action(
+                                        crate::core::party::PartyAction::ReplaceQueue {
+                                            tracks,
+                                            start_index: playback.queue_index(),
+                                            is_playing: true,
+                                        },
+                                        false,
+                                    );
+                                }
+                                let ui_w = ui_weak.clone();
+                                slint::invoke_from_event_loop(move || {
+                                    if let Some(ui) = ui_w.upgrade() {
+                                        refresh_native_shell_ui(&ui, playback);
+                                        // Update autoplay queue model
+                                        let items: Vec<SongItem> = playback.autoplay_queue().iter().map(make_song_item).collect();
+                                        ui.set_autoplay_queue(ModelRc::new(VecModel::from(items)));
+                                    }
+                                }).ok();
+                            } else {
+                                // Autoplay queue exhausted — continue radio from the most
+                                // recently played track so we get a fresh continuation
+                                // instead of replaying the original seed's batch.
+                                let seed = {
+                                    let np = playback.now_playing().video_id;
+                                    if !np.is_empty() && np != "native-prototype" {
+                                        np
+                                    } else {
+                                        playback.autoplay_seed()
+                                    }
+                                };
+                                if !seed.is_empty() {
+                                    // Keep the seed fresh for the next exhaustion cycle.
+                                    playback.set_autoplay_seed(&seed);
+                                    let ui_w = ui_weak.clone();
+                                    std::thread::spawn(move || {
+                                        fetch_autoplay_queue(ui_w, seed, true);
+                                    });
+                                } else {
+                                    eprintln!("[autoplay] queue exhausted but no seed available — stopping");
+                                    if playback.is_awaiting_autoplay_after_end() {
+                                        playback.stop_at_queue_end();
+                                        let ui_w = ui_weak.clone();
+                                        slint::invoke_from_event_loop(move || {
+                                            if let Some(ui) = ui_w.upgrade() {
+                                                refresh_native_shell_ui(&ui, playback);
+                                            }
+                                        }).ok();
+                                    }
+                                }
+                            }
+                        } else if playback.is_awaiting_autoplay_after_end() {
+                            playback.stop_at_queue_end();
                             let ui_w = ui_weak.clone();
                             slint::invoke_from_event_loop(move || {
                                 if let Some(ui) = ui_w.upgrade() {
                                     refresh_native_shell_ui(&ui, playback);
-                                    // Update autoplay queue model
-                                    let items: Vec<SongItem> = playback.autoplay_queue().iter().map(make_song_item).collect();
-                                    ui.set_autoplay_queue(ModelRc::new(VecModel::from(items)));
                                 }
                             }).ok();
-                        } else {
-                            // Autoplay queue exhausted — continue radio from the most
-                            // recently played track so we get a fresh continuation
-                            // instead of replaying the original seed's batch.
-                            let seed = {
-                                let np = playback.now_playing().video_id;
-                                if !np.is_empty() && np != "native-prototype" {
-                                    np
-                                } else {
-                                    playback.autoplay_seed()
-                                }
-                            };
-                            if !seed.is_empty() {
-                                // Keep the seed fresh for the next exhaustion cycle.
-                                playback.set_autoplay_seed(&seed);
-                                let ui_w = ui_weak.clone();
-                                std::thread::spawn(move || {
-                                    fetch_autoplay_queue(ui_w, seed, true);
-                                });
-                            } else {
-                                eprintln!("[autoplay] queue exhausted but no seed available — stopping");
-                            }
                         }
                     }
-                    // If autoplay disabled, do nothing — playback stops
+                }
+
+                if autoplay_enabled.load(std::sync::atomic::Ordering::Relaxed)
+                    && playback.is_playing()
+                {
+                    let np_id = playback.now_playing().video_id;
+                    let cooldown = if playback.last_autoplay_refill_empty() {
+                        std::time::Duration::from_secs(60)
+                    } else {
+                        std::time::Duration::from_secs(10)
+                    };
+                    if !np_id.is_empty()
+                        && np_id != "native-prototype"
+                        && playback.autoplay_queue().len() < core::playback::AUTOPLAY_TARGET
+                        && last_autoplay_refill.map_or(true, |t| t.elapsed() >= cooldown)
+                    {
+                        last_autoplay_refill = Some(std::time::Instant::now());
+                        refill_autoplay_queue(ui_weak.clone());
+                    }
                 }
 
                 // Start the playback timer the moment audio actually begins playing.
                 if playback.take_audio_just_started() {
                     playback.on_audio_started();
+                    let np = playback.now_playing();
+                    if let Some(target_ms) = crate::core::party::party_manager().target_position_ms(&np.video_id) {
+                        if target_ms > 800 {
+                            playback.seek_to_secs(target_ms as f64 / 1000.0);
+                        }
+                    }
                     // NOW kick off the cache download — after stream URL is resolved
                     // so yt-dlp cookie DB isn't locked by a competing process.
-                    let np = playback.now_playing();
                     if !np.video_id.is_empty() && np.video_id != "native-prototype" {
                         crate::core::cache::spawn_cache_download(np.video_id.clone(), np.title.clone(), np.artist.clone());
                         // Persist as last played
@@ -4619,12 +5909,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                         std::thread::spawn(move || {
                             let url = format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", vid);
                             let tmp = std::env::temp_dir().join(format!("ytm_thumb_{}.jpg", vid));
-                            let ok = client.get(&url).send().ok()
+                            let bytes = client.get(&url).send().ok()
                                 .filter(|r| r.status().is_success())
-                                .and_then(|r| r.bytes().ok())
-                                .map(|b| std::fs::write(&tmp, &b).is_ok())
-                                .unwrap_or(false);
-                            if ok {
+                                .and_then(|r| r.bytes().ok());
+                            if let Some(b) = bytes {
+                                let _ = std::fs::write(&tmp, &b);
+                                let art_color = extract_vibrant_accent_from_bytes(&b);
                                 slint::invoke_from_event_loop(move || {
                                     if let Some(ui) = ui_weak_art.upgrade() {
                                         // Only apply if this is still the current track.
@@ -4632,6 +5922,9 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                                             if let Ok(img) = slint::Image::load_from_path(&tmp) {
                                                 ui.set_album_art(img);
                                                 ui.set_has_album_art(true);
+                                                if art_color.is_some() {
+                                                    apply_art_accent(&ui, art_color);
+                                                }
                                             }
                                         }
                                     }
@@ -4786,31 +6079,133 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                     }
                 }
 
+                let thumb_art_color = thumb_path.as_deref().and_then(extract_vibrant_accent_from_path);
+
+                #[cfg(target_os = "windows")]
+                let media_snap = {
+                    let album = if !track.album.is_empty() {
+                        track.album.clone()
+                    } else {
+                        crate::core::playback::get_song_meta(&track.video_id)
+                            .map(|m| m.album)
+                            .unwrap_or_default()
+                    };
+                    crate::core::media_controls::MediaSnapshot {
+                        video_id: track.video_id.clone(),
+                        title: track.title.clone(),
+                        artist: track.artist.clone(),
+                        album,
+                        duration_secs: dur,
+                        elapsed_secs: elapsed,
+                        is_playing,
+                    }
+                };
+
+                if track.video_id != last_notified_np_id {
+                    last_notified_np_id = track.video_id.clone();
+                    if !track.video_id.is_empty() {
+                        now_playing_ui::notify_track_changed(
+                            ui_weak.clone(),
+                            track.video_id.clone(),
+                            track.title.clone(),
+                            track.artist.clone(),
+                            dur,
+                        );
+                    }
+                }
+
+                let can_shuffle = playback.has_upcoming_user_queue();
+                let repeat_str = playback.repeat_mode().as_str();
+
                 let ui_w = ui_weak.clone();
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_w.upgrade() {
-                        ui.set_track_title(SharedString::from(track.title.as_str()));
-                        ui.set_track_artist(SharedString::from(track.artist.as_str()));
-                        ui.set_is_playing(is_playing);
-                        ui.set_now_playing_video_id(SharedString::from(track.video_id.as_str()));
-                        ui.set_progress(progress);
-                        ui.set_current_time(SharedString::from(current_time.as_str()));
-                        ui.set_total_time(SharedString::from(total_time.as_str()));
-                        ui.set_track_initial(SharedString::from(initial.as_str()));
-                        ui.set_is_liked(liked);
-                        ui.set_cache_used_mb(cache_used_mb);
-                        ui.set_cache_song_count(cache_song_count);
-                        ui.set_cache_limit_mb(cache_limit_mb);
+                        if ui.get_track_title().as_str() != track.title.as_str() {
+                            ui.set_track_title(SharedString::from(track.title.as_str()));
+                        }
+                        if ui.get_track_artist().as_str() != track.artist.as_str() {
+                            ui.set_track_artist(SharedString::from(track.artist.as_str()));
+                        }
+                        if ui.get_is_playing() != is_playing {
+                            ui.set_is_playing(is_playing);
+                        }
+                        if ui.get_can_shuffle_queue() != can_shuffle {
+                            ui.set_can_shuffle_queue(can_shuffle);
+                        }
+                        if ui.get_repeat_mode().as_str() != repeat_str {
+                            ui.set_repeat_mode(SharedString::from(repeat_str));
+                        }
+                        if ui.get_now_playing_video_id().as_str() != track.video_id.as_str() {
+                            ui.set_now_playing_video_id(SharedString::from(track.video_id.as_str()));
+                        }
+                        if (ui.get_progress() - progress).abs() >= 0.0005 {
+                            ui.set_progress(progress);
+                        }
+                        if ui.get_current_time().as_str() != current_time.as_str() {
+                            ui.set_current_time(SharedString::from(current_time.as_str()));
+                        }
+                        if ui.get_total_time().as_str() != total_time.as_str() {
+                            ui.set_total_time(SharedString::from(total_time.as_str()));
+                        }
+                        if ui.get_track_initial().as_str() != initial.as_str() {
+                            ui.set_track_initial(SharedString::from(initial.as_str()));
+                        }
+                        if ui.get_is_liked() != liked {
+                            ui.set_is_liked(liked);
+                        }
+                        if ui.get_cache_used_mb() != cache_used_mb {
+                            ui.set_cache_used_mb(cache_used_mb);
+                        }
+                        if ui.get_cache_song_count() != cache_song_count {
+                            ui.set_cache_song_count(cache_song_count);
+                        }
+                        if ui.get_cache_limit_mb() != cache_limit_mb {
+                            ui.set_cache_limit_mb(cache_limit_mb);
+                        }
                         if let Some(path) = thumb_path {
                             if let Ok(img) = slint::Image::load_from_path(&path) {
                                 ui.set_album_art(img);
                                 ui.set_has_album_art(true);
+                                if thumb_art_color.is_some() {
+                                    apply_art_accent(&ui, thumb_art_color);
+                                }
                             }
                         } else if thumbnail_changed {
                             ui.set_has_album_art(false);
+                            apply_art_accent(&ui, None);
                         }
                     }
+                    #[cfg(target_os = "windows")]
+                    crate::core::media_controls::update(media_snap);
                 }).ok();
+
+                // ── Auricle Party periodic polling & drift correction ─────────
+                party_poll_counter += 1;
+                if party_poll_counter >= 2 {
+                    party_poll_counter = 0;
+                    let psnap = crate::core::party::party_manager().snapshot();
+                    if psnap.is_active || psnap.status != "off" {
+                        let ui_w_party = ui_weak.clone();
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui_w_party.upgrade() {
+                                apply_pending_party_updates(&ui, playback);
+                                refresh_party_ui(&ui);
+                            }
+                        }).ok();
+
+                        if is_playing && !playback.is_audio_loading() {
+                            let cur_vid = playback.now_playing().video_id;
+                            if let Some(target_ms) = crate::core::party::party_manager().target_position_ms(&cur_vid) {
+                                let current_ms = playback.elapsed_secs() * 1000.0;
+                                let delta = (current_ms - target_ms as f64).abs();
+                                if delta > 750.0 && last_party_drift_seek.elapsed() >= Duration::from_secs(4) {
+                                    last_party_drift_seek = Instant::now();
+                                    playback.seek_to_secs(target_ms as f64 / 1000.0);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         });
     }
@@ -4929,6 +6324,10 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
                 if let Ok(img) = slint::Image::load_from_path(&thumb_path) {
                     ui.set_album_art(img);
                     ui.set_has_album_art(true);
+                    let art_color = extract_vibrant_accent_from_path(&thumb_path);
+                    if art_color.is_some() {
+                        apply_art_accent(&ui, art_color);
+                    }
                 }
             }
             // Fetch autoplay queue for last played song
@@ -5495,6 +6894,12 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     // Populate the sidebar shortcuts (your artists + your playlists).
     refresh_sidebar(&ui);
 
+    // End the event loop explicitly on close; otherwise the process could outlive its window.
+    ui.window().on_close_requested(|| {
+        let _ = slint::quit_event_loop();
+        slint::CloseRequestResponse::HideWindow
+    });
+
     // Confirm the window actually appeared; only warn if it never does, so later
     // hiding to the tray is not mistaken for a startup failure.
     let startup_check = slint::Timer::default();
@@ -5520,6 +6925,11 @@ pub fn run_native_shell() -> Result<(), slint::PlatformError> {
     log::info!("[startup] entering event loop");
     let result = ui.run();
     log::info!("[startup] event loop ended: {result:?}");
+    // Remove the tray icon, then exit without waiting on background work or destructors.
+    drop(_tray_icon);
+    if result.is_ok() {
+        std::process::exit(0);
+    }
     result
 }
 
@@ -5533,5 +6943,117 @@ pub fn launch() {
         log::error!("[startup] UI failed: {err}");
         core::diagnostics::show_error_dialog(&format!("Auricle couldn't open its window: {err}"));
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_theme_name() {
+        assert_eq!(normalize_theme_name("Dynamic"), "Dynamic");
+        assert_eq!(normalize_theme_name("Default Blue"), "Default Blue");
+        assert_eq!(normalize_theme_name("Solar Red"), "Solar Red");
+        assert_eq!(normalize_theme_name("Ember"), "Ember");
+        assert_eq!(normalize_theme_name("Earth"), "Earth");
+        assert_eq!(normalize_theme_name("Forest"), "Forest");
+        assert_eq!(normalize_theme_name("Ocean"), "Ocean");
+        assert_eq!(normalize_theme_name("Sky"), "Sky");
+        assert_eq!(normalize_theme_name("Twilight"), "Twilight");
+        assert_eq!(normalize_theme_name("Rose"), "Rose");
+        assert_eq!(normalize_theme_name("Mono"), "Mono");
+
+        // Backwards compatibility for unknown / legacy theme names
+        assert_eq!(normalize_theme_name("Legacy Theme"), "Default Blue");
+        assert_eq!(normalize_theme_name(""), "Default Blue");
+    }
+
+    #[test]
+    fn test_theme_accent_values() {
+        assert_eq!(theme_accent("Dynamic"), slint::Color::from_rgb_u8(0x7c, 0x8c, 0xf8));
+        assert_eq!(theme_accent("Default Blue"), slint::Color::from_rgb_u8(0x5b, 0x8d, 0xef));
+        assert_eq!(theme_accent("Solar Red"), slint::Color::from_rgb_u8(0xfa, 0x2d, 0x48));
+        assert_eq!(theme_accent("Ember"), slint::Color::from_rgb_u8(0xf9, 0x73, 0x16));
+        assert_eq!(theme_accent("Earth"), slint::Color::from_rgb_u8(0xc2, 0x78, 0x49));
+        assert_eq!(theme_accent("Forest"), slint::Color::from_rgb_u8(0x24, 0xc4, 0x66));
+        assert_eq!(theme_accent("Ocean"), slint::Color::from_rgb_u8(0x14, 0xb8, 0xc4));
+        assert_eq!(theme_accent("Sky"), slint::Color::from_rgb_u8(0x38, 0xbd, 0xf8));
+        assert_eq!(theme_accent("Twilight"), slint::Color::from_rgb_u8(0x9b, 0x6d, 0xff));
+        assert_eq!(theme_accent("Rose"), slint::Color::from_rgb_u8(0xec, 0x48, 0x99));
+        assert_eq!(theme_accent("Mono"), slint::Color::from_rgb_u8(0x8b, 0x95, 0xa5));
+        assert_eq!(theme_accent("Invalid"), slint::Color::from_rgb_u8(0x5b, 0x8d, 0xef));
+    }
+
+    #[test]
+    fn test_extract_vibrant_accent_grayscale_fallback() {
+        let img = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            64,
+            64,
+            image::Rgba([128, 128, 128, 255]),
+        ));
+        let accent = extract_vibrant_accent_from_image(&img);
+        assert_eq!(accent, slint::Color::from_rgb_u8(0x8b, 0x95, 0xa5));
+    }
+
+    #[test]
+    fn test_extract_vibrant_accent_letterbox_rejection() {
+        let mut raw = image::RgbaImage::new(100, 100);
+        for y in 0..100 {
+            for x in 0..100 {
+                if y < 12 || y >= 88 {
+                    // Top and bottom 12% letterbox bars: neon red
+                    raw.put_pixel(x, y, image::Rgba([255, 0, 0, 255]));
+                } else {
+                    // Content area: pure vibrant cyan
+                    raw.put_pixel(x, y, image::Rgba([0, 220, 220, 255]));
+                }
+            }
+        }
+        let img = image::DynamicImage::ImageRgba8(raw);
+        let accent = extract_vibrant_accent_from_image(&img);
+        // Letterbox red was ignored, cyan content won
+        assert!(accent.blue() > 150);
+        assert!(accent.green() > 150);
+        assert!(accent.red() < 100);
+    }
+
+    #[test]
+    fn test_extract_vibrant_accent_complementary_hue_non_muddying() {
+        let mut raw = image::RgbaImage::new(100, 100);
+        for y in 0..100 {
+            for x in 0..100 {
+                if y < 60 {
+                    // 60% orange
+                    raw.put_pixel(x, y, image::Rgba([255, 120, 20, 255]));
+                } else {
+                    // 40% blue
+                    raw.put_pixel(x, y, image::Rgba([20, 120, 255, 255]));
+                }
+            }
+        }
+        let img = image::DynamicImage::ImageRgba8(raw);
+        let accent = extract_vibrant_accent_from_image(&img);
+        // The winning hue bin is orange; hue binning prevents muddy brown averaging
+        assert!(accent.red() > accent.blue() + 50);
+        assert!(accent.red() > 180);
+    }
+
+    #[test]
+    fn test_oklab_lerp_endpoints_and_chroma() {
+        let solar_red = slint::Color::from_rgb_u8(0xfa, 0x2d, 0x48); // #fa2d48
+        let ocean_teal = slint::Color::from_rgb_u8(0x14, 0xb8, 0xc4); // #14b8c4
+
+        // Test t = 0.0 and t = 1.0 round-trip within <= 1 channel unit
+        let at_0 = oklab_lerp_color(solar_red, ocean_teal, 0.0);
+        let at_1 = oklab_lerp_color(solar_red, ocean_teal, 1.0);
+        assert!(colors_close(at_0, solar_red));
+        assert!(colors_close(at_1, ocean_teal));
+
+        // Test midpoint (t = 0.5) preserves perceptual chroma/saturation rather than collapsing to muddy mid-gray
+        let mid = oklab_lerp_color(solar_red, ocean_teal, 0.5);
+        let max_c = mid.red().max(mid.green()).max(mid.blue());
+        let min_c = mid.red().min(mid.green()).min(mid.blue());
+        assert!(max_c - min_c > 30, "Midpoint must preserve chroma/saturation (spread: {}), not collapse to gray", max_c - min_c);
     }
 }

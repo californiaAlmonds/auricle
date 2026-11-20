@@ -1,8 +1,10 @@
+pub mod party;
 pub mod playback;
 pub mod stream_player;
 pub mod audio_priority;
 pub mod net;
 pub mod search;
+pub mod search_history;
 pub mod bridge;
 pub mod cache;
 pub mod persistence;
@@ -10,4 +12,7 @@ pub mod library;
 pub mod addons;
 pub mod updater;
 pub mod menu_metadata;
+pub mod release_rank;
+#[cfg(target_os = "windows")]
+pub mod media_controls;
 pub mod diagnostics;

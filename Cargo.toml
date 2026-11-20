@@ -1,12 +1,12 @@
 [package]
 name = "auricle"
-version = "0.1.7"
+version = "0.3.0"
 description = "Auricle — a native music player desktop shell built with Rust and Slint"
 authors = ["you"]
 license = "GPL-3.0-only"
 repository = "https://github.com/californiaAlmonds/auricle"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.91"
 default-run = "auricle"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -18,11 +18,15 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 slint-build = "1.8.0"
 
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [dependencies]
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 ytmapi-rs = { version = "0.3.1", features = ["reqwest"] }
+strsim = "0.11"
 tokio = "1.52.1"
 once_cell = "1"
 reqwest = { version = "0.13.2", features = ["json", "multipart", "rustls", "form", "blocking"] }
@@ -30,10 +34,13 @@ slint = "1.8.0"
 rodio = { version = "0.20.1", features = ["symphonia-all"] }
 symphonia = { version = "0.5.5", features = ["aac", "mp3", "isomp4", "opt-simd"] }
 tray-icon = "0.19"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 zip = "2.2"
 self_update = { version = "0.42", default-features = false, features = ["rustls", "archive-zip", "compression-zip-deflate"], optional = true }
 wait-timeout = "0.2"
+iroh = "1.5"
+base64 = "0.22"
+flate2 = "1.0"
 
 [features]
 # `self-update` is on by default for the portable build. Installer/Store builds
@@ -44,3 +51,4 @@ self-update = ["dep:self_update"]
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Registry", "Win32_System_Threading", "Win32_System_Console", "Win32_UI_Shell"] }
+souvlaki = { version = "0.8", default-features = false }

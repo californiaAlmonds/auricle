@@ -308,6 +308,37 @@ impl TeeWriter {
 // requests without causing CDN connection failures during the initial probe.
 // ---------------------------------------------------------------------------
 
+/// Generation-scoped tracker that flips `is_clean_eof()` true only when the
+/// currently-active HTTP stream reader has delivered all `content_len` bytes.
+/// Prevents a stale pre-seek reader thread from falsely flagging clean EOF on a
+/// newly-seeked reader generation.
+pub struct StreamEofTracker {
+    active_gen: std::sync::atomic::AtomicU64,
+    completed_gen: std::sync::atomic::AtomicU64,
+}
+
+impl StreamEofTracker {
+    fn new() -> Self {
+        Self {
+            active_gen: std::sync::atomic::AtomicU64::new(1),
+            completed_gen: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    fn advance_generation(&self) -> u64 {
+        self.active_gen.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    fn mark_completed(&self, reader_gen: u64) {
+        self.completed_gen.fetch_max(reader_gen, Ordering::Release);
+    }
+
+    pub fn is_clean_eof(&self) -> bool {
+        let active = self.active_gen.load(Ordering::Acquire);
+        active > 0 && self.completed_gen.load(Ordering::Acquire) == active
+    }
+}
+
 struct BufferedHttpStream {
     client: Client,
     url: String,
@@ -319,6 +350,7 @@ struct BufferedHttpStream {
     finished: bool,
     /// False during probe (set by `from_url` after `probe_and_build` returns).
     probe_complete: std::sync::Arc<AtomicBool>,
+    eof_tracker: std::sync::Arc<StreamEofTracker>,
 }
 
 impl BufferedHttpStream {
@@ -326,8 +358,25 @@ impl BufferedHttpStream {
     /// initial HTTP status synchronously) plus the client + URL used to
     /// reconnect on premature EOF and to re-fetch after a seek. `tee`, when set,
     /// write-through-caches the streamed bytes (initial byte-0 reader only).
-    fn new(client: Client, url: String, initial: reqwest::blocking::Response, content_len: Option<u64>, probe_complete: std::sync::Arc<AtomicBool>, tee: Option<TeeWriter>) -> Self {
-        let rx = Self::spawn_reader(client.clone(), url.clone(), 0, content_len, Some(initial), tee);
+    fn new(
+        client: Client,
+        url: String,
+        initial: reqwest::blocking::Response,
+        content_len: Option<u64>,
+        probe_complete: std::sync::Arc<AtomicBool>,
+        tee: Option<TeeWriter>,
+        eof_tracker: std::sync::Arc<StreamEofTracker>,
+    ) -> Self {
+        let rx = Self::spawn_reader(
+            client.clone(),
+            url.clone(),
+            0,
+            content_len,
+            Some(initial),
+            tee,
+            eof_tracker.clone(),
+            1,
+        );
         BufferedHttpStream {
             client,
             url,
@@ -338,6 +387,7 @@ impl BufferedHttpStream {
             pos: 0,
             finished: false,
             probe_complete,
+            eof_tracker,
         }
     }
 
@@ -352,6 +402,8 @@ impl BufferedHttpStream {
         content_len: Option<u64>,
         initial: Option<reqwest::blocking::Response>,
         tee: Option<TeeWriter>,
+        eof_tracker: std::sync::Arc<StreamEofTracker>,
+        reader_gen: u64,
     ) -> std::sync::mpsc::Receiver<io::Result<Vec<u8>>> {
         let (tx, rx) = std::sync::mpsc::sync_channel::<io::Result<Vec<u8>>>(READ_AHEAD_CHUNKS);
         std::thread::Builder::new()
@@ -384,6 +436,9 @@ impl BufferedHttpStream {
                                     Ok(r) => { resp = r; continue; }
                                     Err(e) => { if let Some(t) = tee.take() { t.abort(); } let _ = tx.send(Err(e)); break; }
                                 }
+                            }
+                            if content_len.is_some_and(|total| pos >= total) {
+                                eof_tracker.mark_completed(reader_gen);
                             }
                             // Genuine end of stream — finalize the write-through tee.
                             if let Some(t) = tee.take() { t.finalize(); }
@@ -458,7 +513,17 @@ impl Seek for BufferedHttpStream {
         // Restart the reader at `target`. Dropping the old receiver makes the
         // previous reader thread exit on its next send. Seek readers never tee
         // (a mid-file start would produce a non-contiguous cache file).
-        let rx = Self::spawn_reader(self.client.clone(), self.url.clone(), target, self.content_len, None, None);
+        let next_gen = self.eof_tracker.advance_generation();
+        let rx = Self::spawn_reader(
+            self.client.clone(),
+            self.url.clone(),
+            target,
+            self.content_len,
+            None,
+            None,
+            self.eof_tracker.clone(),
+            next_gen,
+        );
         *self.rx.lock().unwrap() = rx;
         self.chunk.clear();
         self.chunk_pos = 0;
@@ -523,6 +588,7 @@ pub struct StreamingAudioSource {
     /// Frame capacity of `decode_buf` and the spec it was built for.
     decode_cap: u64,
     decode_spec: Option<(u32, usize)>,
+    stream_eof_tracker: Option<std::sync::Arc<StreamEofTracker>>,
 }
 
 impl StreamingAudioSource {
@@ -565,10 +631,19 @@ impl StreamingAudioSource {
             _ => None,
         };
         let probe_complete = std::sync::Arc::new(AtomicBool::new(false));
-        let media_source = BufferedHttpStream::new(client, url, resp, content_len, probe_complete.clone(), tee);
+        let eof_tracker = std::sync::Arc::new(StreamEofTracker::new());
+        let media_source = BufferedHttpStream::new(
+            client,
+            url,
+            resp,
+            content_len,
+            probe_complete.clone(),
+            tee,
+            eof_tracker.clone(),
+        );
         // seekable=true so the StreamingAudioSource will attempt range-based seeks
         // after probe; probe_complete starts false so probe itself is linear.
-        let result = Self::probe_and_build(Box::new(media_source), content_len, true)?;
+        let result = Self::probe_and_build(Box::new(media_source), content_len, true, Some(eof_tracker))?;
         // Flip the probe flag: is_seekable() now returns true for this stream,
         // enabling user-initiated seeks without re-running yt-dlp.
         probe_complete.store(true, Ordering::Relaxed);
@@ -582,10 +657,15 @@ impl StreamingAudioSource {
             .map_err(|e| format!("Cache file open error: {e}"))?;
         let len = file.metadata().map(|m| m.len()).unwrap_or(0);
         let source = FileSource { file, len };
-        Self::probe_and_build(Box::new(source), None, true)
+        Self::probe_and_build(Box::new(source), None, true, None)
     }
 
-    fn probe_and_build(media_source: Box<dyn MediaSource>, fallback_content_len: Option<u64>, seekable: bool) -> Result<Self, String> {
+    fn probe_and_build(
+        media_source: Box<dyn MediaSource>,
+        fallback_content_len: Option<u64>,
+        seekable: bool,
+        stream_eof_tracker: Option<std::sync::Arc<StreamEofTracker>>,
+    ) -> Result<Self, String> {
         let content_len = media_source.byte_len().or(fallback_content_len);
         let mss = MediaSourceStream::new(media_source, Default::default());
         let hint = Hint::new();
@@ -634,12 +714,38 @@ impl StreamingAudioSource {
             decode_buf: None,
             decode_cap: 0,
             decode_spec: None,
+            stream_eof_tracker,
         })
     }
 
     /// Total byte size of the stream — used to compute Range offsets for seeking.
     pub fn content_len(&self) -> Option<u64> {
         self.content_len
+    }
+
+    /// Shared generation-scoped tracker that reports `is_clean_eof() == true` when the
+    /// active HTTP stream reader cleanly delivers all `content_len` bytes to EOF.
+    /// Returns `None` for local file sources.
+    pub fn stream_eof_clean_handle(&self) -> Option<std::sync::Arc<StreamEofTracker>> {
+        self.stream_eof_tracker.clone()
+    }
+
+    /// Exact track duration in seconds derived from the container's sample table.
+    pub fn duration_secs_f64(&self) -> Option<f64> {
+        let track = self.format.tracks().iter().find(|t| t.id == self.track_id)?;
+        let params = &track.codec_params;
+        let n_frames = params.n_frames?;
+        if let Some(tb) = params.time_base {
+            let t = tb.calc_time(n_frames);
+            let secs = t.seconds as f64 + t.frac;
+            if secs > 0.0 { Some(secs) } else { None }
+        } else {
+            let sr = params.sample_rate? as f64;
+            if sr <= 0.0 { None } else {
+                let secs = n_frames as f64 / sr;
+                if secs > 0.0 { Some(secs) } else { None }
+            }
+        }
     }
 
     /// Total track duration in whole seconds, derived from the container's sample
@@ -1055,7 +1161,7 @@ fn parse_extraction_output(stdout: &str) -> Option<(u64, String)> {
 
 #[cfg(test)]
 mod extraction_tests {
-    use super::{parse_extraction_output, run_extraction_command, EXTRACTION_TIMEOUT};
+    use super::{parse_extraction_output, run_extraction_command, StreamingAudioSource, EXTRACTION_TIMEOUT};
 
     #[test]
     fn parses_available_at_and_url() {
@@ -1192,6 +1298,92 @@ mod extraction_tests {
         let error = run_extraction_command(&mut command, Instant::now(), "test-expired").unwrap_err();
         assert!(error.contains("[stage=extract][code=extract-timeout] video_id=test-expired"));
     }
+
+    #[test]
+    fn streaming_audio_source_from_file_wav() {
+        let temp_dir = std::env::temp_dir();
+        let unique_name = format!(
+            "auricle_test_wav_{}_{}.wav",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let wav_path = temp_dir.join(unique_name);
+
+        // 2 seconds of 8000 Hz mono 16-bit PCM WAV
+        let sample_rate: u32 = 8000;
+        let duration_secs: u32 = 2;
+        let num_samples = sample_rate * duration_secs;
+        let data_len = num_samples * 2;
+        let file_len = 36 + data_len;
+
+        let write_res = (|| -> std::io::Result<()> {
+            let mut file = std::fs::File::create(&wav_path)?;
+            file.write_all(b"RIFF")?;
+            file.write_all(&file_len.to_le_bytes())?;
+            file.write_all(b"WAVE")?;
+            file.write_all(b"fmt ")?;
+            file.write_all(&16u32.to_le_bytes())?; // Subchunk1Size (16 for PCM)
+            file.write_all(&1u16.to_le_bytes())?;  // AudioFormat (1 = PCM)
+            file.write_all(&1u16.to_le_bytes())?;  // NumChannels (1 = mono)
+            file.write_all(&sample_rate.to_le_bytes())?;
+            let byte_rate = sample_rate * 2;
+            file.write_all(&byte_rate.to_le_bytes())?;
+            file.write_all(&2u16.to_le_bytes())?;  // BlockAlign (NumChannels * BitsPerSample / 8)
+            file.write_all(&16u16.to_le_bytes())?; // BitsPerSample
+            file.write_all(b"data")?;
+            file.write_all(&data_len.to_le_bytes())?;
+            let silence = vec![0u8; data_len as usize];
+            file.write_all(&silence)?;
+            file.flush()?;
+            Ok(())
+        })();
+
+        assert!(write_res.is_ok(), "Failed to write temp WAV file: {:?}", write_res);
+
+        let source_res = StreamingAudioSource::from_file(&wav_path);
+        assert!(source_res.is_ok(), "Failed to load WAV file: {:?}", source_res.err());
+
+        let mut source = source_res.unwrap();
+        let dur = source.duration_secs_f64();
+        assert!(dur.is_some(), "Expected duration_secs_f64() to be Some");
+        let dur_val = dur.unwrap();
+        assert!((dur_val - 2.0).abs() < 0.05, "Expected duration ~2.0s, got {}", dur_val);
+
+        assert!(source.stream_eof_clean_handle().is_none(), "Local file should have None stream_eof_clean_handle");
+
+        assert!(source.seek_to(0.5).is_ok(), "Seeking to 0.5s should succeed");
+        assert!(source.seek_to(5.0).is_err(), "Seeking to 5.0s (past EOF) should return Err");
+
+        let _ = std::fs::remove_file(&wav_path);
+    }
+
+    #[test]
+    fn stream_eof_tracker_ignores_stale_pre_seek_reader_completion() {
+        let tracker = super::StreamEofTracker::new();
+        assert!(!tracker.is_clean_eof());
+
+        // Seek advances active generation from 1 -> 2 before old reader #1 finishes.
+        let gen2 = tracker.advance_generation();
+        assert_eq!(gen2, 2);
+        tracker.mark_completed(1); // stale reader #1 finishes late
+        assert!(!tracker.is_clean_eof(), "stale reader completion must not mark seeked stream as EOF");
+
+        // Active reader #2 finishes -> clean EOF.
+        tracker.mark_completed(2);
+        assert!(tracker.is_clean_eof());
+
+        // Even later wake-up from reader #1 must not regress completed_gen below 2.
+        tracker.mark_completed(1);
+        assert!(tracker.is_clean_eof());
+
+        // Another seek advances to gen 3 -> resets clean EOF until gen 3 completes.
+        let gen3 = tracker.advance_generation();
+        assert_eq!(gen3, 3);
+        assert!(!tracker.is_clean_eof());
+    }
 }
 
 /// Pre-fetches a stream URL in a background thread (populates the URL cache).
@@ -1275,3 +1467,7 @@ pub fn download_url_to_file(url: &str, dest: &std::path::Path) -> Result<u64, St
     }
     Ok(pos)
 }
+
+
+
+
