@@ -91,6 +91,125 @@ jobs:
       #     github-artifact-id: ${{ steps.upload.outputs.artifact-id }}
       #     wait-for-completion: true
 
+      - name: Fetch matching Android release APKs (if available)
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid release version: ${VERSION}"
+            exit 1
+          fi
+
+          ANDROID_REPO="californiaAlmonds/auricle-android"
+          TAG="v${VERSION}"
+          rm -rf dist/android-staging
+          mkdir -p dist/android-staging
+
+          # Query public release metadata unauthenticated (avoids cross-repo GITHUB_TOKEN 403s).
+          http_code=$(curl -sS --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 30 \
+            -H "Accept: application/vnd.github+json" \
+            -H "User-Agent: auricle-release-sync" \
+            -o dist/android-staging/release.json \
+            -w '%{http_code}' \
+            "https://api.github.com/repos/${ANDROID_REPO}/releases/tags/${TAG}")
+
+          if [ "$http_code" = "404" ]; then
+            echo "::warning::No matching ${TAG} release found in ${ANDROID_REPO}; publishing Windows-only release."
+            rm -rf dist/android-staging
+            exit 0
+          fi
+          if [ "$http_code" != "200" ]; then
+            api_msg=$(jq -r '.message // empty' dist/android-staging/release.json 2>/dev/null | tr -d '\r' || true)
+            echo "::error::GitHub API returned HTTP ${http_code} querying ${ANDROID_REPO} ${TAG}${api_msg:+ (${api_msg})}."
+            rm -rf dist/android-staging
+            exit 1
+          fi
+
+          is_draft=$(jq -r '.draft' dist/android-staging/release.json | tr -d '\r')
+          is_pre=$(jq -r '.prerelease' dist/android-staging/release.json | tr -d '\r')
+          if [ "$is_draft" != "false" ] || [ "$is_pre" != "false" ]; then
+            echo "::warning::${ANDROID_REPO} ${TAG} is draft=${is_draft} prerelease=${is_pre}; skipping Android APK sync."
+            rm -rf dist/android-staging
+            exit 0
+          fi
+
+          sums_url=$(jq -r '.assets[] | select(.name == "SHA256SUMS.txt") | .browser_download_url' dist/android-staging/release.json | tr -d '\r' | head -n 1)
+          mapfile -t apk_lines < <(jq -r --arg v "$VERSION" \
+            '.assets[] | select(.name | startswith("auricle-android-" + $v + "-") and endswith(".apk")) | "\(.name)\t\(.browser_download_url)"' \
+            dist/android-staging/release.json | tr -d '\r')
+
+          if [ "${#apk_lines[@]}" -eq 0 ]; then
+            echo "::warning::${ANDROID_REPO} ${TAG} contained no auricle-android-${VERSION}-*.apk assets; publishing Windows-only release."
+            rm -rf dist/android-staging
+            exit 0
+          fi
+          if [ -z "$sums_url" ]; then
+            echo "::error::${ANDROID_REPO} ${TAG} is missing SHA256SUMS.txt; refusing to bundle unverified APKs."
+            rm -rf dist/android-staging
+            exit 1
+          fi
+
+          curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 15 --max-time 60 \
+            -o dist/android-staging/SHA256SUMS.txt "$sums_url"
+          tr -d '\r' < dist/android-staging/SHA256SUMS.txt > dist/android-staging/SHA256SUMS.lf
+
+          # Download every matching APK asset safely using basename validation
+          downloaded_names=()
+          for entry in "${apk_lines[@]}"; do
+            apk_name="${entry%%$'\t'*}"
+            apk_url="${entry#*$'\t'}"
+            if [[ ! "$apk_name" =~ ^auricle-android-[0-9A-Za-z._-]+\.apk$ ]]; then
+              echo "::error::Rejected unexpected Android asset name: ${apk_name}"
+              exit 1
+            fi
+            curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 15 --max-time 180 \
+              -o "dist/android-staging/${apk_name}" "$apk_url"
+            downloaded_names+=("$apk_name")
+          done
+
+          # Verify every APK listed in SHA256SUMS.txt is present in the downloaded set (prevents partial uploads)
+          mapfile -t listed_apks < <(awk 'NF == 2 { f = $2; sub(/^\*/, "", f); if (f ~ /\.apk$/) print f }' dist/android-staging/SHA256SUMS.lf)
+          if [ "${#listed_apks[@]}" -eq 0 ]; then
+            echo "::error::SHA256SUMS.txt contains no APK checksum entries."
+            exit 1
+          fi
+          for listed in "${listed_apks[@]}"; do
+            if [ ! -f "dist/android-staging/${listed}" ]; then
+              echo "::error::SHA256SUMS.txt lists ${listed}, but it was not downloaded from ${ANDROID_REPO} ${TAG}."
+              exit 1
+            fi
+          done
+
+          # Verify SHA-256 of every downloaded APK (unique NF==2 match via ENVIRON) before staging into dist/
+          for apk_name in "${downloaded_names[@]}"; do
+            apk_path="dist/android-staging/${apk_name}"
+            expected=$(APK_NAME="$apk_name" awk '
+              NF == 2 {
+                f = $2; sub(/^\*/, "", f);
+                if (f == ENVIRON["APK_NAME"]) { count++; hash = tolower($1) }
+              }
+              END { if (count == 1) print hash }
+            ' dist/android-staging/SHA256SUMS.lf)
+            if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::Missing or duplicate SHA-256 entry for ${apk_name} in SHA256SUMS.txt."
+              exit 1
+            fi
+            actual=$(sha256sum "$apk_path" | awk '{ print tolower($1) }')
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::SHA-256 mismatch for ${apk_name}: expected ${expected}, got ${actual}."
+              exit 1
+            fi
+            echo "Verified ${apk_name} (${actual})."
+          done
+
+          # Stage into dist/ only after all APKs pass verification
+          for apk_name in "${downloaded_names[@]}"; do
+            cp "dist/android-staging/${apk_name}" "dist/${apk_name}"
+          done
+          rm -rf dist/android-staging
+
       - name: Publish stable release
         uses: softprops/action-gh-release@v2
         with:
@@ -102,6 +221,7 @@ jobs:
           files: |
             dist/auricle-${{ steps.ver.outputs.version }}-portable.zip
             dist/auricle-${{ steps.ver.outputs.version }}-setup.exe
+            dist/auricle-android-${{ steps.ver.outputs.version }}-*.apk
 
       # ── Scoop: update manifest in the bucket repo ────────────────────────────
       - name: Publish Scoop manifest
