@@ -264,4 +264,6 @@ jobs:
           $V = "${{ steps.ver.outputs.version }}"
           $url = "https://github.com/californiaAlmonds/auricle/releases/download/v$V/auricle-$V-setup.exe"
           Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
-          ./wingetcreate.exe update californiaAlmonds.Auricle --version $V --urls "$url" --submit --token "$env:WINGET_TOKEN"
+          # Inno Setup stubs have an x86 PE header even for x64compatible installers,
+          # so pass |x64 explicitly to match the manifest's x64 installer node.
+          ./wingetcreate.exe update californiaAlmonds.Auricle --version $V --urls "$url|x64" --submit --token "$env:WINGET_TOKEN"
